@@ -86,6 +86,8 @@ let v2: V2Handle | null = null;
 let startupStage = 'history-initialization';
 try {
   app = createLocalServer({
+    // The default serves the operator's own machine only; a remote deployment names its interface with HLM_HOST (Pterodactyl containers must answer on 0.0.0.0).
+    host: process.env.HLM_HOST?.trim() || '127.0.0.1',
     fixtureTickMs,
     liveMode: live,
     activeCandleInstrumentIds,
