@@ -20,6 +20,7 @@ import { rangeRow, switchRow, note, togglePanel, checkRow, heading, selectRow, n
 import { SIZE_MAX_USD } from './sizes.ts';
 import { GROUP_TITLES, SHORTCUTS, togglePatch, type Feature, type ShortcutGroup } from './shortcuts.ts';
 import { buildLayoutsPanel, type LayoutsPanelState, type PaneHost } from './layouts/panel.ts';
+import { buildDrawingsPanel } from './drawings/panel.ts';
 import { clampGoTo, formatDateTime, parseDateTime } from './price-line.ts';
 import { ABSORPTION_LIMITS, type AbsorptionSettings } from './absorption.ts';
 import { BUBBLE_LIMITS, BUBBLE_MINIMUMS, type BubbleSettings } from './prints.ts';
@@ -149,6 +150,9 @@ export class Toolbar {
   flow: FlowBook | null = null;
   /** The VWAP lines (vwap/), set in its panel. */
   #vwap = el('button', { class: 'led-btn', textContent: t('VWAP'), tip: HELP.vwap.tip });
+  /** The Drawings panel's button: the trader's own lines on the map (drawings/). */
+  #drawKey = settingsKey(t('Drawings'));
+  #drawPanel: { render: (build: (tools: HTMLElement, body: HTMLElement) => void) => void } | null = null;
   #vwapPanel: Panel | null = null;
   /** What the page knows of the whale sums (set by the page), for the VWAP panel. */
   whaleInfo: () => WhaleInfo | null = () => null;
@@ -274,6 +278,10 @@ export class Toolbar {
     this.#settingsKeys.vwap.onclick = () => {
       const build = (tools: HTMLElement, body: HTMLElement): void => buildVwapPanel(this.store, tools, body, () => this.#vwapPanel?.render(build), this.whaleInfo);
       this.#vwapPanel = this.#track(togglePanel(this.#settingsKeys.vwap, { title: t('VWAP'), width: 420, align: 'left', stays: true, onClose: () => { this.#vwapPanel = null; if (this.store.state.vwapAnchoring) this.store.set({ vwapAnchoring: false }); } }, build), build);
+    };
+    this.#drawKey.onclick = () => {
+      const build = (tools: HTMLElement, body: HTMLElement): void => buildDrawingsPanel(this.store, tools, body, () => this.#drawPanel?.render(build));
+      this.#drawPanel = this.#track(togglePanel(this.#drawKey, { title: t('Drawings'), width: 420, align: 'left', stays: true, onClose: () => { this.#drawPanel = null; if (this.store.state.drawTool) this.store.set({ drawTool: '' }); } }, build), build);
     };
     this.#vwap.onclick = () => this.store.set(togglePatch(this.store.state, 'vwap'));
     this.#settingsKeys.keyLevels.onclick = () => {
@@ -469,7 +477,7 @@ export class Toolbar {
         deck('time', t('Time'), [this.#timeframes], inCorner ? [] : [this.#recenter]),
         deck('heat', t('Heatmap'), [this.#source, this.#layer, this.#heat.style], [this.#heatScale, this.#heat.auto, this.#heat.smooth]),
         deck('panels', t('Panels'), [this.#toggles]),
-        deck('chart', t('Chart'), [sp.footprint, sp.trades, sp.liquidations, sp.absorption], [sp.traded, sp.keyLevels, sp.vwap, this.#range]),
+        deck('chart', t('Chart'), [sp.footprint, sp.trades, sp.liquidations, sp.absorption], [sp.traded, sp.keyLevels, sp.vwap, this.#drawKey, this.#range]),
         deck('alerts', t('Alerts'), [this.#alertSplits!.highlights], [this.#alertSplits!.sound]),
         deck('tools', 'LiquidityMapperFast', [this.#guide, this.#shot], [this.#author, this.#install.root, ...(host ? [] : [this.#zone, this.#language, this.#theme, this.#glass, this.#status])]),
         this.#notice.root, this.#coinNotice);
@@ -536,7 +544,7 @@ export class Toolbar {
     [...this.#timeframes.children].forEach(b => b.classList.toggle('on', b.textContent === state.timeframe));
     setValue(this.#layer, state.layer);
     this.#toggleButtons.forEach((b, i) => b.classList.toggle('on', state.show[PANE_TOGGLES[i]![0]]));
-    lamp(this.#heat.auto, state.heat.auto); lamp(this.#trades, state.show.bubbles); lamp(this.#liquidations, state.liquidations.on); lamp(this.#absorption, state.absorption.on); lamp(this.#highlights, state.highlight.on); lamp(this.#traded, state.show.traded); lamp(this.#keyLevels, state.keyLevels.on); lamp(this.#vwap, state.vwap.on); lamp(this.#footprint, state.show.footprint); lamp(this.#range, state.rangeTool || state.range !== null); lamp(this.#rangeCorner, state.rangeTool || state.range !== null);
+    lamp(this.#heat.auto, state.heat.auto); lamp(this.#trades, state.show.bubbles); lamp(this.#liquidations, state.liquidations.on); lamp(this.#absorption, state.absorption.on); lamp(this.#highlights, state.highlight.on); lamp(this.#traded, state.show.traded); lamp(this.#keyLevels, state.keyLevels.on); lamp(this.#vwap, state.vwap.on); lamp(this.#footprint, state.show.footprint); lamp(this.#drawKey, state.drawTool !== ''); lamp(this.#range, state.rangeTool || state.range !== null); lamp(this.#rangeCorner, state.rangeTool || state.range !== null);
     if (this.#awake.checked !== state.keepAwake) this.#awake.checked = state.keepAwake;
     lamp(this.#glass, state.material === 'glass');
     if (this.#glassSwitch.checked !== (state.material === 'glass')) this.#glassSwitch.checked = state.material === 'glass';

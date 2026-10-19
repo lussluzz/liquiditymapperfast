@@ -1413,5 +1413,22 @@
  "No market of this coin has candles the page can read.": "Nessun mercato di questa moneta ha candele che la pagina possa leggere.",
  "From the {minutes}-minute candles of {market}, each one's volume spread evenly over its range: one market, and an estimate, marked ≈. On six recorded days the value area high and low mostly came within a row or two of the recording's (the low once 4 and once 10 rows off); where two prices traded almost the same, the point of control can sit on the other.": "Dalle candele da {minutes} minuti di {market}, con il volume di ciascuna distribuito uniformemente sul suo intervallo: un mercato e una stima, segnata con ≈. In sei giorni registrati il massimo e il minimo dell'area di valore sono risultati per lo più a una o due righe da quelli della registrazione (il minimo una volta a 4 e una a 10 righe); dove due prezzi hanno scambiato quasi lo stesso, il punto di controllo può cadere sull'altro.",
  "A day, week or session is drawn only when nine in ten of it is held: of the candles' bars, or of the recording's trades, estimated from each venue's volume while it was recorded. Whether a point of control was traded through is read from the candles of the market on the chart.": "Un giorno, settimana o sessione è disegnato solo quando se ne hanno nove decimi: delle candele, o degli scambi della registrazione, stimati dal volume di ciascuna borsa mentre era registrata. Se un punto di controllo è stato attraversato si legge dalle candele del mercato sul grafico.",
- "Days, weeks and sessions come from the recording, as far back as it keeps trades (a week; a day on a page that reads the exchanges itself), or from the candles of the most traded market: an estimate, marked ≈, that reaches back months.": "Giorni, settimane e sessioni vengono dalla registrazione, fin dove conserva gli scambi (una settimana; un giorno in una pagina che legge da sé le borse), o dalle candele del mercato più scambiato: una stima, segnata con ≈, che risale di mesi."
+ "Days, weeks and sessions come from the recording, as far back as it keeps trades (a week; a day on a page that reads the exchanges itself), or from the candles of the most traded market: an estimate, marked ≈, that reaches back months.": "Giorni, settimane e sessioni vengono dalla registrazione, fin dove conserva gli scambi (una settimana; un giorno in una pagina che legge da sé le borse), o dalle candele del mercato più scambiato: una stima, segnata con ≈, che risale di mesi.",
+ "Drawings": "Disegni",
+ "Horizontal line": "Linea orizzontale",
+ "Trend line": "Linea di tendenza",
+ "Fib retracement": "Ritracciamento di Fibonacci",
+ "Clear drawings": "Cancella i disegni",
+ "Remove this drawing": "Rimuovi questo disegno",
+ "Removes every drawing at once.": "Rimuove tutti i disegni in una volta.",
+ "Escape puts the tool down.": "Escape posa lo strumento.",
+ "Click the map at the price the line holds.": "Fai clic sulla mappa al prezzo dove sta la linea.",
+ "Press on the map where the drawing begins, drag to where it ends.": "Premi sulla mappa dove inizia il disegno, trascina dove finisce.",
+ "Arm a tool, then lay the line on the map.": "Attiva uno strumento, poi stendi la linea sulla mappa.",
+ "No drawings yet.": "Ancora nessun disegno.",
+ "Point at a drawing and press Delete to remove it; Escape puts the tool down.": "Punta un disegno e premi Canc per rimuoverlo; Escape posa lo strumento.",
+ "A line across the map at one price.": "Una linea attraverso la mappa a un solo prezzo.",
+ "A line from one point of the map to another.": "Una linea da un punto della mappa a un altro.",
+ "The retracement levels between two prices.": "I livelli di ritracciamento tra due prezzi.",
+ "On the map": "Sulla mappa"
 }

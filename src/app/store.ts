@@ -8,6 +8,7 @@ import { resolveThemeId } from './theme.ts';
 import { readStatOptions, type StatOptions } from './stat-options.ts';
 import { readHighlight, type HighlightOptions } from './anomaly.ts';
 import { DEFAULT_SOUNDS, readSounds, type SoundSettings } from './sound/rules.ts';
+import { readDrawings, type Drawing, type DrawTool } from './drawings.ts';
 import { readCvd, type CvdSettings } from './cvd/settings.ts';
 import { readAbsorption, type AbsorptionSettings } from './absorption.ts';
 import { readBubbles, type BubbleSettings } from './prints.ts';
@@ -102,6 +103,10 @@ export interface AppState {
   vwap: VwapSettings;
   /** The next click on the map places a VWAP anchor (not saved; arming the Range tool ends it). */
   vwapAnchoring: boolean;
+  /** The trader's own drawings on the map: horizontal lines, trend lines, Fibonacci retracements (drawings.ts). */
+  drawings: Drawing[];
+  /** The armed drawing tool: the next drag on the map lays the line (not saved; a finished or cancelled gesture disarms). */
+  drawTool: DrawTool;
   /** The footprint's own settings (whether it shows is `show.footprint`; its imbalance options are `barStatOptions`). */
   footprint: FootprintSettings;
   /** The Delta pane's settings: bars or CVD candles, where the CVD restarts, divergences. */
@@ -165,7 +170,7 @@ export interface AppState {
 
 type Listener = (state: AppState, changed: ReadonlySet<keyof AppState>) => void;
 
-const PERSISTED: (keyof AppState)[] = ['keepAwake', 'material', 'timeZone', 'timeframe', 'layer', 'show', 'cvd', 'heatmapSource', 'disabledVenues', 'scope', 'highlight', 'absorption', 'tradeBubbles', 'liquidations', 'keyLevels', 'vwap', 'footprint', 'delta', 'sounds', 'heat', 'lt', 'barStats', 'barStatOptions', 'grouping', 'ladderMode', 'ladderShow', 'ladderCurves', 'pullStack', 'ladderVenue', 'ladderVenues', 'theme', 'themePicked', 'defaultsRev', 'traded', 'oiMarkets', 'lsMetric', 'customMarkets'];
+const PERSISTED: (keyof AppState)[] = ['keepAwake', 'material', 'timeZone', 'timeframe', 'layer', 'show', 'cvd', 'heatmapSource', 'disabledVenues', 'scope', 'highlight', 'absorption', 'tradeBubbles', 'liquidations', 'keyLevels', 'vwap', 'drawings', 'footprint', 'delta', 'sounds', 'heat', 'lt', 'barStats', 'barStatOptions', 'grouping', 'ladderMode', 'ladderShow', 'ladderCurves', 'pullStack', 'ladderVenue', 'ladderVenues', 'theme', 'themePicked', 'defaultsRev', 'traded', 'oiMarkets', 'lsMetric', 'customMarkets'];
 function readSaved(): Partial<AppState> {
   try { const raw = window.localStorage.getItem('hlm-app-v2'); return raw ? JSON.parse(raw) as Partial<AppState> : {}; } catch { return {}; }
 }
@@ -175,7 +180,7 @@ export const LADDER_CURVES = [0, 3, 5, 8] as const;
 export type LadderCurves = (typeof LADDER_CURVES)[number];
 
 /** The settings a saved layout holds: what the chart shows and how, never the coin, the venues, the theme, the time zone or the sounds. */
-export const LAYOUT_KEYS = ['timeframe', 'layer', 'show', 'cvd', 'scope', 'highlight', 'absorption', 'tradeBubbles', 'liquidations', 'keyLevels', 'vwap', 'footprint', 'delta',
+export const LAYOUT_KEYS = ['timeframe', 'layer', 'show', 'cvd', 'scope', 'highlight', 'absorption', 'tradeBubbles', 'liquidations', 'keyLevels', 'vwap', 'drawings', 'footprint', 'delta',
   'heat', 'lt', 'barStats', 'barStatOptions', 'grouping', 'ladderMode', 'ladderShow', 'ladderCurves', 'pullStack', 'traded', 'oiMarkets', 'lsMetric', 'customMarkets'] as const satisfies readonly (keyof AppState)[];
 export type Settings = Pick<AppState, (typeof LAYOUT_KEYS)[number]>;
 
@@ -209,6 +214,7 @@ export function readSettings(saved: Partial<Record<keyof AppState, unknown>>): S
     cvd: readCvd(saved.cvd), highlight: readHighlight(saved.highlight), absorption: readAbsorption(saved.absorption), tradeBubbles: readBubbles(saved.tradeBubbles),
     liquidations: readLiquidations(saved.liquidations), keyLevels: readKeyLevels(saved.keyLevels), vwap: readVwap(saved.vwap), footprint: readFootprint(saved.footprint),
     delta: readDelta(saved.delta), lsMetric: (LS_METRICS as readonly unknown[]).includes(saved.lsMetric) ? saved.lsMetric as LsMetric : 'accounts', pullStack: readPullWindow(saved.pullStack), traded: readTraded(saved.traded),
+    drawings: readDrawings(saved.drawings),
     scope: saved.scope === 'spot' || saved.scope === 'perp' ? saved.scope : 'all',
     heat: { ...heat, style: HEAT_STYLES.some(style => style.id === heat.style) ? heat.style : 'size', smooth: heat.smooth === 'off' ? 'off' : 'auto', contrast: clampContrast(heat.contrast) },
     lt: { ...sameShape(LT_DEFAULTS, saved.lt), view: lt?.view === 'imbalance' ? 'imbalance' : 'lines' },
@@ -238,7 +244,7 @@ export function initialState(): AppState {
   const saved = readSaved();
   const state: AppState = {
     connected: false, status: t('connecting'), markets: [], marketId: '', seriesInstrument: '', mark: { price: 0, asOf: 0 }, levels: null, bookGone: {},
-    layers: {}, candles: [], oi: [], oiInstrument: '', oiParts: [], oiPrice: 0, sounds: { ...DEFAULT_SOUNDS }, soundState: 'locked', lastSound: 0, vwapAnchoring: false, heatmapSource: 'aggregated', disabledVenues: [],
+    layers: {}, candles: [], oi: [], oiInstrument: '', oiParts: [], oiPrice: 0, sounds: { ...DEFAULT_SOUNDS }, soundState: 'locked', lastSound: 0, vwapAnchoring: false, heatmapSource: 'aggregated', disabledVenues: [], drawTool: '' as DrawTool,
     ladderVenue: '', ladderVenues: [], replay: null, theme: DEFAULT_THEME, themePicked: false, defaultsRev: DEFAULTS_REV, material: 'solid', followLive: true, keepAwake: false, timeZone: 'local', hover: null, range: null, rangeTool: false,
     ...saved, ...readSettings(saved),
   };

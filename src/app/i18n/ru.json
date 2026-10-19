@@ -1427,5 +1427,22 @@
  "No market of this coin has candles the page can read.": "Ни у одного рынка этой монеты нет свечей, которые страница может прочитать.",
  "From the {minutes}-minute candles of {market}, each one's volume spread evenly over its range: one market, and an estimate, marked ≈. On six recorded days the value area high and low mostly came within a row or two of the recording's (the low once 4 and once 10 rows off); where two prices traded almost the same, the point of control can sit on the other.": "По {minutes}-минутным свечам {market}, объём каждой распределён равномерно по её диапазону: один рынок и оценка, помеченная ≈. За шесть записанных дней верх и низ зоны стоимости обычно были в одной-двух строках от записанных (низ однажды в 4 и однажды в 10 строках); где по двум ценам наторговали почти одинаково, точка контроля может оказаться на другой.",
  "A day, week or session is drawn only when nine in ten of it is held: of the candles' bars, or of the recording's trades, estimated from each venue's volume while it was recorded. Whether a point of control was traded through is read from the candles of the market on the chart.": "День, неделя или сессия рисуются, только если есть девять десятых из них: свечей или сделок записи, оценённых по объёму каждой площадки, пока она записывалась. Проходила ли цена через точку контроля, читается по свечам рынка на графике.",
- "Days, weeks and sessions come from the recording, as far back as it keeps trades (a week; a day on a page that reads the exchanges itself), or from the candles of the most traded market: an estimate, marked ≈, that reaches back months.": "Дни, недели и сессии берутся из записи, насколько она хранит сделки (неделя; день на странице, которая сама читает биржи), или из свечей самого торгуемого рынка: это оценка, помеченная ≈, на месяцы назад."
+ "Days, weeks and sessions come from the recording, as far back as it keeps trades (a week; a day on a page that reads the exchanges itself), or from the candles of the most traded market: an estimate, marked ≈, that reaches back months.": "Дни, недели и сессии берутся из записи, насколько она хранит сделки (неделя; день на странице, которая сама читает биржи), или из свечей самого торгуемого рынка: это оценка, помеченная ≈, на месяцы назад.",
+ "Drawings": "Рисунки",
+ "Horizontal line": "Горизонтальная линия",
+ "Trend line": "Линия тренда",
+ "Fib retracement": "Уровни Фибоначчи",
+ "Clear drawings": "Очистить рисунки",
+ "Remove this drawing": "Убрать этот рисунок",
+ "Removes every drawing at once.": "Убирает все рисунки разом.",
+ "Escape puts the tool down.": "Escape откладывает инструмент.",
+ "Click the map at the price the line holds.": "Щёлкните по карте на цене, где ляжет линия.",
+ "Press on the map where the drawing begins, drag to where it ends.": "Нажмите на карте, где рисунок начинается, и протяните туда, где он кончается.",
+ "Arm a tool, then lay the line on the map.": "Выберите инструмент и проведите линию по карте.",
+ "No drawings yet.": "Рисунков пока нет.",
+ "Point at a drawing and press Delete to remove it; Escape puts the tool down.": "Наведите на рисунок и нажмите Delete, чтобы убрать его; Escape откладывает инструмент.",
+ "A line across the map at one price.": "Линия через карту на одной цене.",
+ "A line from one point of the map to another.": "Линия от одной точки карты до другой.",
+ "The retracement levels between two prices.": "Уровни коррекции между двумя ценами.",
+ "On the map": "На карте"
 }

@@ -1432,5 +1432,22 @@
  "No market of this coin has candles the page can read.": "Жоден ринок цієї монети не має свічок, які сторінка може прочитати.",
  "From the {minutes}-minute candles of {market}, each one's volume spread evenly over its range: one market, and an estimate, marked ≈. On six recorded days the value area high and low mostly came within a row or two of the recording's (the low once 4 and once 10 rows off); where two prices traded almost the same, the point of control can sit on the other.": "За {minutes}-хвилинними свічками {market}, обсяг кожної розподілено рівномірно по її діапазону: один ринок і оцінка, позначена ≈. За шість записаних днів верх і низ зони вартості здебільшого були за один-два рядки від записаних (низ одного разу за 4 і одного разу за 10 рядків); де за двома цінами наторгували майже однаково, точка контролю може опинитися на іншій.",
  "A day, week or session is drawn only when nine in ten of it is held: of the candles' bars, or of the recording's trades, estimated from each venue's volume while it was recorded. Whether a point of control was traded through is read from the candles of the market on the chart.": "День, тиждень або сесія малюються, лише якщо є дев'ять десятих із них: свічок або угод запису, оцінених за обсягом кожного майданчика, поки він записувався. Чи проходила ціна через точку контролю, визначається за свічками ринку на графіку.",
- "Days, weeks and sessions come from the recording, as far back as it keeps trades (a week; a day on a page that reads the exchanges itself), or from the candles of the most traded market: an estimate, marked ≈, that reaches back months.": "Дні, тижні й сесії беруться із запису, наскільки він зберігає угоди (тиждень; день на сторінці, яка сама читає біржі), або зі свічок найбільш торгованого ринку: це оцінка, позначена ≈, на місяці назад."
+ "Days, weeks and sessions come from the recording, as far back as it keeps trades (a week; a day on a page that reads the exchanges itself), or from the candles of the most traded market: an estimate, marked ≈, that reaches back months.": "Дні, тижні й сесії беруться із запису, наскільки він зберігає угоди (тиждень; день на сторінці, яка сама читає біржі), або зі свічок найбільш торгованого ринку: це оцінка, позначена ≈, на місяці назад.",
+ "Drawings": "Малюнки",
+ "Horizontal line": "Горизонтальна лінія",
+ "Trend line": "Лінія тренду",
+ "Fib retracement": "Рівні Фібоначчі",
+ "Clear drawings": "Очистити малюнки",
+ "Remove this drawing": "Прибрати цей малюнок",
+ "Removes every drawing at once.": "Прибирає всі малюнки за раз.",
+ "Escape puts the tool down.": "Escape відкладає інструмент.",
+ "Click the map at the price the line holds.": "Клацніть на карті на ціні, де ляже лінія.",
+ "Press on the map where the drawing begins, drag to where it ends.": "Натисніть на карті, де малюнок починається, і протягніть туди, де він кінчається.",
+ "Arm a tool, then lay the line on the map.": "Виберіть інструмент і проведіть лінію по карті.",
+ "No drawings yet.": "Малюнків поки немає.",
+ "Point at a drawing and press Delete to remove it; Escape puts the tool down.": "Наведіть на малюнок і натисніть Delete, щоб прибрати його; Escape відкладає інструмент.",
+ "A line across the map at one price.": "Лінія через карту на одній ціні.",
+ "A line from one point of the map to another.": "Лінія від однієї точки карти до іншої.",
+ "The retracement levels between two prices.": "Рівні корекції між двома цінами.",
+ "On the map": "На карті"
 }

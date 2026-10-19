@@ -1413,5 +1413,22 @@
  "No market of this coin has candles the page can read.": "Aucun marché de cette crypto n'a de bougies que la page puisse lire.",
  "From the {minutes}-minute candles of {market}, each one's volume spread evenly over its range: one market, and an estimate, marked ≈. On six recorded days the value area high and low mostly came within a row or two of the recording's (the low once 4 and once 10 rows off); where two prices traded almost the same, the point of control can sit on the other.": "Des bougies de {minutes} minutes de {market}, le volume de chacune réparti également sur son étendue : un seul marché, et une estimation, marquée ≈. Sur six jours enregistrés, le haut et le bas de la zone de valeur se sont le plus souvent trouvés à une ou deux lignes de ceux de l'enregistrement (le bas une fois à 4 et une fois à 10 lignes) ; là où deux prix ont presque autant échangé, le point de contrôle peut tomber sur l'autre.",
  "A day, week or session is drawn only when nine in ten of it is held: of the candles' bars, or of the recording's trades, estimated from each venue's volume while it was recorded. Whether a point of control was traded through is read from the candles of the market on the chart.": "Un jour, une semaine ou une session n'est tracé que si l'on en détient neuf dixièmes : des bougies, ou des transactions de l'enregistrement, estimées d'après le volume de chaque plateforme pendant qu'elle était enregistrée. Le passage du prix par un point de contrôle est lu dans les bougies du marché affiché.",
- "Days, weeks and sessions come from the recording, as far back as it keeps trades (a week; a day on a page that reads the exchanges itself), or from the candles of the most traded market: an estimate, marked ≈, that reaches back months.": "Les jours, semaines et sessions viennent de l'enregistrement, aussi loin qu'il garde les transactions (une semaine ; une journée sur une page qui lit elle-même les plateformes), ou des bougies du marché le plus échangé : une estimation, marquée ≈, qui remonte sur des mois."
+ "Days, weeks and sessions come from the recording, as far back as it keeps trades (a week; a day on a page that reads the exchanges itself), or from the candles of the most traded market: an estimate, marked ≈, that reaches back months.": "Les jours, semaines et sessions viennent de l'enregistrement, aussi loin qu'il garde les transactions (une semaine ; une journée sur une page qui lit elle-même les plateformes), ou des bougies du marché le plus échangé : une estimation, marquée ≈, qui remonte sur des mois.",
+ "Drawings": "Dessins",
+ "Horizontal line": "Ligne horizontale",
+ "Trend line": "Ligne de tendance",
+ "Fib retracement": "Retracement de Fibonacci",
+ "Clear drawings": "Effacer les dessins",
+ "Remove this drawing": "Supprimer ce dessin",
+ "Removes every drawing at once.": "Supprime tous les dessins d'un coup.",
+ "Escape puts the tool down.": "Échap repose l'outil.",
+ "Click the map at the price the line holds.": "Cliquez la carte au prix où reste la ligne.",
+ "Press on the map where the drawing begins, drag to where it ends.": "Appuyez sur la carte où le dessin commence, glissez jusqu'où il finit.",
+ "Arm a tool, then lay the line on the map.": "Armez un outil, puis posez la ligne sur la carte.",
+ "No drawings yet.": "Aucun dessin pour l'instant.",
+ "Point at a drawing and press Delete to remove it; Escape puts the tool down.": "Visez un dessin et appuyez sur Suppr pour l'enlever ; Échap repose l'outil.",
+ "A line across the map at one price.": "Une ligne à travers la carte à un seul prix.",
+ "A line from one point of the map to another.": "Une ligne d'un point de la carte à un autre.",
+ "The retracement levels between two prices.": "Les niveaux de retracement entre deux prix.",
+ "On the map": "Sur la carte"
 }

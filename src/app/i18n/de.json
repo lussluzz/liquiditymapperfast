@@ -1399,5 +1399,22 @@
  "No market of this coin has candles the page can read.": "Kein Markt dieses Coins hat Kerzen, die die Seite lesen kann.",
  "From the {minutes}-minute candles of {market}, each one's volume spread evenly over its range: one market, and an estimate, marked ≈. On six recorded days the value area high and low mostly came within a row or two of the recording's (the low once 4 and once 10 rows off); where two prices traded almost the same, the point of control can sit on the other.": "Aus den {minutes}-Minuten-Kerzen von {market}, das Volumen jeder Kerze gleichmäßig über ihre Spanne verteilt: ein Markt und eine Schätzung, mit ≈ markiert. An sechs aufgezeichneten Tagen lagen Value Area High und Low meist eine oder zwei Zeilen von denen der Aufzeichnung entfernt (das Low einmal 4 und einmal 10 Zeilen); wo zwei Preise fast gleich viel gehandelt wurden, kann der Point of Control auf dem anderen liegen.",
  "A day, week or session is drawn only when nine in ten of it is held: of the candles' bars, or of the recording's trades, estimated from each venue's volume while it was recorded. Whether a point of control was traded through is read from the candles of the market on the chart.": "Ein Tag, eine Woche oder Session wird nur gezeichnet, wenn neun Zehntel davon vorliegen: von den Kerzen, oder von den Trades der Aufzeichnung, geschätzt aus dem Volumen jeder Börse, während sie aufgezeichnet wurde. Ob durch einen Point of Control gehandelt wurde, wird aus den Kerzen des Marktes auf dem Chart gelesen.",
- "Days, weeks and sessions come from the recording, as far back as it keeps trades (a week; a day on a page that reads the exchanges itself), or from the candles of the most traded market: an estimate, marked ≈, that reaches back months.": "Tage, Wochen und Sessions kommen aus der Aufzeichnung, so weit sie Trades aufbewahrt (eine Woche; einen Tag auf einer Seite, die die Börsen selbst liest), oder aus den Kerzen des meistgehandelten Marktes: eine Schätzung, mit ≈ markiert, die Monate zurückreicht."
+ "Days, weeks and sessions come from the recording, as far back as it keeps trades (a week; a day on a page that reads the exchanges itself), or from the candles of the most traded market: an estimate, marked ≈, that reaches back months.": "Tage, Wochen und Sessions kommen aus der Aufzeichnung, so weit sie Trades aufbewahrt (eine Woche; einen Tag auf einer Seite, die die Börsen selbst liest), oder aus den Kerzen des meistgehandelten Marktes: eine Schätzung, mit ≈ markiert, die Monate zurückreicht.",
+ "Drawings": "Zeichnungen",
+ "Horizontal line": "Horizontale Linie",
+ "Trend line": "Trendlinie",
+ "Fib retracement": "Fibonacci-Retracement",
+ "Clear drawings": "Zeichnungen löschen",
+ "Remove this drawing": "Diese Zeichnung entfernen",
+ "Removes every drawing at once.": "Entfernt alle Zeichnungen auf einmal.",
+ "Escape puts the tool down.": "Escape legt das Werkzeug ab.",
+ "Click the map at the price the line holds.": "Klicke auf die Karte bei dem Kurs, auf dem die Linie liegt.",
+ "Press on the map where the drawing begins, drag to where it ends.": "Drücke auf die Karte, wo die Zeichnung beginnt, und ziehe dorthin, wo sie endet.",
+ "Arm a tool, then lay the line on the map.": "Aktiviere ein Werkzeug und lege die Linie auf der Karte.",
+ "No drawings yet.": "Noch keine Zeichnungen.",
+ "Point at a drawing and press Delete to remove it; Escape puts the tool down.": "Zeige auf eine Zeichnung und drücke Entfernen, um sie zu löschen; Escape legt das Werkzeug ab.",
+ "A line across the map at one price.": "Eine Linie über die Karte auf einem Kurs.",
+ "A line from one point of the map to another.": "Eine Linie von einem Punkt der Karte zu einem anderen.",
+ "The retracement levels between two prices.": "Die Retracement-Level zwischen zwei Kursen.",
+ "On the map": "Auf der Karte"
 }

@@ -1359,5 +1359,22 @@
  "No market of this coin has candles the page can read.": "このコインには、ページが読めるローソク足を持つ市場がありません。",
  "From the {minutes}-minute candles of {market}, each one's volume spread evenly over its range: one market, and an estimate, marked ≈. On six recorded days the value area high and low mostly came within a row or two of the recording's (the low once 4 and once 10 rows off); where two prices traded almost the same, the point of control can sit on the other.": "{market} の {minutes} 分足から、各足の出来高をその値幅に均等に配分して計算します。1 つの市場による推定値で、≈ が付きます。記録のある 6 日間では、バリューエリアの高値と安値はたいてい記録のものから 1〜2 行以内でした(安値が 4 行と 10 行ずれた日が 1 日ずつ)。ほぼ同じだけ取引された価格が 2 つあると、ポイント・オブ・コントロールがもう一方になることがあります。",
  "A day, week or session is drawn only when nine in ten of it is held: of the candles' bars, or of the recording's trades, estimated from each venue's volume while it was recorded. Whether a point of control was traded through is read from the candles of the market on the chart.": "日・週・セッションは、その 9 割があるときだけ描きます。ローソク足の本数、または記録の約定(各取引所が記録されていた間の出来高から推定)です。ポイント・オブ・コントロールを通過したかどうかは、チャート上の市場のローソク足から読み取ります。",
- "Days, weeks and sessions come from the recording, as far back as it keeps trades (a week; a day on a page that reads the exchanges itself), or from the candles of the most traded market: an estimate, marked ≈, that reaches back months.": "日・週・セッションは、記録が約定を保持している範囲(1 週間。取引所を自分で読むページでは 1 日)の記録から、または最も取引の多い市場のローソク足から計算します。後者は ≈ が付く推定値で、数か月さかのぼれます。"
+ "Days, weeks and sessions come from the recording, as far back as it keeps trades (a week; a day on a page that reads the exchanges itself), or from the candles of the most traded market: an estimate, marked ≈, that reaches back months.": "日・週・セッションは、記録が約定を保持している範囲(1 週間。取引所を自分で読むページでは 1 日)の記録から、または最も取引の多い市場のローソク足から計算します。後者は ≈ が付く推定値で、数か月さかのぼれます。",
+ "Drawings": "図形",
+ "Horizontal line": "水平線",
+ "Trend line": "トレンドライン",
+ "Fib retracement": "フィボナッチ・リトレースメント",
+ "Clear drawings": "図形をすべて消す",
+ "Remove this drawing": "この図形を削除",
+ "Removes every drawing at once.": "すべての図形を一度に削除します。",
+ "Escape puts the tool down.": "Esc でツールを置きます。",
+ "Click the map at the price the line holds.": "ラインを置く価格でマップをクリックしてください。",
+ "Press on the map where the drawing begins, drag to where it ends.": "図形の始点でマップを押し、終点までドラッグしてください。",
+ "Arm a tool, then lay the line on the map.": "ツールを選び、マップにラインを引いてください。",
+ "No drawings yet.": "まだ図形はありません。",
+ "Point at a drawing and press Delete to remove it; Escape puts the tool down.": "図形を指して Delete を押すと削除されます。Esc でツールを置きます。",
+ "A line across the map at one price.": "1つの価格でマップを横切る線です。",
+ "A line from one point of the map to another.": "マップ上のある点から別の点へ結ぶ線です。",
+ "The retracement levels between two prices.": "2つの価格の間のリトレースメント水準です。",
+ "On the map": "マップ上"
 }

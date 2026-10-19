@@ -1399,5 +1399,22 @@
  "No market of this coin has candles the page can read.": "Bu coinin, sayfanın okuyabileceği mumları olan bir piyasası yok.",
  "From the {minutes}-minute candles of {market}, each one's volume spread evenly over its range: one market, and an estimate, marked ≈. On six recorded days the value area high and low mostly came within a row or two of the recording's (the low once 4 and once 10 rows off); where two prices traded almost the same, the point of control can sit on the other.": "{market} piyasasının {minutes} dakikalık mumlarından, her mumun hacmi aralığına eşit dağıtılarak: tek bir piyasa ve ≈ ile işaretlenen bir tahmin. Kaydedilmiş altı günde değer alanının üstü ve altı çoğunlukla kayıttakilerin bir iki satır yakınında çıktı (alt bir kez 4, bir kez 10 satır saptı); iki fiyatta neredeyse aynı işlem olduğunda kontrol noktası diğerine düşebilir.",
  "A day, week or session is drawn only when nine in ten of it is held: of the candles' bars, or of the recording's trades, estimated from each venue's volume while it was recorded. Whether a point of control was traded through is read from the candles of the market on the chart.": "Bir gün, hafta ya da seans yalnızca onda dokuzu elde varsa çizilir: mumların ya da kaydın işlemlerinin; ikincisi her borsanın kaydedildiği sıradaki hacminden tahmin edilir. Fiyatın bir kontrol noktasından geçip geçmediği grafikteki piyasanın mumlarından okunur.",
- "Days, weeks and sessions come from the recording, as far back as it keeps trades (a week; a day on a page that reads the exchanges itself), or from the candles of the most traded market: an estimate, marked ≈, that reaches back months.": "Günler, haftalar ve seanslar, işlemleri sakladığı kadar geriye (bir hafta; borsaları kendisi okuyan bir sayfada bir gün) kayıttan ya da en çok işlem gören piyasanın mumlarından gelir: ≈ ile işaretlenen ve aylar öncesine uzanan bir tahmin."
+ "Days, weeks and sessions come from the recording, as far back as it keeps trades (a week; a day on a page that reads the exchanges itself), or from the candles of the most traded market: an estimate, marked ≈, that reaches back months.": "Günler, haftalar ve seanslar, işlemleri sakladığı kadar geriye (bir hafta; borsaları kendisi okuyan bir sayfada bir gün) kayıttan ya da en çok işlem gören piyasanın mumlarından gelir: ≈ ile işaretlenen ve aylar öncesine uzanan bir tahmin.",
+ "Drawings": "Çizimler",
+ "Horizontal line": "Yatay çizgi",
+ "Trend line": "Trend çizgisi",
+ "Fib retracement": "Fibonacci düzeltmesi",
+ "Clear drawings": "Çizimleri temizle",
+ "Remove this drawing": "Bu çizimi kaldır",
+ "Removes every drawing at once.": "Tüm çizimleri tek seferde kaldırır.",
+ "Escape puts the tool down.": "Escape aracı bırakır.",
+ "Click the map at the price the line holds.": "Çizginin duracağı fiyatta haritaya tıklayın.",
+ "Press on the map where the drawing begins, drag to where it ends.": "Çizimin başladığı yerde haritaya basın, bittiği yere sürükleyin.",
+ "Arm a tool, then lay the line on the map.": "Bir araç seçin, sonra çizgiyi haritaya düşün.",
+ "No drawings yet.": "Henüz çizim yok.",
+ "Point at a drawing and press Delete to remove it; Escape puts the tool down.": "Bir çizimin üzerine gelip Delete tuşuna basın; Escape aracı bırakır.",
+ "A line across the map at one price.": "Tek bir fiyatta haritayı boydan boya kateden çizgi.",
+ "A line from one point of the map to another.": "Haritada bir noktadan diğerine giden çizgi.",
+ "The retracement levels between two prices.": "İki fiyat arasındaki düzeltme seviyeleri.",
+ "On the map": "Haritada"
 }

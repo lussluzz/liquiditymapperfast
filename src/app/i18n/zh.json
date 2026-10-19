@@ -1359,5 +1359,22 @@
  "No market of this coin has candles the page can read.": "此币种没有页面能读取 K 线的市场。",
  "From the {minutes}-minute candles of {market}, each one's volume spread evenly over its range: one market, and an estimate, marked ≈. On six recorded days the value area high and low mostly came within a row or two of the recording's (the low once 4 and once 10 rows off); where two prices traded almost the same, the point of control can sit on the other.": "依据 {market} 的 {minutes} 分钟 K 线，每根 K 线的成交量均匀分布在其区间内：单一市场的估算，标记为 ≈。在六个有录制数据的日子里，价值区高点和低点大多与录制数据相差一到两行（低点有一次差 4 行、一次差 10 行）；两个价格成交量几乎相同时，控制点可能落在另一个上。",
  "A day, week or session is drawn only when nine in ten of it is held: of the candles' bars, or of the recording's trades, estimated from each venue's volume while it was recorded. Whether a point of control was traded through is read from the candles of the market on the chart.": "日、周或时段只有在拥有其九成时才绘制：K 线的根数，或录制数据中的成交（依据各交易所被录制期间的成交量估算）。控制点是否被穿越，依据图表上市场的K线判断。",
- "Days, weeks and sessions come from the recording, as far back as it keeps trades (a week; a day on a page that reads the exchanges itself), or from the candles of the most traded market: an estimate, marked ≈, that reaches back months.": "日、周和时段来自录制数据，范围以其保留的成交为限（一周；自行读取交易所的页面为一天），或来自成交最多的市场的 K 线：这是标记为 ≈ 的估算，可回溯数月。"
+ "Days, weeks and sessions come from the recording, as far back as it keeps trades (a week; a day on a page that reads the exchanges itself), or from the candles of the most traded market: an estimate, marked ≈, that reaches back months.": "日、周和时段来自录制数据，范围以其保留的成交为限（一周；自行读取交易所的页面为一天），或来自成交最多的市场的 K 线：这是标记为 ≈ 的估算，可回溯数月。",
+ "Drawings": "绘图",
+ "Horizontal line": "水平线",
+ "Trend line": "趋势线",
+ "Fib retracement": "斐波那契回调",
+ "Clear drawings": "清除绘图",
+ "Remove this drawing": "删除此绘图",
+ "Removes every drawing at once.": "一次删除所有绘图。",
+ "Escape puts the tool down.": "按 Esc 放下工具。",
+ "Click the map at the price the line holds.": "在线条所在的价格处点击地图。",
+ "Press on the map where the drawing begins, drag to where it ends.": "在绘图开始处按住地图，拖到结束处。",
+ "Arm a tool, then lay the line on the map.": "先选择工具，再在地图上画线。",
+ "No drawings yet.": "还没有绘图。",
+ "Point at a drawing and press Delete to remove it; Escape puts the tool down.": "指向一个绘图并按 Delete 删除；按 Esc 放下工具。",
+ "A line across the map at one price.": "在单一价格上横穿地图的线条。",
+ "A line from one point of the map to another.": "从地图上一点连到另一点的线条。",
+ "The retracement levels between two prices.": "两个价格之间的回调水平。",
+ "On the map": "地图上"
 }

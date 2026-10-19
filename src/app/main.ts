@@ -178,6 +178,13 @@ async function main(): Promise<void> {
   toolbar.whaleInfo = () => ({ since: hub.whale?.since ?? null, state: hub.whaleState, browser: source.kind === 'browser' });
   // A click on the map while placing a VWAP anchor: the anchor, for the coin on the page.
   heat.onAnchor = at => { const s = store.state; store.set({ vwap: withAnchor({ ...s.vwap, on: true }, currentCoin().coin, at, Date.now()), vwapAnchoring: false }); };
+  // A finished drawing keeps (the tool disarms); Delete or Backspace removes the one under the pointer; Escape puts the tool down.
+  heat.onDrawCommit = drawing => { const s = store.state; store.set({ drawings: [...s.drawings, drawing], drawTool: '' }); };
+  heat.onDrawDelete = index => { const drawings = store.state.drawings.slice(); drawings.splice(index, 1); store.set({ drawings }); };
+  window.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && store.state.drawTool) { store.set({ drawTool: '' }); return; }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && heat.hoverDrawing !== null) { heat.onDrawDelete?.(heat.hoverDrawing); return; }
+  });
   hub.onTraded = () => heat.invalidate();
   hub.onAbsorptionChanged = () => { heat.invalidate(); range.refreshHeld(); };
   toolbar.absorptionInfo = () => heat.absorptionThresholdText();
@@ -237,7 +244,7 @@ async function main(): Promise<void> {
     // Open interest added up over the venues switched on: another choice of them is another series.
     if (changed.has('oiMarkets') || changed.has('disabledVenues') || changed.has('scope') || changed.has('customMarkets') || (changed.has('markets') && store.state.oiMarkets === 'custom')) void hub.loadOi();
     if (changed.has('highlight')) { heat.invalidate(); oi.invalidate(); depth.invalidate(); }
-    if (changed.has('absorption') || changed.has('tradeBubbles') || changed.has('liquidations') || changed.has('keyLevels') || changed.has('traded') || changed.has('vwap') || changed.has('vwapAnchoring') || changed.has('footprint') || changed.has('customMarkets') || changed.has('barStatOptions')) heat.invalidate();
+    if (changed.has('absorption') || changed.has('tradeBubbles') || changed.has('liquidations') || changed.has('keyLevels') || changed.has('traded') || changed.has('vwap') || changed.has('vwapAnchoring') || changed.has('drawings') || changed.has('drawTool') || changed.has('footprint') || changed.has('customMarkets') || changed.has('barStatOptions')) heat.invalidate();
     // Placing a VWAP anchor and selecting a Range both take the next press on the map: arming one ends the other.
     if (changed.has('rangeTool') && state.rangeTool && state.vwapAnchoring) store.set({ vwapAnchoring: false });
     if (changed.has('absorption') || changed.has('tradeBubbles') || changed.has('liquidations') || changed.has('show')) range.refreshHeld();

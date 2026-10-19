@@ -12,6 +12,7 @@ import type { ProfileWindow } from '../traded/sessions.ts';
 import type { Kernels } from '../kernels.ts';
 import { PALETTES, rgb, textOn, type Palette } from '../theme.ts';
 import { View, niceStep, type Bounds } from '../view.ts';
+import { commitDrawing, fiboPrices, hitDrawing, type Drawing, type DrawTool } from '../drawings.ts';
 import { clock, dayOfMonth, price as fmtPrice, tickLabel, usd, zoneName, zoneOffsetMs } from '../format.ts';
 import type { Store, AppState, CandleRow } from '../store.ts';
 import { cumulative, groupLevels, type Grouped } from './levels-data.ts';
@@ -187,11 +188,20 @@ export class HeatPane {
   #vwapTags: KeyTag[] = [];
   /** A click on the map while an anchor is being placed (set by the page): the time clicked. */
   onAnchor: ((t: number) => void) | null = null;
+  /** A finished drawing gesture (set by the page): the drawing to keep. */
+  onDrawCommit: ((drawing: Drawing) => void) | null = null;
+  /** A hovered drawing the page asked to delete (set by the page): its index in `store.state.drawings`. */
+  onDrawDelete: ((index: number) => void) | null = null;
+  /** The index of the drawing under the pointer, or null when the pointer is elsewhere (read by the page for the Delete key). */
+  get hoverDrawing(): number | null { return this.#hoverDrawing; }
   /** The tags the key levels want on the price axis this frame. */
   #keyTags: KeyTag[] = [];
   #touchSelect: { start: Pt; at: Pt } | null = null;
   /** Right-button drag: zoom about the press point, from the view as it was at press time. */
   #zoomDrag: { x: number; y: number; view: Bounds } | null = null;
+  /** A drawing gesture on its way: the armed tool, its first end pinned at press, its second end following the pointer. */
+  #drawDrag: { kind: Exclude<DrawTool, ''>; t1: number; p1: number; t2: number; p2: number } | null = null;
+  #hoverDrawing: number | null = null;
   #wasLoaded = false;
   #footprint = new FootprintData();
   /** The footprint's imbalance marks, worked out once a load (or when the options change). */
@@ -613,6 +623,7 @@ export class HeatPane {
     this.#paintLiquidations(ctx, state, pw, ph); // above the bubbles: a forced order is one of the market orders, marked as forced
     this.#paintAbsorption(ctx, state, pw, ph);
     this.#paintValueLines(ctx, state, pw, ph);
+    this.#paintDrawings(ctx, p, pw, ph);
     this.#keyTags = state.keyLevels.on ? paintKeyLevels(ctx, this.#keyLevelLines(state), v, pw, ph, p, state.keyLevels, pageNow(), this.#keyLevelContext(state).zone) : [];
     this.#vwapTags = state.vwap.on ? paintVwap(ctx, this.#vwapLines(state), v, pw, ph, p, state.vwap) : [];
     // Replay: nothing after its moment is shown (the heatmap under this canvas included), and a line marks it.
@@ -1252,6 +1263,43 @@ export class HeatPane {
     }
     const levels = this.#candleLevels.get(key);
     return levels ? { levels, upTo: Math.min(w.to, heldTo) } : null;
+  }
+
+  /** The trader's drawings, drawn last among the chart's own layers so a hand-laid line is never buried under data. A horizontal line
+   * spans the map; a trend line joins its ends; a Fibonacci retracement fans the ratios between its ends, the mid one said out loud. */
+  #paintDrawings(ctx: CanvasRenderingContext2D, p: Palette, pw: number, ph: number): void {
+    const v = this.view, list = this.store.state.drawings, drag = this.#drawDrag;
+    if (!list.length && !drag) return;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0, 0, pw, ph); ctx.clip();
+    const stroke = (x1: number, y1: number, x2: number, y2: number): void => { ctx.beginPath(); ctx.moveTo(x1 + 0.5, y1 + 0.5); ctx.lineTo(x2 + 0.5, y2 + 0.5); ctx.stroke(); };
+    const one = (d: Drawing, hot: boolean): void => {
+      const x1 = v.xOf(d.t1, pw), y1 = v.yOf(d.p1, ph), x2 = v.xOf(d.t2, pw), y2 = v.yOf(d.p2, ph);
+      ctx.strokeStyle = p.text; ctx.lineWidth = hot ? 2 : 1; ctx.globalAlpha = hot ? 1 : 0.85;
+      if (d.kind === 'hline') stroke(0, y1, pw, y1);
+      else if (d.kind === 'trend') stroke(x1, y1, x2, y2);
+      else {
+        ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace'; ctx.textAlign = 'left';
+        for (const { level, price } of fiboPrices(d)) {
+          const y = v.yOf(price, ph);
+          ctx.globalAlpha = hot ? 1 : level === 0.5 ? 0.9 : 0.55; ctx.lineWidth = hot && level === 0.5 ? 2 : 1;
+          stroke(Math.min(x1, x2), y, Math.max(x1, x2), y);
+          ctx.fillStyle = p.text; ctx.fillText(`${level}`, Math.min(x1, x2) + 3, y - 3);
+        }
+        ctx.font = '11px ui-sans-serif, system-ui, sans-serif';
+      }
+    };
+    list.forEach((d, i) => one(d, this.#hoverDrawing === i));
+    if (drag) one({ kind: drag.kind, t1: drag.t1, p1: drag.p1, t2: drag.t2, p2: drag.p2 }, false);
+    ctx.restore();
+  }
+
+  /** Whether a chart point lands on a drawing, and which: the pointer's slack is a few pixels' worth of each axis. */
+  #drawingAt(x: number, y: number): number | null {
+    const v = this.view, pw = this.plotW, ph = this.plotH, tolT = 6 / pw * (v.t1 - v.t0), tolP = 6 / ph * (v.p1 - v.p0);
+    const t = v.tOf(Math.min(x, pw), pw), p = v.pOf(Math.min(y, ph), ph);
+    for (let i = this.store.state.drawings.length - 1; i >= 0; i--) if (hitDrawing(this.store.state.drawings[i], t, p, tolT, tolP)) return i;
+    return null;
   }
 
   /**
@@ -1962,6 +2010,13 @@ export class HeatPane {
       const { x, y } = local(e);
       // Placing a VWAP anchor: the click is the anchor, nothing else.
       if (this.store.state.vwapAnchoring && e.button === 0 && x <= this.plotW && y <= this.plotH) { this.onAnchor?.(this.view.tOf(x, this.plotW)); return; }
+      // Laying a drawing: the press pins the first end, the drag carries the second (a horizontal line needs only the click).
+      const tool = this.store.state.drawTool;
+      if (tool && e.button === 0 && x <= this.plotW && y <= this.plotH) {
+        const t = this.view.tOf(x, this.plotW), pr = this.view.pOf(y, this.plotH);
+        if (tool === 'hline') { this.onDrawCommit?.({ kind: 'hline', t1: t, p1: pr, t2: t, p2: pr }); this.store.set({ drawTool: '' }); return; }
+        this.#drawDrag = { kind: tool, t1: t, p1: pr, t2: t, p2: pr }; el.setPointerCapture(e.pointerId); el.style.cursor = 'crosshair'; this.invalidate(); return;
+      }
       if (this.range && selects(this.range.armed, e) && x <= this.plotW && y <= this.plotH) {
         this.#selecting = { x, y }; this.range.begin(this.#rangePoint(x, y)); el.setPointerCapture(e.pointerId); return;
       }
@@ -1985,6 +2040,7 @@ export class HeatPane {
     el.addEventListener('pointermove', e => {
       if (e.pointerType === 'touch') return;
       const { x, y } = local(e);
+      if (this.#drawDrag) { this.#drawDrag.t2 = this.view.tOf(Math.min(x, this.plotW), this.plotW); this.#drawDrag.p2 = this.view.pOf(Math.min(y, this.plotH), this.plotH); this.invalidate(); return; }
       if (this.#scaleDrag) { this.#dragScale(y); return; }
       if (this.#columnSelect && this.range) {
         const { from, to } = this.#tradedWindow(), band = this.#columnBand(this.#columnSelect.y, y);
@@ -1998,7 +2054,9 @@ export class HeatPane {
         return;
       }
       const overColumn = this.#tradedX() !== null && x > this.#tradedX()! && x <= this.#tradedX()! + TRADED_W && y <= this.plotH;
-      el.style.cursor = this.#onScale(x, y) ? 'ns-resize' : overColumn || ((this.range?.armed || this.store.state.vwapAnchoring) && x <= this.plotW && y <= this.plotH) ? 'crosshair' : '';
+      const overDrawing = this.#drawingAt(x, y);
+      if (overDrawing !== this.#hoverDrawing) { this.#hoverDrawing = overDrawing; this.invalidate(); }
+      el.style.cursor = this.#onScale(x, y) ? 'ns-resize' : overDrawing !== null && !this.store.state.drawTool ? 'pointer' : overColumn || ((this.range?.armed || this.store.state.vwapAnchoring || this.store.state.drawTool) && x <= this.plotW && y <= this.plotH) ? 'crosshair' : '';
       if (this.#zoomDrag) {
         // Drag right zooms the time axis in, drag up zooms the price axis in (left/down zoom out).
         const z = this.#zoomDrag, k = 0.006, pw = this.plotW, ph = this.plotH;
@@ -2038,8 +2096,17 @@ export class HeatPane {
         if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
         return;
       }
+      const drag = this.#drawDrag;
+      if (drag) {
+        this.#drawDrag = null;
+        const drawing = commitDrawing(drag.kind, drag.t1, drag.p1, drag.t2, drag.p2);
+        if (drawing) this.onDrawCommit?.(drawing);
+        this.store.set({ drawTool: '' });
+        if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
+        return;
+      }
       this.#drag = null; this.#zoomDrag = null; this.#scaleDrag = null; el.style.cursor = this.#onScale(local(e).x, local(e).y) ? 'ns-resize' : ''; if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId); });
-    el.addEventListener('pointerleave', e => { if (e.pointerType === 'touch') return; if (!this.#scaleDrag) el.style.cursor = ''; this.#profileHover = null; this.#tradedHover = null; if (!this.#drag && !this.#zoomDrag) { this.store.set({ hover: null }); this.invalidate(); } });
+    el.addEventListener('pointerleave', e => { if (e.pointerType === 'touch') return; if (!this.#scaleDrag) el.style.cursor = ''; this.#profileHover = null; this.#tradedHover = null; if (this.#hoverDrawing !== null) { this.#hoverDrawing = null; this.invalidate(); } if (!this.#drag && !this.#zoomDrag) { this.store.set({ hover: null }); this.invalidate(); } });
     el.addEventListener('dblclick', () => this.fit());
     bindTouch(el, new GestureRecognizer(this.#touchHandlers()));
   }
