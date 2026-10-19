@@ -21,19 +21,44 @@ function pair(value: unknown) {
   return `t${normalized}`;
 }
 
-function pairKey(value: unknown) { return pair(value).slice(1); }
+/** Bitfinex derivative symbols are written BASEF0:QUOTEF0 (the perpetual against a funding currency, "BTCF0:USTF0"); both sides carry F0, and the wire form keeps the colon. The concatenated form (tBTCF0USTF0) splits back at the F0 boundary. */
+function derivativePair(value: unknown) {
+  const raw = String(value ?? '').trim().toUpperCase().replace(/^T/, '');
+  if (raw.includes(':')) {
+    if (!/^([A-Z0-9]+F0):([A-Z0-9]+F0)$/.test(raw)) throw new TypeError('Invalid Bitfinex derivative pair (expected BASEF0:QUOTEF0, both sides suffixed F0)');
+    return `t${raw.split(':')[0]}:${raw.split(':')[1]}`;
+  }
+  const concatenated = raw.replaceAll('/', '').replaceAll('-', '').replaceAll('_', '');
+  const split = /^([A-Z0-9]+F0)([A-Z0-9]+F0)$/.exec(concatenated);
+  if (!split) throw new TypeError('Invalid Bitfinex derivative pair (expected BASEF0:QUOTEF0)');
+  return `t${split[1]}:${split[2]}`;
+}
+
+/** Whether the symbol names a derivative pair: a colon with F0 on both sides (BASEF0:QUOTEF0), or both concatenated sides ending in F0. */
+function isDerivativePair(value: unknown) {
+  const raw = String(value ?? '').trim().toUpperCase();
+  if (raw.includes(':')) return /^([A-Z0-9]+F0):([A-Z0-9]+F0)$/.test(raw);
+  const bare = raw.replace(/^T/, '').replaceAll('/', '').replaceAll('-', '').replaceAll('_', '');
+  return /^[A-Z0-9]+F0[A-Z0-9]+F0$/.test(bare);
+}
+
+function pairKey(value: unknown) { return (isDerivativePair(value) ? derivativePair(value) : pair(value)).slice(1).replaceAll(':', ''); }
 function instrumentId(value: unknown) { return `bitfinex:${pairKey(value)}`; }
+
+/** The one instrument id every Bitfinex surface agrees on (spec topic and decoded rows alike): no leading t, no colon ("bitfinex:BTCF0USTF0"). */
+export function bitfinexInstrumentId(value: unknown) { return instrumentId(value); }
 
 function splitPair(value: unknown, metadata: WireRecord = {}) {
   const native = pairKey(value);
-  const quote = String(metadata.quote ?? ['USDT', 'USD', 'UST', 'EUR', 'JPY', 'GBP', 'BTC', 'ETH'].find(candidate => native.endsWith(candidate)) ?? 'USD').toUpperCase();
+  const quote = String(metadata.quote ?? ['USTF0', 'USDT', 'USD', 'UST', 'EUR', 'JPY', 'GBP', 'BTC', 'ETH'].find(candidate => native.endsWith(candidate)) ?? 'USD').toUpperCase();
   const base = String(metadata.base ?? (native.endsWith(quote) ? native.slice(0, -quote.length) : native)).toUpperCase();
   return { base: base || native, quote };
 }
 
 function marketFor(value: unknown, metadata: WireRecord = {}) {
-  const nativeSymbol = pair(value); const { base, quote } = splitPair(nativeSymbol, metadata);
-  return { venue: 'bitfinex', nativeSymbol, symbol: pairKey(nativeSymbol), base, quote, marketType: 'spot', tickSize: metadata.tickSize ?? null, quantityUnit: 'base' };
+  const nativeSymbol = isDerivativePair(value) ? derivativePair(value) : pair(value); const { base, quote } = splitPair(pairKey(nativeSymbol), metadata);
+  const marketType = isDerivativePair(nativeSymbol) ? 'perpetual' : 'spot';
+  return { venue: 'bitfinex', nativeSymbol, symbol: pairKey(nativeSymbol), base, quote, marketType, tickSize: metadata.tickSize ?? null, quantityUnit: 'base' };
 }
 
 function assertBitfinex(payload: unknown) {
@@ -90,7 +115,7 @@ export function bitfinexBookChecksum({ bids = [], asks = [] }: AdapterOptions = 
 }
 
 export function buildBitfinexRequest(kind: string, { symbol = 'BTCUSD', precision = 'P0', len = 25, baseUrl = null }: AdapterOptions = {}) {
-  const native = pair(symbol);
+  const native = isDerivativePair(symbol) ? derivativePair(symbol) : pair(symbol);
   if (kind === 'symbolsDetails') return { url: `${baseUrl ?? BITFINEX_METADATA_URL}/v1/symbols_details`, method: 'GET', headers: { accept: 'application/json' }, responseClass: 'catalog' };
   if (kind === 'book') {
     const prec = String(precision).toUpperCase();
@@ -104,7 +129,7 @@ export function buildBitfinexRequest(kind: string, { symbol = 'BTCUSD', precisio
 
 export function buildBitfinexSubscription(kind: string, { symbol = 'BTCUSD', precision = 'P0', frequency = 'F0', len = 25, subId = null }: AdapterOptions = {}) {
   if (kind !== 'depth') throw new RangeError(`Unsupported Bitfinex subscription: ${kind}`);
-  const native = pair(symbol); const prec = String(precision).toUpperCase();
+  const native = isDerivativePair(symbol) ? derivativePair(symbol) : pair(symbol); const prec = String(precision).toUpperCase();
   if (!['P0', 'P1', 'P2', 'P3', 'P4'].includes(prec)) throw new RangeError(`Unsupported Bitfinex book precision: ${precision}`);
   const length = Math.trunc(finiteNumber(len, 'len'));
   if (![1, 25, 100, 250].includes(length)) throw new RangeError(`Unsupported Bitfinex book length: ${len}`);
@@ -141,7 +166,7 @@ export function normalizeBitfinexDepth(payload: unknown, { symbol = 'BTCUSD', ch
   const wireChannel = Number(payload[0]);
   if (!Number.isSafeInteger(wireChannel) || wireChannel < 0) throw new TypeError('Bitfinex channel id missing or invalid');
   if (channelId != null && Number(channelId) !== wireChannel) throw new TypeError('Bitfinex channel mismatch');
-  const body = payload[1]; const native = pair(symbol); const common = { venue: 'bitfinex', instrumentId: instrumentId(native), nativeSymbol: native, market: marketFor(native), units: 'base', sourceTimestamp: null, receivedAt, channelId: wireChannel };
+  const body = payload[1]; const native = isDerivativePair(symbol) ? derivativePair(symbol) : pair(symbol); const common = { venue: 'bitfinex', instrumentId: instrumentId(native), nativeSymbol: native, market: marketFor(native), units: 'base', sourceTimestamp: null, receivedAt, channelId: wireChannel };
   if (body === 'hb') return { kind: 'heartbeat' as const, ...common };
   if (body === 'cs') {
     const checksum = Number(payload[2]);

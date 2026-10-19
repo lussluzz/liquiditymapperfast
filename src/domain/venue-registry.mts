@@ -97,9 +97,9 @@ export const VENUE_REGISTRY: readonly VenueRegistryEntry[] = Object.freeze([
     trades: unsupportedPublic(), l2: capability('supported', 'HTX USDT swap WebSocket depth.step0 provides bounded complete snapshots (150 unaggregated levels a side) with provider version tokens', ['perpetual'], ['native']),
     candles: unsupportedPublic(), openInterest: unsupportedPublic(), executedLiquidations: unsupportedPublic(), futureLevels: capability('externallyBlocked', blockedReason, ['perpetual']),
   }, 'src/adapters/htx.mts'),
-  entry('bitfinex', 'Bitfinex', 'supported', ['spot'], {
-    products: capability('unsupported', 'adapter currently uses configured pairs; product discovery is not wired', ['spot']),
-    trades: unsupportedPublic(), l2: capability('supported', 'Bitfinex spot book provides complete snapshots, updates, and optional signed CRC32 checksums', ['spot'], ['native']),
+  entry('bitfinex', 'Bitfinex', 'supported', ['spot', 'perpetual'], {
+    products: capability('unsupported', 'adapter currently uses configured pairs; product discovery is not wired', ['spot', 'perpetual']),
+    trades: unsupportedPublic(), l2: capability('supported', 'Bitfinex book provides complete snapshots, updates, and optional signed CRC32 checksums; the perpetual follows the spot channel shape (BASEF0:QUOTEF0 symbols)', ['spot', 'perpetual'], ['native']),
     candles: unsupportedPublic(), openInterest: unsupportedPublic(), executedLiquidations: unsupportedPublic(), futureLevels: capability('externallyBlocked', blockedReason, ['spot']),
   }, 'src/adapters/bitfinex.mts'),
   entry('bitmex', 'BitMEX', 'supported', ['perpetual'], {

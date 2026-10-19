@@ -93,6 +93,7 @@ import {
   normalizeHtxContractInfo,
   buildBitfinexRequest,
   buildBitfinexSubscription,
+  bitfinexInstrumentId,
   normalizeBitfinexDepth,
   normalizeBitfinexSymbolsDetails,
   createBitfinexDepthSession,
@@ -281,7 +282,7 @@ export interface LiveFeedStartOptions extends AdapterOptions {
   hlNativeCoin?: string; binanceSymbol?: string; binanceMarketType?: string; binanceFamily?: 'usdm' | 'coinm'; bybitCategory?: 'linear' | 'spot' | 'inverse'; okxMarketType?: 'perpetual' | 'spot'; bitgetMarketType?: 'perpetual' | 'spot'; candleInterval?: string; hlBookNsigFigs?: unknown; hlBookMantissa?: unknown; hlBookResolutions?: unknown;
   bybitEnabled?: boolean; bybitSymbol?: string | null; okxEnabled?: boolean; okxSymbol?: string | null; bitgetEnabled?: boolean; bitgetSymbol?: string | null; gateioEnabled?: boolean; gateioSymbol?: string | null;
   deribitEnabled?: boolean; deribitSymbol?: string | null; coinbaseEnabled?: boolean; coinbaseSymbol?: string | null; krakenEnabled?: boolean; krakenSymbol?: string | null; kucoinEnabled?: boolean; kucoinSymbol?: string | null;
-  mexcEnabled?: boolean; mexcSymbol?: string | null; htxEnabled?: boolean; htxSymbol?: string | null; bitfinexEnabled?: boolean; bitfinexSymbol?: string | null; bitmexEnabled?: boolean; bitmexSymbol?: string | null;
+  mexcEnabled?: boolean; mexcSymbol?: string | null; htxEnabled?: boolean; htxSymbol?: string | null; bitfinexEnabled?: boolean; bitfinexSymbol?: string | null; bitfinexMarketType?: 'spot' | 'perpetual'; bitmexEnabled?: boolean; bitmexSymbol?: string | null;
   cryptocomEnabled?: boolean; cryptocomSymbol?: string | null; bitstampEnabled?: boolean; bitstampSymbol?: string | null; whitebitEnabled?: boolean; whitebitSymbol?: string | null; phemexEnabled?: boolean; phemexSymbol?: string | null;
   dydxEnabled?: boolean; dydxSymbol?: string | null; asterEnabled?: boolean; asterSymbol?: string | null;
   /** Exact opt-in L2 venue set; reference mark/candle/trade channels remain. */
@@ -754,7 +755,7 @@ export class LiveFeedManager {
     };
   }
 
-  async #startNow({ coin = 'BTC', hlNativeCoin, binanceFamily = 'usdm', binanceSymbol = binanceFamily === 'coinm' ? 'BTCUSD_PERP' : 'BTCUSDT', binanceMarketType = 'perpetual', bybitCategory = 'linear', okxMarketType = 'perpetual', bitgetMarketType = 'perpetual', bybitEnabled = false, bybitSymbol = null, okxEnabled = false, okxSymbol = null, bitgetEnabled = false, bitgetSymbol = null, gateioEnabled = false, gateioSymbol = null, deribitEnabled = false, deribitSymbol = null, coinbaseEnabled = false, coinbaseSymbol = null, krakenEnabled = false, krakenSymbol = null, kucoinEnabled = false, kucoinSymbol = null, mexcEnabled = false, mexcSymbol = null, htxEnabled = false, htxSymbol = null, bitfinexEnabled = false, bitfinexSymbol = null, bitmexEnabled = false, bitmexSymbol = null, cryptocomEnabled = false, cryptocomSymbol = null, bitstampEnabled = false, bitstampSymbol = null, whitebitEnabled = false, whitebitSymbol = null, phemexEnabled = false, phemexSymbol = null, dydxEnabled = false, dydxSymbol = null, asterEnabled = false, asterSymbol = null, selectedOrderbookVenues, referenceBackfill = true, candleInterval = this.candleInterval, hlBookNsigFigs = 2, hlBookMantissa = null, hlBookResolutions = null }: LiveFeedStartOptions = {}) {
+  async #startNow({ coin = 'BTC', hlNativeCoin, binanceFamily = 'usdm', binanceSymbol = binanceFamily === 'coinm' ? 'BTCUSD_PERP' : 'BTCUSDT', binanceMarketType = 'perpetual', bybitCategory = 'linear', okxMarketType = 'perpetual', bitgetMarketType = 'perpetual', bybitEnabled = false, bybitSymbol = null, okxEnabled = false, okxSymbol = null, bitgetEnabled = false, bitgetSymbol = null, gateioEnabled = false, gateioSymbol = null, deribitEnabled = false, deribitSymbol = null, coinbaseEnabled = false, coinbaseSymbol = null, krakenEnabled = false, krakenSymbol = null, kucoinEnabled = false, kucoinSymbol = null, mexcEnabled = false, mexcSymbol = null, htxEnabled = false, htxSymbol = null, bitfinexEnabled = false, bitfinexSymbol = null, bitfinexMarketType = 'spot', bitmexEnabled = false, bitmexSymbol = null, cryptocomEnabled = false, cryptocomSymbol = null, bitstampEnabled = false, bitstampSymbol = null, whitebitEnabled = false, whitebitSymbol = null, phemexEnabled = false, phemexSymbol = null, dydxEnabled = false, dydxSymbol = null, asterEnabled = false, asterSymbol = null, selectedOrderbookVenues, referenceBackfill = true, candleInterval = this.candleInterval, hlBookNsigFigs = 2, hlBookMantissa = null, hlBookResolutions = null }: LiveFeedStartOptions = {}) {
     if (typeof referenceBackfill !== 'boolean') throw new TypeError('referenceBackfill must be boolean');
     const selectedDepthVenues = selectedOrderbooks(selectedOrderbookVenues);
     this.candleInterval = assertNativeCandleInterval(candleInterval);
@@ -896,7 +897,7 @@ export class LiveFeedManager {
     }
     if (bitfinexEnabled && bitfinexSymbol) {
       const request = buildBitfinexSubscription('depth', { symbol: bitfinexSymbol, precision: 'P0', frequency: 'F0', len: 250 });
-      specs.push(['bitfinex-depth', { venue: 'bitfinex', channel: request.channel, symbol: request.symbol, marketType: 'spot', topic: request.topic, instrumentId: `bitfinex:${String(request.symbol).replace(/^t/i, '').toUpperCase()}`, request, decode: raw => this.#decodeBitfinexDepth(raw, bitfinexSymbol), publicDepth: true }]);
+      specs.push(['bitfinex-depth', { venue: 'bitfinex', channel: request.channel, symbol: request.symbol, marketType: bitfinexMarketType, topic: request.topic, instrumentId: bitfinexInstrumentId(request.symbol), request, decode: raw => this.#decodeBitfinexDepth(raw, bitfinexSymbol), publicDepth: true }]);
     }
     if (bitmexEnabled && bitmexSymbol) {
       const request = buildBitmexSubscription('depth', { symbol: bitmexSymbol, table: 'orderBookL2_25' });
