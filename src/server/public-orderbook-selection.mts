@@ -5,6 +5,7 @@ import { publicMarketFeedOptions } from './public-market-selection.mts';
 import { binanceInstrumentId } from '../adapters/binance.mts';
 import { bybitInstrumentId } from '../adapters/bybit.mts';
 import { bitgetInstrumentId } from '../adapters/bitget.mts';
+import { bitfinexInstrumentId } from '../adapters/bitfinex.mts';
 
 export const PUBLIC_ORDERBOOK_MAX_SELECTED = ORDERBOOK_VENUE_MAX_SELECTED;
 export const PUBLIC_ORDERBOOK_VENUE_IDS = Object.freeze([
@@ -131,7 +132,10 @@ function streamFor(venue: PublicOrderbookVenueId, native: string, base: 'BTC' | 
   else if (venue === 'coinbase' || venue === 'kucoin') { if (!spot) return null; quote = pair(base, '-'); }
   else if (venue === 'kraken') { if (!spot) return null; quote = pair(base, '/'); }
   else if (venue === 'htx') { if (spot) return null; quote = pair(base, '-', '', ['USDT']); }
-  else if (venue === 'bitfinex') { if (!spot) return null; const prefix = upper.startsWith('T') ? 'T' : ''; quote = pair(prefix + base, '', '', ['USD', 'USDT', 'UST', 'USDC']); id = 'bitfinex:' + upper.replace(/^T/, ''); if (quote === 'UST') quote = 'USDT'; }
+  else if (venue === 'bitfinex') {
+    if (spot) { const prefix = upper.startsWith('T') ? 'T' : ''; quote = pair(prefix + base, '', '', ['USD', 'USDT', 'UST', 'USDC']); id = 'bitfinex:' + upper.replace(/^T/, ''); if (quote === 'UST') quote = 'USDT'; }
+    else { if (upper !== base + 'F0:USTF0' && upper !== 'T' + base + 'F0:USTF0') return null; quote = 'USDT'; id = bitfinexInstrumentId(upper.startsWith('T') ? upper : 't' + upper); }
+  }
   else if (venue === 'bitmex') {
     // The existing adapter does not establish ETHUSD's quanto sizing basis.
     if (spot || base !== 'BTC' || upper !== 'XBTUSD') return null; quote = 'USD';
@@ -187,7 +191,8 @@ export function planPublicOrderbookSelection(product: unknown, selectedVenues: u
       options = rebaseLiveFeedConfiguration(identity.base, safe);
       const key = identity.venue + 'Symbol'; Object.defineProperty(options, key, { value: identity.native, enumerable: true, writable: true, configurable: true });
     }
-    for (const venue of OPTIONAL_VENUES) Object.defineProperty(options, venue + 'Enabled', { value: venues.includes(venue), enumerable: true, writable: true, configurable: true });
+    // A selected venue is an enabled one: its specs must exist for the depth filter to keep, and a venue left out must not trade on the sly.
+    for (const venue of PUBLIC_ORDERBOOK_VENUE_IDS) Object.defineProperty(options, venue + 'Enabled', { value: venues.includes(venue), enumerable: true, writable: true, configurable: true });
     options.selectedOrderbookVenues = Object.freeze([...venues]);
     const streams: PublicOrderbookStreamPlan[] = [];
     for (const venue of venues) {
@@ -196,7 +201,8 @@ export function planPublicOrderbookSelection(product: unknown, selectedVenues: u
       if (typeof native !== 'string' || !native || native.length > 64) return fail('Selected venue native symbol is unavailable', venue);
       const marketType = venue === 'binance' ? options.binanceMarketType : venue === 'bybit' ? options.bybitCategory === 'spot' ? 'spot' : 'perpetual'
         : venue === 'okx' ? options.okxMarketType : venue === 'bitget' ? options.bitgetMarketType
-        : ['coinbase', 'kraken', 'kucoin', 'bitfinex', 'bitstamp', 'whitebit', 'phemex'].includes(venue) ? 'spot' : 'perpetual';
+        : venue === 'bitfinex' ? options.bitfinexMarketType ?? 'spot'
+        : ['coinbase', 'kraken', 'kucoin', 'bitstamp', 'whitebit', 'phemex'].includes(venue) ? 'spot' : 'perpetual';
       if (marketType !== 'spot' && marketType !== 'perpetual') return fail('Selected venue native family is unavailable', venue);
       const stream = streamFor(venue, native, identity.base, marketType, options);
       if (!stream) return fail(venue === 'bitmex' && identity.base === 'ETH' ? 'BitMEX ETH quanto/linear sizing basis is not implemented by this bounded planner' : 'Selected venue native symbol/family is unavailable for this base', venue);
