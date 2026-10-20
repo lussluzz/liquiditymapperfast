@@ -1,4 +1,5 @@
-const STABLE_QUOTES: ReadonlySet<string> = new Set(['USD', 'USDT', 'USDC', 'BUSD', 'FDUSD', 'DAI']);
+// Bitfinex's derivatives settle in tether under the ticker USTF0 — the same dollar stable as USDT, spelled for the F0 market.
+const STABLE_QUOTES: ReadonlySet<string> = new Set(['USD', 'USDT', 'USDC', 'BUSD', 'FDUSD', 'DAI', 'USTF0']);
 type BookSide = 'bid' | 'ask';
 type ConversionSource = 'metadata' | 'stable-quote';
 interface BookMarketInput {
