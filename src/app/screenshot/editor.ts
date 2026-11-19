@@ -3,7 +3,7 @@ import { isCoarse } from '../device.ts';
 import { AUTHOR } from '../author.ts';
 import { setTip } from '../tip.ts';
 import { timeZone } from '../format.ts';
-import { capturePage, type Snapshot } from './capture.ts';
+import { capturePageReady, type Snapshot } from './capture.ts';
 import {
   BLOCK_BORDERS, BLOCK_FILL_START, BLOCK_SIZE, COLORS, CURSORS, WIDTHS, clampRect, drawShape, fileName, hitHandle, inside, markText, paintMark, rectFrom, resizeRect, textSize, toolbarPlacement, worthKeeping,
   HANDLES, handlePoint, snapAngle, squareTo, type BlockBorder, type Handle, type Pt, type Rect, type Shape, type Tool,
@@ -81,13 +81,17 @@ const LENGTH_KEY = 'hlm-shot-gif-seconds';
 /** The tolerance (levels) from which a GIF says that its faintest changes were left out. */
 const FAINT_TOLERANCE = 8;
 
-let active: { close(): void } | null = null;
+let active: { close(): void } | null = null, starting = false;
 
-/** Freeze the page and start the selection. Calling it while it is open closes it. */
-export function startScreenshot(): void {
+/**
+ * Freeze the page and start the selection. Calling it while it is open closes it. The first picture after the page opens waits a moment
+ * for the icons' mask pictures to be read (`capturePageReady`); asked again meanwhile, it is not started twice.
+ */
+export async function startScreenshot(): Promise<void> {
   if (active) { active.close(); return; }
-  const snap = capturePage();
-  active = openEditor(snap);
+  if (starting) return;
+  starting = true;
+  try { const snap = await capturePageReady(); if (!active) active = openEditor(snap); } finally { starting = false; }
 }
 
 function openEditor(snap: Snapshot): { close(): void } {
@@ -108,13 +112,19 @@ function openEditor(snap: Snapshot): { close(): void } {
   dialog.showModal();
   const ctx = stage.getContext('2d')!;
 
-  // The panes that can be taken whole, found now while the page is as it was captured.
-  const snapTargets: { rect: Rect; label: string }[] = [];
-  for (const [selector, label] of [['.pane.heat', t('Click to take the chart')], ['.pane.depth', t('Click to take Depth')], ['.pane.oi', t('Click to take Open interest')], ['.pane.lt', t('Click to take the Liquidity Tracker')], ['.pane.bars', t('Click to take Bar stats')], ['.side-col', t('Click to take the order book')], ['.pane.cvd', t('Click to take the flow column')]] as const) {
-    const node = document.querySelector(selector) as HTMLElement | null; if (!node || node.hidden) continue;
+  // The panes that can be taken whole, found now while the page is as it was captured: those named here, then any other pane (one added
+  // later is never left out, as Delta and L/S were).
+  const snapTargets: { rect: Rect; label: string }[] = [], named = new Set<Element>();
+  const take = (node: HTMLElement, label: string): void => {
+    // A pane covered by a maximized one (layout.ts #setMax) is not one that can be taken: what shows there is the maximized pane.
+    named.add(node); if (node.hidden || (node.closest('.has-max') !== null && !node.classList.contains('maxed'))) return;
     const r = node.getBoundingClientRect();
     if (r.width > 40 && r.height > 20) snapTargets.push({ rect: { x: r.left, y: r.top, w: r.width, h: r.height }, label });
+  };
+  for (const [selector, label] of [['.pane.heat', t('Click to take the chart')], ['.pane.depth', t('Click to take Depth')], ['.pane.oi', t('Click to take Open interest')], ['.pane.delta', t('Click to take Delta')], ['.pane.ls', t('Click to take Long/Short')], ['.pane.lt', t('Click to take the Liquidity Tracker')], ['.pane.bars', t('Click to take Bar stats')], ['.pane.ladder', t('Click to take the order book')], ['.pane.cvd', t('Click to take the flow column')]] as const) {
+    const node = document.querySelector(selector) as HTMLElement | null; if (node) take(node, label);
   }
+  for (const node of document.querySelectorAll<HTMLElement>('.pane')) if (!named.has(node)) take(node, t('Click to take this pane'));
   // Anything on the page that is not a pane (above all the top bar, which is not a picture worth taking alone) takes the whole page: every pane that is open.
   snapTargets.push({ rect: { x: 0, y: 0, w: W, h: H }, label: t('Click to take the whole page') });
 

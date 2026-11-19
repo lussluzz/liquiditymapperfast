@@ -1,10 +1,13 @@
-import { PALETTES, type Palette } from '../theme.ts';
+import { PALETTES, type Palette, paletteOf } from '../theme.ts';
 import { el } from '../dom.ts';
 import { helpButton } from '../help.ts';
-import { clock, price as fmtPrice, startOfDay } from '../format.ts';
+import { clock, clockSeconds, price as fmtPrice, startOfDay } from '../format.ts';
 import { paintInfoBox, type InfoLine } from '../infobox.ts';
 import { emptyScopeMessage, kindOf, type Kind } from '../scope.ts';
-import { isPhone } from '../device.ts';
+import { isPhone, layoutMode, onLayoutMode } from '../device.ts';
+import { GestureRecognizer, axisPinchScale, bindTouch, type GestureHandlers, type Pt } from '../touch.ts';
+import { timeAxis } from '../time-axis.ts';
+import { setHtml } from './lower-panes.ts';
 import { flowIds, flowLoadIds, pinChoices, priceFlowId } from '../cvd/ids.ts';
 import { explainMissing, noticeRows, type NoticeAction } from '../cvd/missing.ts';
 import { buildFamilies } from '../cvd/families.ts';
@@ -21,7 +24,8 @@ import { Ranker } from '../cvd/rank.ts';
 import { buildModel, type CvdModel, type LaneLine } from '../cvd/model.ts';
 import { HEIGHT_MODES, locateRow, maxScroll, rowHeights, type RowLayout } from '../cvd/layout.ts';
 import { CVD_SPANS, CVD_SPAN_MS, RANK_MS, RANK_WINDOWS, type CvdSettings, type CvdSpan, type RankWindow } from '../cvd/settings.ts';
-import { aggregateHover, aggregateLabel, rowHover, rowLabel, windowName, type LabelLine } from '../cvd/text.ts';
+import { aggregateHover, aggregateLabel, heroLabel, rowHover, rowLabel, signedUsd, windowName, type LabelLine } from '../cvd/text.ts';
+import { PRICE_AXIS_W, columnAt, heroHeight, heroPoint, laneRange, niceTicks, pinchSpan, priceRange, sharedRange, spanOnPhone, type Range } from '../cvd/hero.ts';
 import { laneColors, type LaneColors } from '../cvd/colors.ts';
 import { PriceTrack, type PriceColumns } from '../cvd/price.ts';
 import type { BurstEvent } from '../cvd/burst.ts';
@@ -34,12 +38,18 @@ import { drawVenueMark } from '../venue-marks.ts';
 import type { RangeTool } from '../range/tool.ts';
 import { pageNow, replaying } from '../replay/clock.ts';
 import { flowEndChange, type FlowEnd } from '../cvd/flash.ts';
+import { FitGrid } from '../ui/fit-grid.ts';
+import { pixelRatio, sharpens } from '../pixel-ratio.ts';
+import { TradesView } from './trades-view.ts';
+import type { FlowView } from '../tns/model.ts';
 
 const SANS = 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif', MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 const PAD = 6, LINE_H = 12;
 /** The label column: a third of the pane, within these limits. */
 const GUTTER_MIN = 76, GUTTER_MAX = 120;
 const MIN_ROW = 56, MIN_AGG = 92, PRICE_H = 44;
+/** The shortest a venue row is on a phone: its label is three lines of 12 px. */
+const PHONE_MIN_ROW = 60;
 /** Flow is held a second at a time for at most this long (the ring holds a day and a half); a window reaching further back reads minutes there. */
 const HISTORY_CAP_MS = 24 * 3_600_000;
 /** Older flow (minutes) is asked from a boundary of this many ms before the window. */
@@ -79,6 +89,12 @@ export class CvdPane {
   #canvas = document.createElement('canvas');
   #ctx: CanvasRenderingContext2D;
   /**
+   * Another pane's pointer, a line across the column, on a canvas of its own over the lines: a pointer moving over the map moves the line
+   * alone (`syncHover`), where it drew the whole column again at every pixel (Research_Findings.md).
+   */
+  #lineCanvas = document.createElement('canvas');
+  #lineCtx: CanvasRenderingContext2D;
+  /**
    * The flashes at the lines' ends (Karl, 2026-10-17): each line's end as it last stood (`cvd/flash.ts`), and the flashes its changes started,
    * drawn on a canvas of their own over the lines so a flash animates without the column being drawn again; whether the window drawn ends
    * at the live edge (only there do they flash), and the frame or, with reduced motion, the timer that draws them next.
@@ -96,6 +112,11 @@ export class CvdPane {
   #ranker = new Ranker();
   #price = new PriceTrack();
   #priceFor = ''; #priceAt = 0; #priceLoading = false;
+  /** The window the phone's chart drew, as its legend names it: the span's own name, or how long the flow it fitted to is ("6M"). */
+  #windowName = '1h';
+  /** The newest price the phone's chart drew (its legend names it), NaN when it drew none; and the ranges its lines were drawn over, for the dots of a cursor. */
+  #priceNow = NaN;
+  #heroGeo: { inner: { y: number; h: number }; spot: Range | null; perp: Range | null; price: Range | null } | null = null;
   /** The price strip's columns and the instrument whose recorded seconds gave them (null: candle closes and marks), as the last model was built. */
   #priceCols: PriceColumns | null = null; #priceId: string | null = null;
   /** When the flow began, if the window starts before it (shown as a note on the aggregate row). */
@@ -106,6 +127,16 @@ export class CvdPane {
   #layout: RowLayout | null = null;
   #scroll = 0;
   #hover: { x: number; y: number } | null = null;
+  /**
+   * A finger on a phone (`bindTouch`): where it scrubs now (a drag across the lines, or a press held and moved), and the moment a tap or a hold
+   * pinned (it stays until the next tap, and moves left with the lines as time passes). What it points at is read out under the header.
+   */
+  #scrub: { x: number; y: number } | null = null; #pin: { t: number; y: number } | null = null;
+  #readout = el('span', { class: 'readout' });
+  /** The header's layout (ui/fit-grid.ts). */
+  #fit: FitGrid | null = null;
+  /** A fling after a vertical drag (the frame running it), and the finger separation a pinch counts its steps from. */
+  #fling = 0; #pinchBase = 0;
   /** The Range tool (set by the page): a sideways drag across the lines selects that stretch of time. */
   range: RangeTool | null = null;
   #gutter = GUTTER_MIN;
@@ -114,12 +145,33 @@ export class CvdPane {
   #empty: string | null = null;
   /** Where the plot was drawn, and where the line for another pane's pointer was (null: none), so a pointer elsewhere redraws only when that line moves. */
   #plot = { x: 0, w: 0 }; #sharedX: number | null = null;
+  /** The price strip's scale as last drawn (its prices from `lo` to `hi` over its inner `y`, `h`), and the height of the order book's row's line in it. */
+  #priceScale: { lo: number; hi: number; y: number; h: number } | null = null; #bookY: number | null = null;
   #spanButtons = new Map<CvdSpan, HTMLButtonElement>();
   #spanSelect = el('select', { class: 'cvd-span-select', ariaLabel: t('Time span') });
   #gear = el('button', { type: 'button', class: 'icon-btn cvd-gear', ariaLabel: t('Settings'), tip: t('How the column ranks and draws the exchanges.') });
+  /** The column's views, a tab each in the header's name (the flow lines, the Tape); a phone shows none (one view to a tab: `phoneView`). */
+  #viewTabs = new Map<FlowView, HTMLButtonElement>();
+  #helpFlow = helpButton('cvd'); #helpTrades = helpButton('trades');
+  /** The span buttons' cell, which only the flow view has. */
+  #cells: HTMLElement | null = null;
+  #shownView: FlowView | null = null;
+  /** Trades, the column's second view (blocks of time or each order; set up in the constructor). */
+  readonly trades: TradesView;
+  /** Whether the column is covered by another tab (a phone shows one tab at a time by its stylesheet, never by `hidden`; set by the page). */
+  covered: () => boolean = () => false;
+  /**
+   * On a phone, the view its tab asks for (the Flow tab the lines, the Tape tab the list), the saved view left alone for the desktop; null
+   * elsewhere (set by the page). A phone has one view to a tab, so its column shows no view tabs.
+   */
+  phoneView: () => FlowView | null = () => null;
+  /** The column was shown or hidden, or its view changed: what wants the tape (Trades) is weighed again (set by the page). */
+  onVisibility: () => void = () => {};
   /** Bursts the alert engine has seen, drawn as markers on their rows (set from outside; newest last). */
   events: readonly BurstEvent[] = [];
   #timer = 0;
+  /** What the pane listens to besides its own elements: let go of at `dispose`. */
+  #off: (() => unknown)[] = [];
   /** The rows of dots above the exchanges, and the settings panel while it is open (so the controls that depend on each other can be redrawn). */
   #strip: CvdStrip; #panel: Panel | null = null;
   /** What the ranking was last made from: a change to the strip's own settings leaves the rows where they are. */
@@ -127,26 +179,104 @@ export class CvdPane {
 
   constructor(host: HTMLElement, private store: Store, private hub: Hub, private view: View) {
     this.#strip = new CvdStrip(store, hub); this.#rankingKey = rankingKey(store.state.cvd);
-    this.root.append(this.controls, this.#strip.root, this.#notice, this.#wrap);
-    this.#wrap.append(this.#canvas, this.#flashCanvas);
+    this.trades = new TradesView(store);
+    this.root.append(this.controls, this.#strip.root, this.#notice, this.#wrap, this.trades.root);
+    this.#lineCanvas.className = 'cvd-line';
+    this.#wrap.append(this.#canvas, this.#lineCanvas, this.#flashCanvas);
     host.append(this.root);
-    this.#ctx = this.#canvas.getContext('2d')!; this.#flashCtx = this.#flashCanvas.getContext('2d')!;
+    this.#ctx = this.#canvas.getContext('2d')!; this.#lineCtx = this.#lineCanvas.getContext('2d')!; this.#flashCtx = this.#flashCanvas.getContext('2d')!;
     new ResizeObserver(() => this.#resize()).observe(this.#wrap);
+    sharpens({ resize: () => this.#sizeCanvases(), paint: () => { if (this.#flowOn()) { this.#render(); this.#flashNow(); } } });
     this.#buildControls();
+    // The layout shows and hides the column (its switch, a fold, the phone's tabs): the view shown follows, so a list out of sight draws nothing.
+    const shown = new MutationObserver(() => this.viewChanged()), sized = new ResizeObserver(() => this.#fitName());
+    shown.observe(this.root, { attributes: true, attributeFilter: ['hidden'] }); sized.observe(this.root);
+    this.#off.push(() => shown.disconnect(), () => sized.disconnect(), () => this.trades.dispose());
+    // The name's width changes with the font once it has loaded.
+    void document.fonts?.ready.then(() => this.#fitName());
+    this.viewChanged();
     this.#bindInput();
+    // The price's marks are kept while the column is out of sight too (a phone shows it only on its own tab): minutes spent on another tab
+    // would otherwise be a straight line between two candle closes when the price comes to be drawn.
+    this.#off.push(this.store.subscribe((state, changed) => { if (changed.has('mark') && state.mark.price > 0 && !replaying()) this.#price.add(Date.now(), state.mark.price); }));
+    // A tablet turned over changes arrangement, and the span the chips mark with it (a phone's map span reads as an hour).
+    this.#off.push(onLayoutMode(() => { this.viewChanged(); this.#syncControls(); this.invalidate(); }));
     // The window moves on by itself (and a venue can go quiet without sending anything), so the column redraws once a second while it is on screen.
-    this.#timer = window.setInterval(() => { if (!this.root.hidden && !document.hidden) { this.invalidate(); this.#strip.refresh(); } }, 1000);
+    this.#timer = window.setInterval(() => { if (this.#flowOn() && !document.hidden) { this.invalidate(); this.#strip.refresh(); } }, 1000);
+  }
+
+  /**
+   * The name's tabs in full while the pane's tools still fit on the name's line beside them, else short (a language's short form): measured,
+   * since the line's other keys and the language set what fits. Only the header changes, so the pane's width (what calls this) does not.
+   */
+  #fitName(): void {
+    if (this.root.hidden) return;
+    const name = this.controls.querySelector<HTMLElement>(':scope > .cvd-views'), tools = this.controls.querySelector<HTMLElement>(':scope > .pane-tools');
+    if (!name) return;
+    // A phone shows no view tabs (one view to a tab, 2026-11-14): nothing to fit.
+    if (isPhone()) { this.root.classList.remove('narrow', 'narrower'); return; }
+    if (!tools) return;
+    // Every label in full, then short (Tape is short already; another language's may not be), then the header may wrap. Each step is
+    // taken only while the pane's tools still fall to a second line or the header runs out of its width.
+    const fits = (): boolean => tools.offsetTop <= name.offsetTop + name.offsetHeight / 2 && this.controls.scrollWidth <= this.controls.clientWidth + 1;
+    this.root.classList.remove('narrow', 'narrower');
+    if (fits()) return;
+    this.root.classList.add('narrow');
+    if (fits()) return;
+    this.root.classList.add('narrower');
+  }
+  /** The view the column shows: the saved one, or a phone's tab's (`phoneView`). */
+  #view(): FlowView { return this.phoneView() ?? this.store.state.flowView; }
+  get activeView(): FlowView { return this.#view(); }
+  /**
+   * Whether the flow lines are on screen: the column shown and not covered by another of a phone's tabs, in the flow view. Every drawing of
+   * the lines and the dot rows waits on it (a phone keeps the column in the page for its Tape tab even with the column switched off).
+   */
+  #flowOn(): boolean { return !this.root.hidden && !this.covered() && this.#view() === 'flow'; }
+  /**
+   * The view changed (the tabs, a layout, a phone turned into a desktop) or the column was shown or hidden: the lines, the notice and the dot
+   * rows show in the flow view, Trades in its own; the header's span buttons, settings and help follow the view.
+   */
+  viewChanged(): void {
+    const view = this.#view(), flow = view === 'flow', visible = !this.root.hidden && !this.covered();
+    for (const [id, tab] of this.#viewTabs) { const on = id === view; tab.classList.toggle('on', on); tab.setAttribute('aria-pressed', String(on)); }
+    // Each list shown only while it is the view and the column is on screen (a folded or closed column draws nothing and wants no tape).
+    this.trades.setShown(visible && view === 'trades');
+    this.onVisibility();
+    if (view === this.#shownView) { this.#fitName(); if (flow && visible) this.invalidate(); return; }
+    this.#shownView = view;
+    // The view on the pane itself, for the stylesheet (a phone gives Trades' header one row of keys, the Flow view two).
+    this.root.dataset.view = view;
+    this.#panel?.close(); this.#panel = null;
+    this.#wrap.hidden = !flow; this.#readout.hidden = !flow; this.#helpFlow.hidden = !flow; this.#helpTrades.hidden = flow;
+    if (this.#cells) this.#cells.hidden = !flow;
+    this.#gear.dataset.tip = flow ? t('How the column ranks and draws the exchanges.') : t('Tape settings: what a row is, the smallest order, the side.');
+    // The notice is the flow's: hidden with it, and said again when the flow comes back (its words may have changed meanwhile).
+    if (!flow) this.#notice.hidden = true;
+    this.#noticeKey = '';
+    this.#strip.covered = !flow; this.#strip.refresh();
+    if (flow) { this.#sharedX = null; this.#paintSharedLine(); this.invalidate(); }
+    this.#fitName();
   }
 
   get header(): HTMLElement { return this.controls; }
-  setPalette(name: string): void { this.#palette = PALETTES[name] ?? PALETTES.light!; this.#strip.setPalette(this.#palette); this.invalidate(); }
+  /** The span the column draws: the setting, except that a phone's Flow view fills the area with no map to follow, so the map's span reads as an hour there. */
+  #span(): CvdSpan { const span = this.store.state.cvd.span; return isPhone() ? spanOnPhone(span) : span; }
+  setPalette(name: string): void {
+    this.#palette = paletteOf(name); this.#strip.setPalette(this.#palette); this.trades.setPalette(this.#palette);
+    // A theme's frame changes the buttons' padding and borders, and so what fits beside the name.
+    this.#fitName();
+    // The readout and the chips under the header speak in the lines' colours.
+    const colors = laneColors(this.#palette); this.root.style.setProperty('--cvd-spot', colors.spot); this.root.style.setProperty('--cvd-perp', colors.perp);
+    this.invalidate();
+  }
   invalidate(): void { if (!this.#frame) this.#frame = requestAnimationFrame(() => { this.#frame = 0; this.#render(); }); }
   /**
    * The map's view changed (it does on every frame while it follows the market, and while the pointer moves over it): with the Map span the column
    * follows it, but only redraws when the window has moved by a pixel of its own plot, so a hover on the map costs the column nothing.
    */
   followMap(): void {
-    if (this.store.state.cvd.span !== 'map' || this.root.hidden) return;
+    if (this.#span() !== 'map' || !this.#flowOn()) return;
     const drawn = this.#drawn, pixel = (this.view.t1 - this.view.t0) / Math.max(1, this.#model?.columns ?? 200);
     if (drawn && Math.abs(this.view.t0 - drawn.t0) < pixel && Math.abs(this.view.t1 - drawn.t1) < pixel) return;
     this.invalidate();
@@ -155,10 +285,35 @@ export class CvdPane {
    * The pointer of another pane moved (the map, or one of the panes under it): the column draws a vertical line at the same moment, and
    * redraws only when that line would move to another pixel (or appear, or go).
    */
+  /**
+   * The order book's row under the pointer changed (`bookHover`): the price strip draws a line at its price, and the column redraws only when
+   * that line would move to another pixel (or appear, or go). The flow rows have no price to show it on.
+   */
+  syncBookHover(): void {
+    const y = this.#bookLineY();
+    if (y === this.#bookY) return;
+    this.#bookY = y; this.invalidate();
+  }
+  /** The height of the line for the book's row in the price strip as last drawn, or null when there is none or its price is out of the strip's range. */
+  #bookLineY(): number | null {
+    const b = this.store.state.bookHover, s = this.#priceScale;
+    if (!b || !s || !(s.hi > s.lo) || replaying()) return null;
+    const price = b.lo + b.step / 2;
+    return price < s.lo || price > s.hi ? null : Math.round(s.y + s.h - (price - s.lo) / (s.hi - s.lo) * s.h);
+  }
   syncHover(): void {
     const x = this.#sharedLineX();
     if (x === this.#sharedX) return;
-    this.#sharedX = x; this.invalidate();
+    this.#sharedX = x; this.#paintSharedLine();
+  }
+  /** The line for another pane's pointer at `#sharedX` (none while it is null), on its own canvas. */
+  #paintSharedLine(): void {
+    const ctx = this.#lineCtx, x = this.#sharedX;
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, this.#lineCanvas.width, this.#lineCanvas.height);
+    if (x === null || !this.#flowOn() || this.#w < 60 || this.#h < 60) return;
+    ctx.setTransform(this.#dpr, 0, 0, this.#dpr, 0, 0);
+    ctx.strokeStyle = this.#palette.muted; ctx.lineWidth = 1; ctx.globalAlpha = 0.7;
+    ctx.beginPath(); ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, this.#h); ctx.stroke(); ctx.globalAlpha = 1;
   }
   /** The x of the line for another pane's pointer in the plot as last drawn, or null when it points at no moment this column shows. */
   #sharedLineX(): number | null {
@@ -176,16 +331,16 @@ export class CvdPane {
   }
 
   /** The settings changed (or the person asked for a fresh ranking). */
-  refresh(): void { this.#ranker.reset(); this.#syncControls(); this.#modelKey = ''; this.invalidate(); if (!this.root.hidden) this.#strip.refresh(); }
+  refresh(): void { this.#ranker.reset(); this.#syncControls(); this.#modelKey = ''; this.invalidate(); if (this.#flowOn()) this.#strip.refresh(); this.trades.redraw(); }
   /** The column's settings changed: the ranking starts afresh unless only the dot rows' own were touched, which do not move the exchanges. */
   settingsChanged(): void {
     const key = rankingKey(this.store.state.cvd);
     if (key !== this.#rankingKey) { this.#rankingKey = key; this.refresh(); return; }
-    this.#syncControls(); this.invalidate(); if (!this.root.hidden) this.#strip.refresh();
+    this.#syncControls(); this.invalidate(); if (this.#flowOn()) this.#strip.refresh();
   }
   /** Trades that printed just now, for the blink of the dot rows. */
   flash(prints: readonly Print[]): void { this.#strip.flash(prints); }
-  dispose(): void { window.clearInterval(this.#timer); window.clearTimeout(this.#flashTimer); this.#strip.dispose(); }
+  dispose(): void { window.clearInterval(this.#timer); window.clearTimeout(this.#flashTimer); this.#stopFling(); for (const off of this.#off) off(); this.#off = []; this.#strip.dispose(); this.#fit?.disconnect(); }
 
   /** What the last frame drew. */
   get snapshot(): CvdSnapshot {
@@ -208,18 +363,41 @@ export class CvdPane {
     const seg = el('div', { class: 'seg cvd-seg' });
     for (const span of CVD_SPANS) {
       const button = el('button', { type: 'button', textContent: SPAN_LABELS[span], tip: span === 'map' ? t("Follow the map's time span") : t('Show the last {span}', { span: SPAN_LABELS[span] }), onclick: () => this.#set({ span }) });
+      button.dataset.span = span;
       this.#spanButtons.set(span, button); seg.append(button);
       this.#spanSelect.append(new Option(span === 'map' ? t('Map span') : SPAN_LABELS[span], span));
     }
     this.#spanSelect.onchange = () => this.#set({ span: this.#spanSelect.value as CvdSpan });
     this.#gear.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg>';
-    this.#gear.onclick = () => { this.#panel = togglePanel(this.#gear, { title: t('Flow column'), width: 380, align: 'left', onClose: () => { this.#panel = null; } }, (_tools, body) => this.#buildSettings(body)); };
-    this.controls.append(el('strong', { textContent: t('Flow'), tip: t('Taker flow: cumulative volume delta (market buys minus market sells) per exchange, spot and perpetual. Biggest exchanges first; the top row adds them all.') }), seg, this.#spanSelect, this.#gear, helpButton('cvd'));
+    this.#gear.onclick = () => {
+      if (this.#view() === 'trades') { this.trades.openSettings(this.#gear); return; }
+      this.#panel = togglePanel(this.#gear, { title: t('Flow column'), width: 380, align: 'left', onClose: () => { this.#panel = null; } }, (_tools, body) => this.#buildSettings(body));
+    };
+    // The span buttons are the header's one cell (ui/fit-grid.ts): on the title's line when they fit there, a whole row under it when not.
+    seg.dataset.fit = 'row';
+    const cells = el('div', {}, seg);
+    this.#cells = seg;
+    // The pane's name is its views' tabs (Karl, 2026-11-12: the flow column holds what traded, a view at a time); the strong keeps the name's
+    // place in the header (the layout puts the pane's tools after it).
+    const views: [FlowView, string, string, string][] = [
+      ['flow', t('Flow'), t('Flow'), t('Taker flow: cumulative volume delta (market buys minus market sells) per exchange, spot and perpetual. Biggest exchanges first; the top row adds them all.')],
+      ['trades', t('Tape'), t('Tape'), t('Tape: what was bought and sold at market, each order (by default, a burst of them one row) or a block of time per row, newest on top, with the markets it came from and its largest orders.')],
+    ];
+    const name = el('strong', { class: 'seg cvd-views', role: 'group', ariaLabel: t('Flow column view') }, ...views.map(([id, long, short, tip]) => {
+      const tab = el('button', { type: 'button', class: 'cvd-view', tip, ariaLabel: long, onclick: () => { if (this.store.state.flowView !== id) this.store.set({ flowView: id }); } },
+        el('span', { class: 'long', textContent: long }), el('span', { class: 'short', textContent: short, ariaHidden: 'true' }));
+      tab.dataset.view = id; this.#viewTabs.set(id, tab);
+      return tab;
+    }));
+    // A phone has one view to a tab and shows no view tabs: the Tape's row says its name instead (the stylesheet shows it there alone).
+    const phoneTitle = el('span', { class: 'cvd-phone-title', textContent: t('Tape'), ariaHidden: 'true' });
+    this.controls.append(name, phoneTitle, cells, this.#spanSelect, this.#gear, this.#helpFlow, this.#helpTrades, this.#readout);
+    this.#fit = new FitGrid(this.controls, cells, this.root);
     this.#syncControls();
   }
   #syncControls(): void {
-    const { span } = this.store.state.cvd;
-    for (const [id, button] of this.#spanButtons) button.classList.toggle('on', id === span);
+    const span = this.#span();
+    for (const [id, button] of this.#spanButtons) { const on = id === span; button.classList.toggle('on', on); button.setAttribute('aria-pressed', String(on)); }
     if (this.#spanSelect.value !== span) this.#spanSelect.value = span;
   }
   #set(patch: Partial<CvdSettings>): void {
@@ -229,6 +407,9 @@ export class CvdPane {
   #buildSettings(body: HTMLElement): void {
     const c = this.store.state.cvd;
     body.append(
+      // The phone's chart draws spot and perpetual on one axis of dollars, or each over its own range (see `CvdSettings.scale`).
+      ...(isPhone() ? [selectRow(t('Flow lines'), t('Spot and perpetual on one axis of dollars, so their sizes read against each other, or each over its own range, so their shapes do.'),
+        [['shared', t('One axis of dollars')], ['own', t('Each over its own range')]], c.scale, v => this.#set({ scale: v === 'own' ? 'own' : 'shared' }))] : []),
       selectRow(t('Rank and share over'), t('The window the exchanges are ranked over, and the figures beside each row (net flow, share of volume) are taken over.'), RANK_WINDOWS.map(w => [w, w] as [string, string]), c.rank, v => this.#set({ rank: v as RankWindow })),
       numberRow(t('Exchanges shown'), t('How many exchange rows to show, biggest first. 0 shows every exchange that has traded; the column scrolls.'), { min: 0, step: 1, max: 32, value: c.top }, v => this.#set({ top: v })),
       selectRow(t('Row heights'), t('Golden: each rank is a little over half as tall as the one above it. Volume: as tall as its share of the volume. Equal: all the same. The top row is always the tallest.'), HEIGHT_MODES.map(m => [m, m === 'golden' ? t('Golden ratio') : m === 'volume' ? t('By volume') : t('Equal')] as [string, string]), c.heights, v => this.#set({ heights: v as CvdSettings['heights'] })),
@@ -293,26 +474,29 @@ export class CvdPane {
       const lines = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? this.#h : 1;
       this.#scrollTo(this.#scroll + e.deltaY * lines);
     }, { passive: false });
+    // The mouse and the pen. A finger is the recogniser's (`#bindFingers`): it needs a pan that tells scrolling from scrubbing, which pointer events do not.
     let drag: { y: number; scroll: number } | null = null, selecting: { x: number } | null = null;
     c.addEventListener('pointerdown', e => {
-      if (e.button !== 0 && e.pointerType === 'mouse') return;
+      if (e.pointerType === 'touch' || (e.button !== 0 && e.pointerType === 'mouse')) return;
       const at = local(e), time = this.#timeAt(at.x);
-      if (this.range && time !== null && at.x >= this.#plot.x && (e.pointerType === 'touch' ? this.range.armed : selects(this.range.armed, e))) {
+      if (this.range && time !== null && at.x >= this.#plot.x && selects(this.range.armed, e)) {
         selecting = { x: at.x }; this.range.begin({ t: time, p: null }); c.setPointerCapture(e.pointerId); return;
       }
       const { y } = local(e); drag = { y, scroll: this.#scroll };
       c.setPointerCapture(e.pointerId);
     });
     c.addEventListener('pointermove', e => {
+      if (e.pointerType === 'touch') return;
       const { x, y } = local(e);
-      if (selecting) { const time = this.#timeAt(x); if (time !== null) this.range?.move({ t: time, p: null }); if (e.pointerType !== 'touch') this.#shareTime(x); return; }
-      if (drag && this.#layout && maxScroll(this.#layout, this.#h) > 0 && (e.pointerType === 'touch' || Math.abs(y - drag.y) > 4)) this.#scrollTo(drag.scroll - (y - drag.y));
-      else if (!drag || e.pointerType !== 'touch') this.#hover = { x, y };
+      if (selecting) { const time = this.#timeAt(x); if (time !== null) this.range?.move({ t: time, p: null }); this.#shareTime(x); return; }
+      if (drag && this.#layout && maxScroll(this.#layout, this.#h) > 0 && Math.abs(y - drag.y) > 4) this.#scrollTo(drag.scroll - (y - drag.y));
+      else this.#hover = { x, y };
       c.style.cursor = drag && Math.abs(y - drag.y) > 4 ? 'grabbing' : 'crosshair';
-      if (e.pointerType !== 'touch') this.#shareTime(x);
+      this.#shareTime(x);
       this.invalidate();
     });
     const release = (e: PointerEvent) => {
+      if (e.pointerType === 'touch') return;
       const sel = selecting;
       if (sel) {
         selecting = null; const { x } = local(e), time = this.#timeAt(x);
@@ -320,28 +504,120 @@ export class CvdPane {
         if (c.hasPointerCapture(e.pointerId)) c.releasePointerCapture(e.pointerId);
         return;
       }
-      drag = null; if (c.hasPointerCapture(e.pointerId)) c.releasePointerCapture(e.pointerId); if (e.pointerType === 'touch') this.#hover = null; c.style.cursor = 'crosshair'; this.invalidate(); };
+      drag = null; if (c.hasPointerCapture(e.pointerId)) c.releasePointerCapture(e.pointerId); c.style.cursor = 'crosshair'; this.invalidate(); };
     c.addEventListener('pointerup', release); c.addEventListener('pointercancel', release);
     c.addEventListener('pointerleave', e => { if (e.pointerType === 'touch') return; this.#hover = null; this.#shareTime(null); this.invalidate(); });
     c.addEventListener('dblclick', () => { this.#scroll = 0; this.invalidate(); });
-    c.style.cursor = 'crosshair'; c.style.touchAction = 'pan-x';
+    c.style.cursor = 'crosshair';
+    this.#bindFingers();
   }
+
+  /**
+   * A finger (Karl, 2026-10-26, the Flow view for a phone): a drag along the lines scrubs them, and the readout under the header says what
+   * they hold there; a drag across them scrolls the exchanges, with the fling a lifted finger leaves; a tap pins the moment under it (tap it
+   * again to let it go), a press held moves the pin; two fingers apart or together step the span shorter or longer; a double tap scrolls
+   * back to the top. The Range tool, when armed, takes a drag along the lines as it does on the other panes.
+   */
+  #bindFingers(): void {
+    let mode: 'scrub' | 'scroll' | 'select' | null = null, startY = 0, base = 0, last: Pt | null = null, from: Pt | null = null;
+    const handlers: GestureHandlers = {
+      down: () => this.#stopFling(),
+      tap: p => this.#pinAt(p, true),
+      doubleTap: () => { this.#unpin(); this.#stopFling(); this.#scroll = 0; this.invalidate(); },
+      hold: p => this.#pinAt(p, false), holdMove: p => this.#pinAt(p, false),
+      panStart: p => {
+        mode = null; from = p; last = p;
+        if (this.range?.armed && p.x >= this.#plot.x && this.#timeAt(p.x) !== null) { mode = 'select'; this.range.begin({ t: this.#timeAt(p.x)!, p: null }); }
+      },
+      pan: (d, p) => {
+        last = p;
+        if (mode === 'select') { const time = this.#timeAt(p.x); if (time !== null) this.range?.move({ t: time, p: null }); return; }
+        // Along the lines or across them, judged once by the first move, and kept until the finger lifts.
+        if (mode === null) { mode = Math.abs(d.x) > Math.abs(d.y) * 1.2 ? 'scrub' : 'scroll'; startY = p.y - d.y; base = this.#scroll; if (mode === 'scrub') this.#unpin(); }
+        if (mode === 'scrub') { this.#scrub = { x: p.x, y: p.y }; this.invalidate(); }
+        else this.#scrollTo(base - (p.y - startY));
+      },
+      panEnd: v => {
+        const was = mode; mode = null;
+        if (was === 'select') {
+          const time = last ? this.#timeAt(last.x) : null;
+          if (v === null || time === null) this.range?.cancel(); else this.range?.end({ t: time, p: null }, !last || !from || Math.abs(last.x - from.x) < DRAG_MIN_PX);
+        } else if (was === 'scrub') { this.#scrub = null; this.invalidate(); }
+        else if (was === 'scroll' && v) this.#startFling(-v.y);
+      },
+      pinchStart: info => { this.#scrub = null; this.#pinchBase = info.now.dx; },
+      pinch: info => {
+        // Time is the horizontal axis: only the span moves (the map's window has nothing to do here), a step for each time the fingers have gone a third apart or together.
+        if (!isPhone()) return;
+        const ratio = axisPinchScale(this.#pinchBase, info.now.dx), now = this.#span(), next = pinchSpan(now, ratio);
+        if (next === now) return;
+        this.#pinchBase = info.now.dx; this.#unpin(); this.#set({ span: next });
+      },
+      cancel: () => { if (mode === 'select') this.range?.cancel(); mode = null; this.#scrub = null; this.invalidate(); },
+    };
+    bindTouch(this.#canvas, new GestureRecognizer(handlers));
+  }
+
   #scrollTo(value: number): void {
     const layout = this.#layout; if (!layout) return;
     const next = Math.max(0, Math.min(maxScroll(layout, this.#h), Math.round(value)));
     if (next !== this.#scroll) { this.#scroll = next; this.invalidate(); }
   }
+  /** Keep scrolling after a finger lifted at `velocity` (px/ms, positive scrolls down), slowing as a rolling thing does; not with reduced motion, and a touch stops it. */
+  #startFling(velocity: number): void {
+    this.#stopFling();
+    const layout = this.#layout, reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (!layout || reduced || !(Math.abs(velocity) > 0.08) || maxScroll(layout, this.#h) <= 0) return;
+    let v = velocity, at = this.#scroll, then = performance.now();
+    const step = (now: number): void => {
+      const dt = Math.min(48, now - then); then = now;
+      at += v * dt; v *= Math.pow(0.95, dt / 16.7);
+      const limit = this.#layout ? maxScroll(this.#layout, this.#h) : 0;
+      this.#scrollTo(at);
+      this.#fling = Math.abs(v) < 0.02 || at <= 0 || at >= limit || document.hidden ? 0 : requestAnimationFrame(step);
+    };
+    this.#fling = requestAnimationFrame(step);
+  }
+  #stopFling(): void { if (this.#fling) { cancelAnimationFrame(this.#fling); this.#fling = 0; } }
+
+  /** The pin at the moment under a finger (null outside the lines): a tap near the pin lets it go, where `toggle` is set; a hold moves it. */
+  #pinAt(p: Pt, toggle: boolean): void {
+    const time = p.x >= this.#plot.x && p.x <= this.#plot.x + this.#plot.w ? this.#timeAt(p.x) : null, held = this.#pinX();
+    if (time === null || (toggle && held !== null && Math.abs(held - p.x) < 24)) { this.#unpin(); return; }
+    this.#pin = { t: time, y: p.y }; this.invalidate();
+  }
+  #unpin(): void { if (this.#pin) { this.#pin = null; this.invalidate(); } }
+  /** Where the pinned moment is on the lines now (it moves left as time passes), or null with no pin or one the window has left behind. */
+  #pinX(): number | null {
+    const m = this.#model, pin = this.#pin;
+    if (!pin || !m || !(m.t1 > m.t0)) return null;
+    const x = this.#plot.x + (pin.t - m.t0) / (m.t1 - m.t0) * this.#plot.w;
+    return x >= this.#plot.x && x <= this.#plot.x + this.#plot.w ? x : null;
+  }
+  /** Whatever points at the lines now: a finger scrubbing, a pin, or the mouse. */
+  #pointer(): { x: number; y: number; touch: boolean } | null {
+    if (this.#scrub) return { ...this.#scrub, touch: true };
+    const x = this.#pinX();
+    if (x !== null && this.#pin) return { x, y: this.#pin.y, touch: true };
+    return this.#hover ? { ...this.#hover, touch: false } : null;
+  }
 
   #resize(): void {
+    this.#sizeCanvases();
+    this.#flashes = [];
+    this.#modelKey = '';
+    this.invalidate();
+  }
+  /** The column's canvases sized at `pixelRatio()`; a sharp picture sizes them alone (the rows are worked out for CSS pixels, so they stand). */
+  #sizeCanvases(): void {
     const r = this.#wrap.getBoundingClientRect();
-    this.#w = Math.max(1, Math.floor(r.width)); this.#h = Math.max(1, Math.floor(r.height)); this.#dpr = window.devicePixelRatio || 1;
+    this.#w = Math.max(1, Math.floor(r.width)); this.#h = Math.max(1, Math.floor(r.height)); this.#dpr = pixelRatio();
     this.#canvas.width = Math.round(this.#w * this.#dpr); this.#canvas.height = Math.round(this.#h * this.#dpr);
     this.#canvas.style.width = `${this.#w}px`; this.#canvas.style.height = `${this.#h}px`;
     this.#flashCanvas.width = this.#canvas.width; this.#flashCanvas.height = this.#canvas.height;
     this.#flashCanvas.style.width = this.#canvas.style.width; this.#flashCanvas.style.height = this.#canvas.style.height;
-    this.#flashes = [];
-    this.#modelKey = '';
-    this.invalidate();
+    this.#lineCanvas.width = this.#canvas.width; this.#lineCanvas.height = this.#canvas.height;
+    this.#lineCanvas.style.width = this.#canvas.style.width; this.#lineCanvas.style.height = this.#canvas.style.height;
   }
 
   // ---- data -----------------------------------------------------------------------------------------------------------------------
@@ -349,8 +625,8 @@ export class CvdPane {
   /** Minute candles of the market on screen for the price strip, fetched now and then (the live marks carry it between). */
   #loadPrice(now: number, from: number): void {
     const id = this.store.state.seriesInstrument || this.store.state.marketId;
-    // Not before the map has a window (at startup the window begins at zero).
-    if (!id || this.#priceLoading || !(from > 0)) return;
+    // Not before the map has a window (at startup the window begins at zero), nor before its first columns on the server's page (`Hub.mapFirst`).
+    if (!id || this.#priceLoading || !(from > 0) || this.hub.mapFirst()) return;
     // Replay: candles up to the last minute over by its moment, asked again as it moves on; live, again after a minute.
     const replay = replaying(), want = `${id}|${Math.floor(from / 3_600_000)}${replay ? `|${Math.floor(now / 60_000)}` : ''}`;
     if (want === this.#priceFor && (replay || Date.now() - this.#priceAt < 60_000)) return;
@@ -364,10 +640,11 @@ export class CvdPane {
   // ---- drawing --------------------------------------------------------------------------------------------------------------------
 
   #render(): void {
-    if (this.root.hidden || this.#w < 60 || this.#h < 60) return;
+    if (!this.#flowOn() || this.#w < 60 || this.#h < 60) return;
     const s = this.store.state, cfg = s.cvd, now = pageNow(), p = this.#palette, ctx = this.#ctx;
     this.#ranker.refreshMs = cfg.refreshMin * 60_000; this.#ranker.auto = cfg.auto;
-    const spanMs = cfg.span === 'map' ? Math.max(60_000, this.view.t1 - this.view.t0) : CVD_SPAN_MS[cfg.span];
+    const span = this.#span(), phone = isPhone();
+    const spanMs = span === 'map' ? Math.max(60_000, this.view.t1 - this.view.t0) : CVD_SPAN_MS[span];
     const ids = flowIds(s, this.hub.flow.ids);
     // The price comes from the recorded seconds of the market on screen when it has them (the same trades as the flow, a second at a time).
     const priceId = priceFlowId([s.seriesInstrument, s.marketId], id => this.hub.flow.has(id));
@@ -375,12 +652,12 @@ export class CvdPane {
     const loadIds = flowLoadIds(s, this.hub.flow.ids);
     const flowIdsToLoad = priceId && !loadIds.includes(priceId) ? [...loadIds, priceId] : loadIds;
     // Loading keeps the real clock (the seconds held end at the real now); the window shown ends at the page's now (a replay's moment).
-    const secondsFrom = Math.max(Date.now() - HISTORY_CAP_MS, Math.min(now, cfg.span === 'map' ? this.view.t1 : now) - reach - 60_000);
+    const secondsFrom = Math.max(Date.now() - HISTORY_CAP_MS, Math.min(now, span === 'map' ? this.view.t1 : now) - reach - 60_000);
     void this.hub.ensureFlow(flowIdsToLoad, secondsFrom);
     // A window reaching back before the seconds the page holds draws its older part from the minutes: asked from a six-hour boundary (so
     // zooming out does not ask again at every step) up to the hour after the latest of the seconds begins. That is where the seconds
     // were loaded from, not the clock: it stays put until the ring has held a day and a half, and then moves on by the hour.
-    const wanted = cfg.span === 'map' ? this.view.t0 : now - CVD_SPAN_MS[cfg.span], older = wanted < secondsFrom - 60_000;
+    const wanted = span === 'map' ? this.view.t0 : now - CVD_SPAN_MS[span], older = wanted < secondsFrom - 60_000;
     let latest = -Infinity;
     if (older) for (const id of flowIdsToLoad) { const first = this.hub.flow.get(id)?.span?.first; if (first !== undefined && first * 1000 > latest) latest = first * 1000; }
     // Nothing traded in the last day (the seconds were asked for and none came): the minutes are asked for up to the hour that is coming.
@@ -388,16 +665,21 @@ export class CvdPane {
     if (older && latest > -Infinity) void this.hub.ensureFlowMinutes(flowIdsToLoad, Math.floor((wanted - 3_600_000) / MINUTES_FROM_MS) * MINUTES_FROM_MS, Math.ceil((latest + 120_000) / 3_600_000) * 3_600_000);
     let earliest = Infinity;
     for (const id of ids) { const first = this.hub.flow.track(id)?.first; if (first !== null && first !== undefined && first * 1000 < earliest) earliest = first * 1000; }
-    const win = flowWindow({ span: cfg.span, mapT0: this.view.t0, mapT1: this.view.t1, now, earliest }), { t0, t1 } = win;
+    // A phone's default span (the saved `map`: no chip was ever chosen) is up to an hour and no more than the flow holds, as the map's span is on a
+    // desktop: a page that has just opened draws its first minutes across the whole chart, not a few seconds at the edge of an empty hour.
+    const fit = phone && cfg.span === 'map';
+    const win = fit ? flowWindow({ span: 'map', mapT0: now - CVD_SPAN_MS['1h'], mapT1: now, now, earliest }) : flowWindow({ span, mapT0: this.view.t0, mapT1: this.view.t1, now, earliest }), { t0, t1 } = win;
+    this.#windowName = fit ? windowName(Math.round((t1 - t0) / 1000)) : span;
     this.#since = win.since; this.#sinceHeld = older && this.hub.flowMinutesState === 'unavailable';
     this.#loadPrice(now, t0);
     if (s.mark.price > 0 && !replaying()) this.#price.add(Date.now(), s.mark.price);
 
     this.#gutter = Math.max(GUTTER_MIN, Math.min(GUTTER_MAX, Math.round(this.#w * 0.34)));
-    const plotW = Math.max(20, this.#w - this.#gutter - PAD), columns = Math.max(24, Math.min(900, Math.floor(plotW)));
+    // On a phone the price has an axis at the right of the plot, and every row keeps the room so a moment sits above the same pixel in all of them.
+    const plotW = Math.max(20, this.#w - this.#gutter - (phone ? PRICE_AXIS_W : PAD)), columns = Math.max(24, Math.min(900, Math.floor(plotW)));
     // The lines' ends flash only in a window that ends now (within a column): not in a replay, nor on a map moved back into the past.
     this.#atLive = !replaying() && t1 >= Date.now() - Math.max(2_000, (t1 - t0) / columns);
-    const key = [this.hub.flow.version, columns, Math.floor(t0 / Math.max(1000, spanMs / columns)), Math.floor(now / 1000), cfg.span, cfg.rank, cfg.top, cfg.heights, cfg.auto, cfg.refreshMin, cfg.pinned.join(','), cfg.quietFlag, cfg.rebase, s.scope, s.disabledVenues.join(','), ids.length, this.#price.length, priceId ?? ''].join('|');
+    const key = [this.hub.flow.version, columns, Math.floor(t0 / Math.max(1000, spanMs / columns)), Math.floor(now / 1000), span, cfg.rank, cfg.top, cfg.heights, cfg.auto, cfg.refreshMin, cfg.pinned.join(','), cfg.quietFlag, cfg.rebase, s.scope, s.disabledVenues.join(','), ids.length, this.#price.length, priceId ?? ''].join('|');
     if (key !== this.#modelKey || !this.#model) {
       this.#model = buildModel({ flow: this.hub.flow, ids, kindOf: id => kindOf(s.markets, id), t0, t1, columns, now, settings: cfg, ranker: this.#ranker });
       this.#priceId = priceId; this.#priceCols = this.#priceColumns(this.#model);
@@ -408,9 +690,14 @@ export class CvdPane {
     this.#drawn = { t0: this.view.t0, t1: this.view.t1 };
     this.#empty = emptyScopeMessage(s) ?? (!model.rows.length ? (ids.length ? t('Waiting for trades…') : t('No venues are enabled.')) : null);
     this.#updateNotice(model, s);
-    const layout = rowHeights(cfg.heights, this.#h, model.rows.map(r => r.share), { minRow: MIN_ROW, minAgg: MIN_AGG, price: PRICE_H });
+    // A phone has no strip for the price: the aggregate row is the chart, as tall as the pane makes it, with the price over the lines.
+    const shares = model.rows.map(r => r.share);
+    const layout = phone ? rowHeights(cfg.heights, this.#h, shares, { minRow: PHONE_MIN_ROW, price: 0, agg: heroHeight(this.#h, layoutMode() === 'phone-landscape') })
+      : rowHeights(cfg.heights, this.#h, shares, { minRow: MIN_ROW, minAgg: MIN_AGG, price: PRICE_H });
     this.#layout = layout;
     this.#scroll = Math.max(0, Math.min(maxScroll(layout, this.#h), this.#scroll));
+    // A pin whose moment has left the window (it moves left as time passes) is let go.
+    if (this.#pin && this.#pinX() === null) this.#pin = null;
 
     ctx.setTransform(this.#dpr, 0, 0, this.#dpr, 0, 0);
     ctx.clearRect(0, 0, this.#w, this.#h);
@@ -428,16 +715,20 @@ export class CvdPane {
     });
     ctx.restore();
     ctx.fillStyle = p.panel; ctx.fillRect(0, 0, this.#w, top);
-    this.#paintRow(ctx, p, colors, plot, 0, layout.agg, [model.spot, model.perp].filter((l): l is LaneLine => l !== null), aggregateLabel(model, layout.agg, this.#filterNote(s)), false, cfg.rebase);
-    this.#paintPrice(ctx, p, plot, layout.agg, layout.price, model);
-    if (this.#since !== null) this.#paintSince(ctx, p, plot, this.#since);
+    if (phone) this.#paintHero(ctx, p, colors, plot, layout.agg, model, cfg);
+    else {
+      this.#paintRow(ctx, p, colors, plot, 0, layout.agg, [model.spot, model.perp].filter((l): l is LaneLine => l !== null), aggregateLabel(model, layout.agg, this.#filterNote(s)), false, cfg.rebase);
+      this.#paintPrice(ctx, p, plot, layout.agg, layout.price, model);
+    }
+    // On a phone the chart marks where the flow begins and the readout says since when; the note over the lines is for the desktop column.
+    if (this.#since !== null && !phone) this.#paintSince(ctx, p, plot, this.#since);
     ctx.strokeStyle = p.muted; ctx.globalAlpha = 0.55; ctx.beginPath(); ctx.moveTo(0, top + 0.5); ctx.lineTo(this.#w, top + 0.5); ctx.stroke(); ctx.globalAlpha = 1;
     if (maxScroll(layout, this.#h) > 0) this.#paintScrollbar(ctx, p, layout);
     if (this.#empty) { ctx.fillStyle = p.muted; ctx.font = `12px ${SANS}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(this.#empty, this.#w / 2, Math.min(this.#h - 20, top + 36)); }
     this.#paintRange(ctx, p, plot, model);
-    this.#sharedX = this.#sharedLineX();
-    if (this.#sharedX !== null) { ctx.save(); ctx.strokeStyle = p.muted; ctx.globalAlpha = 0.7; ctx.beginPath(); ctx.moveTo(this.#sharedX + 0.5, 0); ctx.lineTo(this.#sharedX + 0.5, this.#h); ctx.stroke(); ctx.restore(); }
+    this.#sharedX = this.#sharedLineX(); this.#paintSharedLine();
     this.#paintHover(ctx, p, model, layout, plot, window);
+    if (phone) this.#updateReadout(model);
   }
 
   /** The Range tool's selection, as a lightly shaded band across the rows between dashed edges, where the column shows its time. */
@@ -466,7 +757,11 @@ export class CvdPane {
       this.#paintLane(ctx, lane, color, plot, inner, columns, rebase, p);
       if (bursts) this.#paintEvents(ctx, lane, color, plot, inner, columns, rebase);
     }
-    // The label.
+    this.#paintLabel(ctx, p, colors, y, h, label);
+  }
+
+  /** A row's label in the gutter at the left, centred on the row: its lines (a venue's mark or a lane's dot ahead of the text, or the price's short line), clipped to the gutter. */
+  #paintLabel(ctx: CanvasRenderingContext2D, p: Palette, colors: LaneColors, y: number, h: number, label: readonly LabelLine[]): void {
     ctx.save(); ctx.beginPath(); ctx.rect(0, y, this.#gutter - 4, h); ctx.clip();
     ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
     const total = label.length * LINE_H, first = y + (h - total) / 2 + LINE_H / 2, room = this.#gutter - 10;
@@ -475,27 +770,22 @@ export class CvdPane {
       let x = PAD;
       if (line.mark) { drawVenueMark(ctx, line.mark, x + 6, ly, 12); x += 16; }
       if (line.dot) { ctx.fillStyle = line.dot === 'spot' ? colors.spot : colors.perp; ctx.beginPath(); ctx.arc(x + 3, ly, 3, 0, Math.PI * 2); ctx.fill(); x += 11; }
-      ctx.font = line.bold ? `600 11px ${SANS}` : `11px ${line.dot ? MONO : SANS}`;
+      // The price's legend is the short line it is drawn with over the chart.
+      if (line.swatch) { ctx.strokeStyle = p.text; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.moveTo(x - 1, ly); ctx.lineTo(x + 8, ly); ctx.stroke(); x += 11; }
+      ctx.font = line.bold ? `600 11px ${SANS}` : `11px ${line.dot || line.swatch ? MONO : SANS}`;
       ctx.fillStyle = line.tone === 'muted' ? p.muted : p.text;
       ctx.fillText(fit(ctx, line.text, room - (x - PAD)), x, ly);
     });
     ctx.restore();
   }
 
-  #scaleOf(lane: LaneLine, rebase: boolean): { lo: number; hi: number } | null {
-    let lo = lane.min, hi = lane.max;
-    if (!(lo <= hi)) return null;
-    if (rebase) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
-    if (hi - lo < 1) { lo -= 1; hi += 1; }
-    const pad = (hi - lo) * 0.1;
-    return { lo: lo - pad, hi: hi + pad };
-  }
+  #scaleOf(lane: LaneLine, rebase: boolean): Range | null { return laneRange(lane, rebase); }
 
-  #paintLane(ctx: CanvasRenderingContext2D, lane: LaneLine, color: string, plot: { x: number; w: number }, inner: { y: number; h: number }, columns: number, rebase: boolean, p: Palette): void {
-    const scale = this.#scaleOf(lane, rebase); if (!scale) return;
+  /** `scale`: the range the line is drawn over, where it is not its own (the phone's chart puts spot and perpetual on one axis). */
+  #paintLane(ctx: CanvasRenderingContext2D, lane: LaneLine, color: string, plot: { x: number; w: number }, inner: { y: number; h: number }, columns: number, rebase: boolean, p: Palette, scale: Range | null = this.#scaleOf(lane, rebase)): void {
+    if (!scale) return;
     const X = (c: number): number => plot.x + (c + 0.5) / columns * plot.w, Y = (v: number): number => inner.y + inner.h - (v - scale.lo) / (scale.hi - scale.lo) * inner.h;
     ctx.save();
-    if (rebase && scale.lo < 0 && scale.hi > 0) { ctx.strokeStyle = p.line; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(plot.x, Math.round(Y(0)) + 0.5); ctx.lineTo(plot.x + plot.w, Math.round(Y(0)) + 0.5); ctx.stroke(); ctx.setLineDash([]); }
     // The envelope: where the running delta went inside a column, which a line through the last values would hide at coarse spans.
     if (lane.series) {
       ctx.globalAlpha = 0.2; ctx.fillStyle = color;
@@ -575,6 +865,12 @@ export class CvdPane {
     };
     this.#flashFrame = requestAnimationFrame(draw);
   }
+  /** The flashes still running, drawn as they are now (a sharp picture's sizing cleared their canvas; their own loop draws them next). */
+  #flashNow(): void {
+    const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches, now = performance.now();
+    this.#flashes = this.#flashes.filter(f => now - f.at < (reduced ? FLASH_LIFE_MS / 2 : FLASH_LIFE_MS));
+    this.#paintFlashes(now, reduced);
+  }
   #paintFlashes(now: number, reduced: boolean): void {
     const ctx = this.#flashCtx;
     ctx.setTransform(this.#dpr, 0, 0, this.#dpr, 0, 0); ctx.clearRect(0, 0, this.#w, this.#h);
@@ -611,6 +907,7 @@ export class CvdPane {
     const sec = Math.floor(pageNow() / 1000) - 1, last = replaying() ? (track ? track.priceAt(track.settled(sec)) : NaN) : st.mark.price, ly = y + h / 2;
     ctx.font = `600 11px ${SANS}`; ctx.fillStyle = p.text; ctx.fillText(t('PRICE'), PAD, ly - LINE_H / 2);
     ctx.font = `11px ${MONO}`; ctx.fillStyle = p.muted; ctx.fillText(fit(ctx, last > 0 ? fmtPrice(last) : '–', this.#gutter - 10), PAD, ly + LINE_H / 2);
+    this.#priceScale = null;
     if (cols.min <= cols.max) {
       const pad = (cols.max - cols.min) * 0.12 || cols.max * 0.0005, lo = cols.min - pad, hi = cols.max + pad, inner = { y: y + 7, h: h - 14 };
       ctx.strokeStyle = p.text; ctx.globalAlpha = 0.85; ctx.lineWidth = 1.3; ctx.beginPath();
@@ -621,8 +918,116 @@ export class CvdPane {
         if (pen) ctx.lineTo(x, yy); else { ctx.moveTo(x, yy); pen = true; }
       }
       ctx.stroke(); ctx.globalAlpha = 1;
+      this.#priceScale = { lo, hi, y: inner.y, h: inner.h };
+    }
+    // The order book's row under the pointer, across the strip at its price, in its side's colour (the map draws it too).
+    this.#bookY = this.#bookLineY();
+    if (this.#bookY !== null) {
+      ctx.strokeStyle = this.store.state.bookHover?.side === 'ask' ? p.ask : p.bid; ctx.lineWidth = 1; ctx.globalAlpha = 0.9; ctx.setLineDash([5, 3]);
+      ctx.beginPath(); ctx.moveTo(plot.x, this.#bookY + 0.5); ctx.lineTo(plot.x + plot.w, this.#bookY + 0.5); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
     }
     ctx.restore();
+  }
+
+  /**
+   * The phone's chart (Karl, 2026-10-26: "overlaying the price with the top aggregated CVDs, one y-axis for the CVD and one for the price"): the
+   * aggregate row, as tall as the pane makes it, with the price drawn over the flow. While `scale` is shared the spot and perpetual lines stand
+   * on one axis of dollars at the left (its numbers inside the plot, over a halo), so their sizes read against each other; `own` gives each its
+   * range, as every row has, so their shapes do. The price has its own axis in the margin at the right, with a tag at the newest price, and a
+   * time axis runs along the foot. The gutter's label is the legend: each line's colour beside its figure, the price's short line beside the price.
+   */
+  #paintHero(ctx: CanvasRenderingContext2D, p: Palette, colors: LaneColors, plot: { x: number; w: number }, h: number, model: CvdModel, cfg: CvdSettings): void {
+    const columns = model.columns, rebase = cfg.rebase, TOP = 12, FOOT = 22, inner = { y: TOP, h: Math.max(24, h - TOP - FOOT) };
+    const lanes = [model.spot, model.perp].filter((l): l is LaneLine => l !== null);
+    const shared = cfg.scale === 'shared' && lanes.length ? sharedRange(lanes, rebase) : null;
+    const cols = this.#priceCols, prices = cols ? priceRange(cols.min, cols.max) : null;
+    // Where each line stands, kept for the dots a finger's cursor puts on them.
+    this.#heroGeo = { inner, spot: model.spot ? shared ?? laneRange(model.spot, rebase) : null, perp: model.perp ? shared ?? laneRange(model.perp, rebase) : null, price: prices };
+    const X = (c: number): number => plot.x + (c + 0.5) / columns * plot.w, right = plot.x + plot.w;
+    const yOf = (r: Range, v: number): number => inner.y + inner.h - (v - r.lo) / (r.hi - r.lo) * inner.h;
+    const halo = (text: string, x: number, y: number, align: CanvasTextAlign): void => { ctx.textAlign = align; ctx.lineWidth = 4; ctx.strokeStyle = p.panel; ctx.strokeText(text, x, y); ctx.fillText(text, x, y); };
+    ctx.save(); ctx.beginPath(); ctx.rect(0, 0, this.#w, h); ctx.clip();
+    ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+
+    // The time axis: a faint line at each tick through the plot, and its label along the foot.
+    ctx.font = `10px ${SANS}`;
+    const axis = timeAxis(model.t0, model.t1, plot.w, text => ctx.measureText(text).width, { minPx: 42, dateOnFirst: false });
+    ctx.strokeStyle = p.line; ctx.globalAlpha = 0.55; ctx.lineWidth = 1; ctx.beginPath();
+    for (const tick of axis.ticks) { const x = Math.round(plot.x + (tick - model.t0) / (model.t1 - model.t0) * plot.w) + 0.5; if (x > plot.x && x < right) { ctx.moveTo(x, inner.y); ctx.lineTo(x, inner.y + inner.h); } }
+    ctx.stroke(); ctx.globalAlpha = 1;
+    ctx.fillStyle = p.muted;
+    for (const label of axis.labels) { ctx.textAlign = 'center'; ctx.fillText(label.text, plot.x + label.x, h - FOOT / 2 + 1); }
+    // Where the flow begins, when it began after the window did: what is left of the line is nobody's data, not a quiet market.
+    if (this.#since !== null) {
+      const x = Math.round(plot.x + (this.#since - model.t0) / (model.t1 - model.t0) * plot.w) + 0.5;
+      if (x > plot.x && x < right) { ctx.strokeStyle = p.muted; ctx.globalAlpha = 0.8; ctx.setLineDash([2, 3]); ctx.beginPath(); ctx.moveTo(x, inner.y); ctx.lineTo(x, inner.y + inner.h); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1; }
+    }
+
+    // The dollars: gridlines and their numbers (shared axis only: with a range each there is no one set of dollars to name), zero stronger.
+    ctx.font = `10px ${MONO}`;
+    const dollars = shared ? niceTicks(shared.lo, shared.hi, 4) : null;
+    if (shared && dollars) {
+      ctx.lineWidth = 1;
+      for (const v of dollars.values) {
+        const y = Math.round(yOf(shared, v)) + 0.5;
+        ctx.strokeStyle = v === 0 ? p.muted : p.line; ctx.globalAlpha = v === 0 ? 0.7 : 0.6; ctx.setLineDash(v === 0 ? [5, 4] : [1, 3]);
+        ctx.beginPath(); ctx.moveTo(plot.x, y); ctx.lineTo(right, y); ctx.stroke();
+      }
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+    }
+
+    // The flow: spot under perpetual, as in the rows.
+    // `undefined`, not null, where each has its own range: a null range is a line with nothing to draw it over.
+    for (const lane of lanes) this.#paintLane(ctx, lane, lane.kind === 'spot' ? colors.spot : colors.perp, plot, inner, columns, rebase, p, shared ?? undefined);
+
+    // The price over the flow, and its axis: a number and a small tick at each round price, and a tag at the newest.
+    if (cols && prices) {
+      ctx.strokeStyle = p.text; ctx.globalAlpha = 0.9; ctx.lineWidth = 1.5; ctx.beginPath();
+      let pen = false, lastC = -1;
+      for (let c = 0; c < columns; c++) {
+        const v = cols.last[c]!; if (Number.isNaN(v)) { pen = false; continue; }
+        if (pen) ctx.lineTo(X(c), yOf(prices, v)); else { ctx.moveTo(X(c), yOf(prices, v)); pen = true; }
+        lastC = c;
+      }
+      ctx.stroke(); ctx.globalAlpha = 1;
+      const ticks = niceTicks(prices.lo, prices.hi, 4);
+      ctx.fillStyle = p.muted; ctx.font = `10px ${MONO}`; ctx.textAlign = 'left'; ctx.lineWidth = 1; ctx.strokeStyle = p.muted;
+      const newest = lastC >= 0 ? yOf(prices, cols.last[lastC]!) : -1;
+      for (const v of ticks.values) {
+        const y = yOf(prices, v);
+        ctx.beginPath(); ctx.moveTo(right, Math.round(y) + 0.5); ctx.lineTo(right + 4, Math.round(y) + 0.5); ctx.stroke();
+        if (newest < 0 || Math.abs(y - newest) > 10) ctx.fillText(fmtPrice(v, ticks.step), right + 7, y);
+      }
+      if (lastC >= 0) {
+        const value = cols.last[lastC]!, text = fmtPrice(value), tagW = PRICE_AXIS_W - 2, tagH = 16, y = Math.max(inner.y, Math.min(inner.y + inner.h, newest));
+        ctx.fillStyle = p.text; ctx.fillRect(right + 1, y - tagH / 2, tagW, tagH);
+        ctx.fillStyle = p.panel; ctx.font = `600 10px ${MONO}`; ctx.textAlign = 'center'; ctx.fillText(fit(ctx, text, tagW - 4), right + 1 + tagW / 2, y + 0.5);
+        // The dot at the line's end, as the flow lines have.
+        ctx.fillStyle = p.text; ctx.beginPath(); ctx.arc(X(lastC), newest, 2.4, 0, Math.PI * 2); ctx.fill();
+      }
+      // The legend wants the newest price: the label is made here, where it is known.
+      this.#priceNow = lastC >= 0 ? cols.last[lastC]! : NaN;
+    } else this.#priceNow = NaN;
+    // The dollars' numbers last, over the lines on a halo, so no line strikes one through.
+    if (shared && dollars) {
+      ctx.font = `10px ${MONO}`; ctx.fillStyle = p.muted;
+      for (const v of dollars.values) { const y = yOf(shared, v); if (y > inner.y + 4 && y < inner.y + inner.h - 4) halo(v === 0 ? '0' : signedUsd(v), plot.x + 4, y - 7, 'left'); }
+    }
+    ctx.restore();
+
+    this.#paintLabel(ctx, p, colors, 0, h, heroLabel(model, this.#windowName, rebase, this.#priceNow, this.#filterNote(this.store.state)));
+  }
+
+  /** What the lines say where a finger points (or at the newest moment when none does), in the line under the header: the time, the price, and each kind's running delta, in the colours of the lines. */
+  #updateReadout(model: CvdModel): void {
+    // Only a pointer over the lines points at a moment (one in the gutter would read the window's edge).
+    const cur = this.#pointer(), time = cur && cur.x >= this.#plot.x && cur.x <= this.#plot.x + this.#plot.w ? this.#timeAt(cur.x) : null, col = time === null ? -1 : columnAt(model.t0, model.t1, model.columns, time);
+    const at = col >= 0 ? col : model.columns - 1, point = heroPoint(model, this.#priceCols, at);
+    // Seconds only where a column is a few of them wide (a window of a quarter of an hour or less): on four hours or a day the minute says all there is.
+    const at0 = model.t0 + (col + 0.5) / model.columns * (model.t1 - model.t0), when = col < 0 ? '' : model.t1 - model.t0 <= 900_000 ? clockSeconds(at0) : clock(at0);
+    const part = (kind: 'sp' | 'pp', letter: string, v: number | null): string => v === null ? '' : ` <span class="${kind}">${letter} <b>${signedUsd(v)}</b></span>`;
+    const since = col < 0 && this.#since !== null ? ` <span class="since">${t('since {time}', { time: clock(this.#since, this.#since < startOfDay(pageNow())) })}</span>` : '';
+    setHtml(this.#readout, `${when ? `<span class="when">${when}</span> ` : ''}${point.price !== null ? `<b>${fmtPrice(point.price)}</b>` : ''}${part('sp', t('S'), point.spot)}${part('pp', t('P'), point.perp)}${since}`);
   }
 
   /** The notice above the rows: written again only when what it says changes (a node is not touched otherwise). */
@@ -692,23 +1097,40 @@ export class CvdPane {
   }
 
   #paintHover(ctx: CanvasRenderingContext2D, p: Palette, model: CvdModel, layout: RowLayout, plot: { x: number; w: number }, window: string): void {
-    const hover = this.#hover; if (!hover) return;
-    const hit = locateRow(layout, this.#scroll, this.#h, hover.y);
+    const hover = this.#pointer(); if (!hover) return;
+    const hit = locateRow(layout, this.#scroll, this.#h, hover.y), phone = isPhone();
     if (!hit) return;
     const col = Math.max(0, Math.min(model.columns - 1, Math.floor((hover.x - plot.x) / plot.w * model.columns))), inPlot = hover.x >= plot.x && hover.x <= plot.x + plot.w;
     const time = model.t0 + (col + 0.5) / model.columns * (model.t1 - model.t0);
-    // Shade the row under the pointer, and draw the time cursor down the plot.
+    // Shade the row under the pointer (not the phone's chart, which the readout speaks for), and draw the time cursor down the plot.
     let rowTop = 0, rowH = layout.agg;
     if (hit.kind === 'price') { rowTop = layout.agg; rowH = layout.price; }
     else if (hit.kind === 'row') { rowTop = layout.agg + layout.price - this.#scroll + layout.rows.slice(0, hit.index).reduce((a, b) => a + b, 0); rowH = layout.rows[hit.index]!; }
-    ctx.save(); ctx.globalAlpha = 0.05; ctx.fillStyle = p.text; ctx.fillRect(0, Math.max(rowTop, hit.kind === 'row' ? layout.agg + layout.price : 0), this.#w, rowH); ctx.globalAlpha = 1;
+    ctx.save();
+    if (!(phone && hit.kind === 'agg')) { ctx.globalAlpha = 0.05; ctx.fillStyle = p.text; ctx.fillRect(0, Math.max(rowTop, hit.kind === 'row' ? layout.agg + layout.price : 0), this.#w, rowH); ctx.globalAlpha = 1; }
     if (inPlot) { ctx.strokeStyle = p.muted; ctx.globalAlpha = 0.7; const x = Math.round(plot.x + (col + 0.5) / model.columns * plot.w) + 0.5; ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, this.#h); ctx.stroke(); ctx.globalAlpha = 1; }
+    if (phone && inPlot) this.#paintDots(ctx, p, model, col, plot);
     ctx.restore();
+    // The phone's chart is read in the line under the header, so no box covers it; a venue's row has its box, above the finger so the finger does not hide it.
+    if (phone && hit.kind === 'agg') return;
     let lines: InfoLine[];
     if (hit.kind === 'agg') lines = aggregateHover(model, col, time, window);
     else if (hit.kind === 'price') { const v = this.#priceAtTime(time); lines = [{ text: t('Price'), bold: true }, { text: clock(time, true), color: 'muted' }, { label: t('Price here'), text: Number.isFinite(v) ? fmtPrice(v) : '–', rule: true }]; }
     else lines = rowHover(model.rows[hit.index]!, col, time, window);
-    paintInfoBox(ctx, lines, hover.x, hover.y, { x0: 0, y0: 0, x1: this.#w, y1: this.#h }, p, { placement: 'down' });
+    paintInfoBox(ctx, lines, hover.x, hover.y, { x0: 0, y0: 0, x1: this.#w, y1: this.#h }, p, { placement: hover.touch ? 'up' : 'down' });
+  }
+
+  /** A dot on each of the chart's lines where the cursor is (the flow of each kind and the price), ringed in the panel's colour so it stands off the line. */
+  #paintDots(ctx: CanvasRenderingContext2D, p: Palette, model: CvdModel, column: number, plot: { x: number; w: number }): void {
+    const geo = this.#heroGeo; if (!geo) return;
+    const colors = laneColors(p), point = heroPoint(model, this.#priceCols, column), x = plot.x + (column + 0.5) / model.columns * plot.w;
+    const y = (r: Range, v: number): number => geo.inner.y + geo.inner.h - (v - r.lo) / (r.hi - r.lo) * geo.inner.h;
+    const dots: [Range | null, number | null, string][] = [[geo.spot, point.spot, colors.spot], [geo.perp, point.perp, colors.perp], [geo.price, point.price, p.text]];
+    for (const [range, value, color] of dots) {
+      if (!range || value === null) continue;
+      ctx.beginPath(); ctx.arc(x, y(range, value), 4.2, 0, Math.PI * 2); ctx.fillStyle = p.panel; ctx.fill();
+      ctx.beginPath(); ctx.arc(x, y(range, value), 3, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+    }
   }
 }
 

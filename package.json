@@ -4,7 +4,7 @@
   "private": true,
   "license": "MIT",
   "author": "Karl",
-  "homepage": "https://liquiditymapperfast.github.io/",
+  "homepage": "https://liquiditymapper.com/",
   "repository": { "type": "git", "url": "git+https://github.com/liquiditymapperfast/liquiditymapperfast.github.io.git" },
   "type": "module",
   "engines": {
@@ -16,7 +16,7 @@
     "dev:fixture": "npm run build && node build/tools/scripts/start-fixture.mjs",
     "ui": "vite --config vite.config.mts",
     "dev:client": "vite --config vite.config.mts",
-    "build:site": "npm run typecheck && vite build --config vite.config.mts",
+    "build:site": "npm run typecheck && vite build --config vite.config.mts && vite build --config vite.plus.config.mts",
     "preview:site": "vite preview --config vite.config.mts",
     "server": "npm run build:node && node build/node/server/main.mjs",
     "start": "npm run build && node build/tools/scripts/start-live.mjs",
@@ -25,22 +25,26 @@
     "smoke:binance:usdm:gap": "npm run build:tools && node build/tools/scripts/binance-spot-live-gap-recovery-smoke.mjs --market-type=perpetual",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.tools.json --noEmit",
     "build:node": "tsc -p tsconfig.node.json",
-    "build": "npm run typecheck && npm run build:node && npm run build:tools && vite build --config vite.config.mts",
+    "build": "npm run typecheck && npm run build:node && npm run build:tools && vite build --config vite.config.mts && vite build --config vite.plus.config.mts",
     "build:tools": "tsc -p tsconfig.tools.json",
     "build:wasm": "npm run build:tools && node build/tools/scripts/build-wasm.mjs",
     "test:wasm": "cargo test --manifest-path crates/hlm-kernels/Cargo.toml",
     "coins": "npm run build:tools && node build/tools/scripts/coins.mjs",
+    "reference": "npm run build:tools && node build/tools/scripts/script-reference.mjs",
     "report:venues": "npm run build:tools && node build/tools/scripts/venue-report.mjs",
     "parity": "npm run build:tools && node build/tools/scripts/parity.mjs",
     "i18n:template": "npm run build:tools && node build/tools/scripts/i18n-keys.mjs",
     "i18n:guide": "npm run build:tools && node build/tools/scripts/i18n-guide.mjs"
   },
   "dependencies": {
-    "vite": "^6.0.7",
-    "ws": "^8.18.0"
+    "vite": "^6.4.5",
+    "ws": "^8.22.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "typescript": "^5.7.2"
+  },
+  "overrides": {
+    "source-map-js": "^1.2.2"
   }
 }

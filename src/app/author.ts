@@ -10,7 +10,7 @@ export const AUTHOR = Object.freeze({
   xHandle: '@karlbooklover',
   github: 'https://github.com/liquiditymapperfast/liquiditymapperfast.github.io',
   /** Where the page is published: what a screenshot carries in its corner. */
-  site: 'https://liquiditymapperfast.github.io/',
+  site: 'https://liquiditymapper.com/',
 });
 
 function link(href: string, label: string, detail: string): HTMLAnchorElement {
@@ -25,8 +25,9 @@ export function toggleAuthor(anchor: HTMLElement): Panel | null {
       el('div', { class: 'author-card' },
         el('div', { class: 'avatar', textContent: AUTHOR.name[0] ?? 'K', ariaHidden: 'true' }),
         el('div', {}, el('strong', { textContent: AUTHOR.name }), el('p', { textContent: AUTHOR.line }))),
-      el('p', { class: 'lead', textContent: t('LiquidityMapperFast is a free project. There is nothing to sign up for, no account, no strings attached, and the code is open source.') }),
-      el('p', { class: 'fine', textContent: t('It reads public exchange data straight from your browser and sends nothing to anyone. It is built in free time, so things can occasionally break; tell me when they do.') }),
+      el('p', { class: 'lead', textContent: t('LiquidityMapperFast is free to use: no account, nothing to sign up for, and the code is open source.') }),
+      el('p', { class: 'fine', textContent: t('It reads public exchange data straight from your browser, and nothing you do here is sent anywhere. Plus, an optional paid part, pays for the servers behind the page and opens the history they store; its checkout is on a page of its own.') }),
+      el('p', { class: 'fine', textContent: t('It is built in free time, so things can occasionally break; tell me when they do.') }),
       el('div', { class: 'author-links' }, link(AUTHOR.x, 'X', AUTHOR.xHandle), link(AUTHOR.github, t('GitHub'), t('source code and issues'))),
     );
   });

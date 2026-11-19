@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { barAt, columnAt, depthCardLines, ltCardLines, oiCardLines, oiTail, readAt, slotAt } from '../src/app/panes/pane-cards.ts';
+import { barAt, columnAt, depthCardLines, liqCardLines, ltCardLines, oiCardLines, oiTail, readAt, slotAt } from '../src/app/panes/pane-cards.ts';
 import { layoutInfo } from '../src/app/infobox.ts';
 
 const MIN = 60_000;
@@ -36,23 +36,26 @@ test('an open-interest bar is the last that has started; only the newest holds o
   assert.equal(barAt(bars, MIN, -5), -1);
 });
 
-test('the depth popup gives both sides, how they compare, the range, and where the moment ranks', () => {
-  const lines = depthCardLines({ time: Date.UTC(2026, 9, 6, 12, 30), bid: 30_000_000, ask: 10_000_000, range: 0.2, rank: 3, of: 120 });
+test('the depth popup gives every band, the watched one in bold with how its sides compare, and where the moment ranks', () => {
+  const bands = [{ r: 0.003125, bid: 10_000_000, ask: 4_000_000 }, { r: 0.0125, bid: 20_000_000, ask: 8_000_000 }, { r: 0.05, bid: 30_000_000, ask: 10_000_000 }];
+  const lines = depthCardLines({ time: Date.UTC(2026, 9, 6, 12, 30), bands, watched: 2, units: 'usd', coin: 'BTC', rank: 3, of: 120 });
   assert.equal(lines[0]!.text, 'Depth'); assert.equal(lines[0]!.bold, true);
-  assert.deepEqual([by(lines, 'Asks')!.color, by(lines, 'Bids')!.color], ['above', 'below']);
-  assert.deepEqual([by(lines, 'Asks')!.text, by(lines, 'Bids')!.text], ['$10M', '$30M'], 'amounts are written the way the delta below them is');
-  assert.equal(by(lines, 'Δ')!.text, '+$20M'); assert.equal(by(lines, 'Δ')!.color, 'below', 'bids lead');
+  assert.deepEqual(['±0.31%', '±1.25%', '±5%'].map(label => by(lines, label)!.text), ['$10M · $4M', '$20M · $8M', '$30M · $10M'], 'bids · asks, a line a band');
+  assert.deepEqual(['±0.31%', '±1.25%', '±5%'].map(label => by(lines, label)!.bold), [false, false, true], 'the watched band is the bold one');
+  assert.equal(by(lines, 'Δ')!.text, '+$20M'); assert.equal(by(lines, 'Δ')!.color, 'below', 'bids lead in the watched band');
   assert.deepEqual([by(lines, 'Imbalance')!.text, by(lines, 'Imbalance')!.color], ['bids +50.0%', 'below']);
-  assert.equal(by(lines, 'Range')!.text, '±20%');
+  assert.deepEqual([by(lines, 'Ratio')!.text, by(lines, 'Ratio')!.color], ['bids 3.00×', 'below'], 'how many times the larger side is the smaller');
   assert.equal(by(lines, 'Rank in view')!.text, '3 of 120');
   const last = lines.at(-1)!;
   assert.deepEqual([last.color, last.wrap, last.rule], ['muted', true, true], 'the last line says what the numbers are');
 
-  const ask = depthCardLines({ time: 0, bid: 1_000_000, ask: 3_000_000, range: 0.05, rank: null, of: 1 });
-  assert.equal(by(ask, 'Δ')!.color, 'above'); assert.equal(by(ask, 'Imbalance')!.text, 'asks +50.0%'); assert.equal(by(ask, 'Range')!.text, '±5%');
-  assert.equal(by(ask, 'Rank in view'), undefined, 'a rank among one is not said');
-  const even = depthCardLines({ time: 0, bid: 5_000_000, ask: 5_000_000, range: 0.01, rank: 1, of: 2 });
-  assert.equal(by(even, 'Imbalance')!.text, '0%'); assert.equal(by(even, 'Δ')!.color, 'text'); assert.equal(by(even, 'Range')!.text, '±1%');
+  const inner = depthCardLines({ time: 0, bands, watched: 0, units: 'usd', coin: 'BTC', rank: null, of: 1 });
+  assert.equal(by(inner, 'Δ')!.text, '+$6M', 'the band brought forward is the one compared');
+  assert.equal(by(inner, 'Rank in view'), undefined, 'a rank among one is not said');
+  const coins = depthCardLines({ time: 0, bands: [{ r: 0.01, bid: 100, ask: 300 }], watched: 0, units: 'coin', coin: 'BTC', rank: 1, of: 2 });
+  assert.equal(by(coins, '±1%')!.text, '100 BTC · 300 BTC'); assert.equal(by(coins, 'Δ')!.text, '−200 BTC'); assert.equal(by(coins, 'Δ')!.color, 'above');
+  const fraction = depthCardLines({ time: 0, bands: [{ r: 0.01, bid: 0.01, ask: 0.005 }], watched: 0, units: 'coin', coin: 'BTC', rank: 1, of: 2 });
+  assert.equal(by(fraction, '±1%')!.text, '0.01 BTC · 0.005 BTC', 'a fraction of a coin is not 0'); assert.equal(by(fraction, 'Δ')!.text, '+0.005 BTC');
 });
 
 test('the Liquidity Tracker popup says what it was worked out with', () => {
@@ -60,9 +63,11 @@ test('the Liquidity Tracker popup says what it was worked out with', () => {
   assert.equal(lines[0]!.text, 'Liquidity Tracker');
   assert.deepEqual([by(lines, 'Bid')!.color, by(lines, 'Ask')!.color], ['below', 'above']);
   assert.equal(by(lines, 'Δ')!.text, '−$4M'); assert.equal(by(lines, 'Δ')!.color, 'above');
+  assert.deepEqual([by(lines, 'Ratio')!.text, by(lines, 'Ratio')!.color], ['asks 1.50×', 'above']);
   assert.equal(by(lines, 'Half-life')!.text, '25 bp'); assert.equal(by(lines, 'Venues')!.text, '7');
   assert.equal(lines.at(-1)!.rule, true);
   assert.equal(by(ltCardLines({ time: 0, bid: 0, ask: 0, halfLifeBp: 10, venues: 0 }), 'Imbalance'), undefined, 'no liquidity: no balance to speak of');
+  assert.equal(by(ltCardLines({ time: 0, bid: 5, ask: 5, halfLifeBp: 10, venues: 1 }), 'Ratio'), undefined, 'even: no ratio line');
 });
 
 test('the open-interest popup has the level and the step, and only the lines that have something to say', () => {
@@ -83,7 +88,7 @@ test('the open-interest popup has the level and the step, and only the lines tha
 test('every popup fits the box: no line is left without text, and a long sentence is wrapped, not run off the side', () => {
   const measure = (text: string): number => text.length * 6;
   for (const lines of [
-    depthCardLines({ time: 0, bid: 1, ask: 2, range: 0.2, rank: 1, of: 2 }),
+    depthCardLines({ time: 0, bands: [{ r: 0.003125, bid: 1, ask: 2 }, { r: 0.05, bid: 3, ask: 4 }], watched: 1, units: 'usd', coin: 'BTC', rank: 1, of: 2 }),
     ltCardLines({ time: 0, bid: 1, ask: 2, halfLifeBp: 10, venues: 3 }),
     oiCardLines({ time: 0, level: 1, change: 1, before: 1, rank: 1, of: 2, sigma: 2, source: 'from X', staleMin: 1 }),
   ]) {
@@ -107,4 +112,12 @@ test("right of the newest point, or over the price axis, the popup keeps showing
   assert.equal(read(10_000), 3, "far right of it: still the newest");
   assert.equal(readAt(-1, 5, -1, undefined), -1, "no data, nothing");
   assert.equal(readAt(2, 10_000, 3, 300), 2, "a point under the pointer wins");
+});
+
+test('the liquidation levels popup names the larger side and how many times the other it is, and says nothing where both are empty', () => {
+  const bands = [{ r: 0.0125, bid: 0, ask: 3_000_000 }, { r: 0.05, bid: 25_000_000, ask: 10_000_000 }];
+  const lines = liqCardLines({ asOf: 0, bands, watched: 1, units: 'usd', coin: 'BTC' });
+  assert.deepEqual([by(lines, 'Ratio')!.text, by(lines, 'Ratio')!.color], ['longs 2.50×', 'below']);
+  assert.equal(by(liqCardLines({ asOf: 0, bands, watched: 0, units: 'usd', coin: 'BTC' }), 'Ratio')!.text, 'shorts ∞', 'no longs in the band: only shorts');
+  assert.equal(by(liqCardLines({ asOf: 0, bands: [{ r: 0.01, bid: 0, ask: 0 }], watched: 0, units: 'usd', coin: 'BTC' }), 'Ratio'), undefined);
 });

@@ -1,10 +1,12 @@
 import type { EngineBootstrap, EngineTick, FootprintAnswer, RecoveryReport, VenueStatus } from '../../shared/engine.ts';
 import type { Candle, OiBar } from '../../shared/series.ts';
 import type { Print } from '../../shared/prints.ts';
+import type { TilesInfo } from '../archive/tiles.ts';
 import type { Liquidation } from '../../shared/liquidations.ts';
 import type { PrintSumsAnswer } from '../../shared/print-sums.ts';
 import type { ProfileAnswer, RangeAnswer, SizesAnswer, ValueAreaAnswer } from '../../shared/footprint.ts';
-import type { AbsorptionAnswer, AbsorptionGroup, AbsorptionMinute } from '../../shared/absorption.ts';
+import type { OiProfileAnswer } from '../../shared/oi-profile.ts';
+import type { AbsorptionAnswer, AbsorptionProfileAnswer, AbsorptionGroup, AbsorptionMinute } from '../../shared/absorption.ts';
 import type { FlowFrame, FlowUpdate } from '../../shared/flow.ts';
 import type { TapeBatch } from '../../shared/tape.ts';
 import type { ColumnsFrame } from '../../shared/columns.ts';
@@ -15,7 +17,8 @@ import type { CoverageAnswer, CoverageMetric } from '../../shared/coverage.ts';
 /** What the page asks the feeds worker for; each has an answer of the type in `RpcResult`. */
 export type RpcCall =
   | { method: 'bootstrap' }
-  | { method: 'columns'; ids: string[]; from: number; to: number; stepMs: number }
+  /** `early`: the map's own load, which may be answered from the newest recordings before the day is read (browser/waits.ts `waitOf`). */
+  | { method: 'columns'; ids: string[]; from: number; to: number; stepMs: number; close?: boolean; early?: boolean }
   | { method: 'footprint'; inst: string; tfMs: number; from: number; to: number; rowStep: number; cuts?: number[]; budget?: number; venues?: boolean }
   | { method: 'prints'; from: number; to: number; minUsd?: number }
   | { method: 'liquidations'; from: number; to: number; minUsd?: number }
@@ -23,24 +26,28 @@ export type RpcCall =
   | { method: 'flow'; ids: string[]; from: number; to: number }
   | { method: 'sizes'; ids: string[]; windows: number[]; cuts?: number[] }
   | { method: 'profile'; ids: string[]; from: number; to: number; rowStep: number }
+  | { method: 'oiProfile'; ids: string[]; from: number; to: number; rowStep: number }
   | { method: 'range'; ids: string[]; from: number; to: number; band: { p0: number; p1: number } | null; rowStep: number }
   | { method: 'valueAreas'; ids: string[]; windows: { from: number; to: number }[]; rowStep: number; share: number }
   | { method: 'absorption'; ids: string[]; mins: number[]; from: number; to: number; limit: number; since: number }
+  | { method: 'absorptionProfile'; ids: string[]; thresholds: number[]; from: number; to: number; step: number }
   | { method: 'candles'; inst: string; tfMs: number; from: number; to: number }
   | { method: 'oi'; inst: string; tfMs: number; from: number; to: number; usd?: boolean }
   | { method: 'coverage'; ids: string[]; metric: CoverageMetric; from: number; to: number }
   | { method: 'recover'; ids: string[]; windows: { from: number; to: number }[] };
 
 export interface RpcResult {
-  bootstrap: EngineBootstrap; columns: ColumnsFrame; footprint: FootprintAnswer; prints: Print[]; liquidations: Liquidation[]; printSums: PrintSumsAnswer | null; flow: FlowFrame; sizes: SizesAnswer; profile: ProfileAnswer; range: RangeAnswer; valueAreas: ValueAreaAnswer; absorption: AbsorptionAnswer; candles: Candle[]; oi: OiBar[]; coverage: CoverageAnswer; recover: RecoveryReport;
+  /** `columns.preview`: answered from the newest recordings while the rest of the day is read (`Engine.preview`; the map's own load alone). */
+  bootstrap: EngineBootstrap; columns: ColumnsFrame & { preview?: boolean }; footprint: FootprintAnswer; prints: Print[]; liquidations: Liquidation[]; printSums: PrintSumsAnswer | null; flow: FlowFrame; sizes: SizesAnswer; profile: ProfileAnswer; oiProfile: OiProfileAnswer; range: RangeAnswer; valueAreas: ValueAreaAnswer; absorption: AbsorptionAnswer; absorptionProfile: AbsorptionProfileAnswer; candles: Candle[]; oi: OiBar[]; coverage: CoverageAnswer; recover: RecoveryReport;
 }
 
 export type FeedsIn =
   /**
    * Start the engine on this coin with these venues (null: the recommended set); `persist` keeps recordings in this browser (IndexedDB),
-   * in `database`, with `lock` held by the one tab that writes them.
+   * in `database`, with `lock` held by the one tab that writes them; `history` is where the recorded history is read, `historyHours` how
+   * many of its latest hours (app/history-window.ts).
    */
-  | { type: 'init'; selected: string[] | null; known: string[] | null; persist: boolean; coin: Coin; tier: number; database: string; lock: string }
+  | { type: 'init'; selected: string[] | null; known: string[] | null; persist: boolean; coin: Coin; tier: number; database: string; lock: string; history: string; historyHours: number }
   | { type: 'select'; selected: string[] }
   /** The page is going away: write what has not been saved. */
   | { type: 'flush' }
@@ -49,7 +56,17 @@ export type FeedsIn =
   | ({ type: 'rpc'; id: number } & RpcCall);
 
 export type FeedsOut =
-  | { type: 'ready'; persisted: boolean }
+  /** The engine runs on the venues' sockets: the market list, the venues' candles, the open interest and the flow are answered from now on. */
+  | { type: 'ready' }
+  /** The recordings were opened (or cannot be: nothing is kept this session); the history is still being read. */
+  | { type: 'recordings'; persisted: boolean }
+  /**
+   * The engine has its recordings and the recorded history (or will have none): the questions about what was recorded, held until now, are
+   * answered, and the flow, answered meanwhile from the seconds since the page opened, is to be asked for again. `hourBooks`: the service's
+   * hours carry the coin's book minutes (`latest.json` names book steps: BTC); false for a coin whose books it keeps as tiles alone (ETH, SOL).
+   * `columnsEarly`: the map's columns were answered meanwhile from the newest recordings alone (`Engine.preview`), to be asked again.
+   */
+  | { type: 'history'; tiles?: TilesInfo | null; hourBooks?: boolean; columnsEarly?: boolean }
   /** The engine could not be started: nothing will be answered, so the page should say so instead of waiting. */
   | { type: 'failed'; error: string }
   | { type: 'levels'; frame: LevelsFrame }
@@ -57,6 +74,8 @@ export type FeedsOut =
   | { type: 'prints'; items: Print[] }
   | { type: 'liquidations'; items: Liquidation[] }
   | { type: 'flow'; items: FlowUpdate[] }
+  /** A new open-interest reading, the moment the engine has it (the venue's socket or its REST poll), for the OI pane to follow at once. */
+  | { type: 'oi'; instrumentId: string; t: number; base: number; quote?: number }
   | { type: 'tape'; batch: TapeBatch }
   | { type: 'absorption'; groups: AbsorptionGroup[]; minutes: AbsorptionMinute[] }
   | { type: 'status'; venues: VenueStatus[] }

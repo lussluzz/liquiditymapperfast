@@ -2,6 +2,7 @@ import type { ValuedBook, SideLevels } from './levels.ts';
 import { gridStepFor } from './grid.ts';
 import { LT_LENGTH, addLtSample } from './lt-sample.ts';
 import { KeptCache } from './kept-cache.ts';
+import { ltWindows, type LtMinute, type LtWindows } from './lt-windows.ts';
 
 export const COLUMN_MS = 60_000;
 export const SAMPLE_MS = 5_000;
@@ -33,6 +34,11 @@ export interface Column {
    */
   lt?: Float32Array;
   ltN?: number;
+  /**
+   * In an answer to a question for each window's close (`query`'s `close`): the minute whose book the window is, the latest recorded inside
+   * it (its last minute where that was recorded); the window itself starts at `t`.
+   */
+  at?: number;
 }
 export interface ColumnStore {
   load(sinceMs: number): Iterable<{ instrumentId: string; column: Column; step: number }>;
@@ -44,6 +50,8 @@ export interface ColumnStore {
    */
   range?(instrumentId: string, fromMs: number, toMs: number): Column[];
   extent?(sinceMs: number): Map<string, { first: number; last: number; step: number }>;
+  /** `range` without the books: each minute's samples and tracker alone (what the tracker lane reads; a store without it is read through `range`). */
+  rangeLt?(instrumentId: string, fromMs: number, toMs: number): LtMinute[];
 }
 /** An open minute: the USD per bin summed over its `n` samples, and the tracker summed over its `ltN` samples (null until the first). */
 interface Pending { t: number; n: number; step: number; bid: Map<number, number>; ask: Map<number, number>; lt: Float64Array | null; ltN: number }
@@ -193,6 +201,11 @@ export const MERGED_CACHE_BINS = 6_000_000;
  * held re-read the store each time.
  */
 export const COLD_CACHE_BINS = 16_000_000;
+/**
+ * How many minutes of trackers read back from the store a server keeps for the next question (about 140 bytes a minute): a week of 27 markets
+ * is 272,000. The lane asks again for its window every few minutes, and a zoom or another half-life asks the same minutes at another step.
+ */
+export const COLD_LT_MINUTES = 300_000;
 /** Columns are read back and kept by the hour. */
 const COLD_CHUNK_MS = 3_600_000;
 
@@ -214,6 +227,8 @@ export interface RecorderOptions {
   mergedCacheBins?: number;
   /** How many bins of columns read back from the store are kept for the next question (COLD_CACHE_BINS). */
   coldCacheBins?: number;
+  /** How many minutes of trackers read back from the store are kept for the next question (COLD_LT_MINUTES). */
+  coldLtMinutes?: number;
 }
 
 /**
@@ -246,6 +261,8 @@ export class DepthRecorder {
   #heldFrom = -Infinity;
   /** Hours of columns read back, by instrument and hour (only hours before `#heldFrom`), weighed in bins. */
   readonly #coldHours: KeptCache<Column[]>;
+  /** The same hours of trackers alone (`queryLt`), weighed in minutes. */
+  readonly #coldLt: KeptCache<LtMinute[]>;
   /** What the store holds per instrument from the retention on (first and last minute), for `coverage`; kept current at each prune. */
   #extent = new Map<string, { first: number; last: number; step: number }>();
   /** Where the retention began at the last prune (or at start): nothing older is answered, in memory or from the store. */
@@ -254,8 +271,8 @@ export class DepthRecorder {
   /** Merged windows that have ended, by instrument, step and start, weighed in bins. */
   readonly #merged: KeptCache<Column>;
 
-  constructor({ store = null, now = Date.now, steps = new Map(), retentionMs = RETENTION_MS, memoryMs = retentionMs, minBinUsd = MIN_BIN_USD, mergedCacheBins = MERGED_CACHE_BINS, coldCacheBins = COLD_CACHE_BINS }: RecorderOptions = {}) {
-    this.#merged = new KeptCache(mergedCacheBins, now); this.#coldHours = new KeptCache(coldCacheBins, now);
+  constructor({ store = null, now = Date.now, steps = new Map(), retentionMs = RETENTION_MS, memoryMs = retentionMs, minBinUsd = MIN_BIN_USD, mergedCacheBins = MERGED_CACHE_BINS, coldCacheBins = COLD_CACHE_BINS, coldLtMinutes = COLD_LT_MINUTES }: RecorderOptions = {}) {
+    this.#merged = new KeptCache(mergedCacheBins, now); this.#coldHours = new KeptCache(coldCacheBins, now); this.#coldLt = new KeptCache(coldLtMinutes, now);
     this.#store = store; this.#now = now; this.steps = steps; this.#retentionMs = retentionMs; this.#minBinUsd = minBinUsd;
     this.#readsBack = store !== null && typeof store.range === 'function' && typeof store.extent === 'function' && memoryMs < retentionMs;
     this.#memoryMs = this.#readsBack ? memoryMs : retentionMs;
@@ -409,6 +426,7 @@ export class DepthRecorder {
     // A kept window or hour that began before the cutoff has lost minutes since it was merged or read.
     this.#merged.deleteWhere((_, column) => column.t < cutoff);
     this.#coldHours.deleteWhere(key => hourOf(key) < cutoff);
+    this.#coldLt.deleteWhere(key => hourOf(key) < cutoff);
     if (extent) { this.#extent = extent; this.#heldFrom = Math.max(this.#heldFrom, held); }
     this.#store?.prune(cutoff);
   }
@@ -434,27 +452,58 @@ export class DepthRecorder {
    * read in one pass and kept hour by hour when it can no longer change (wholly before what memory holds, and inside the retention).
    */
   #readBack(id: string, lo: number, hi: number, held: number): Column[] {
-    const out: Column[] = [], settled = Math.min(held, this.#heldFrom);
+    return this.#readHours(this.#coldHours, weightOf, (from, to) => this.#store!.range!(id, from, to), id, lo, hi, held);
+  }
+
+  /** `#readBack` for what a question reads of each minute: the columns whole, or the trackers alone (`queryLt`), each in a cache of its own. */
+  #readHours<M extends { t: number }>(cache: KeptCache<M[]>, weigh: (hour: M[]) => number, read: (from: number, to: number) => M[], id: string, lo: number, hi: number, held: number): M[] {
+    const out: M[] = [], settled = Math.min(held, this.#heldFrom);
     if (!(hi > lo)) return out;
     for (let h = Math.floor(lo / COLD_CHUNK_MS) * COLD_CHUNK_MS; h < hi;) {
-      const kept = this.#coldHours.get(`${id}|${h}`);
+      const kept = cache.get(`${id}|${h}`);
       if (kept) {
         for (const column of kept) if (column.t >= lo && column.t < hi) out.push(column);
         h += COLD_CHUNK_MS; continue;
       }
       let end = h + COLD_CHUNK_MS;
-      while (end < hi && !this.#coldHours.has(`${id}|${end}`)) end += COLD_CHUNK_MS;
-      const read = this.#store!.range!(id, Math.max(h, this.#cutoff), Math.min(end, held));
+      while (end < hi && !cache.has(`${id}|${end}`)) end += COLD_CHUNK_MS;
+      const stored = read(Math.max(h, this.#cutoff), Math.min(end, held));
       for (let hour = h, at = 0; hour < end; hour += COLD_CHUNK_MS) {
-        let stop = at; while (stop < read.length && read[stop]!.t < hour + COLD_CHUNK_MS) stop++;
-        const columns = read.slice(at, stop);
-        if (hour >= this.#cutoff && hour + COLD_CHUNK_MS <= settled) this.#coldHours.set(`${id}|${hour}`, columns, weightOf(columns));
+        let stop = at; while (stop < stored.length && stored[stop]!.t < hour + COLD_CHUNK_MS) stop++;
+        const columns = stored.slice(at, stop);
+        if (hour >= this.#cutoff && hour + COLD_CHUNK_MS <= settled) cache.set(`${id}|${hour}`, columns, weigh(columns));
         for (const column of columns) if (column.t >= lo && column.t < hi) out.push(column);
         at = stop;
       }
       h = end;
     }
     return out;
+  }
+
+  /** `#columnsIn` for the trackers alone: the same minutes, read back through the store's `rangeLt` (its `range` where it has none). */
+  #ltIn(instrumentId: string, from: number, to: number): LtMinute[] {
+    const list = this.columns.get(instrumentId) ?? [], held = Math.min(list[0]?.t ?? Infinity, this.#pending.get(instrumentId)?.t ?? Infinity);
+    const inMemory: LtMinute[] = list.slice(firstFrom(list, from), firstFrom(list, to));
+    const stored = this.#readsBack ? this.#extent.get(instrumentId) : undefined;
+    if (!stored || from >= held) return inMemory;
+    const store = this.#store!;
+    const read = (a: number, b: number): LtMinute[] => store.rangeLt ? store.rangeLt(instrumentId, a, b) : store.range!(instrumentId, a, b);
+    const back = this.#readHours(this.#coldLt, hour => Math.max(1, hour.length), read, instrumentId, Math.max(from, this.#cutoff, stored.first), Math.min(to, held, stored.last + COLUMN_MS), held);
+    return back.length ? [...back, ...inMemory] : inMemory;
+  }
+
+  /**
+   * The Liquidity Tracker of one instrument over [from, to) in windows of `stepMs` (a multiple of COLUMN_MS, `from` on a window's start): what
+   * the columns' windows would hold of it (`query`, `packLt`), without reading or merging their books. `half`: an index into LT_HALF_LIVES.
+   * The open minute is included, as in `query`.
+   */
+  queryLt(instrumentId: string, from: number, to: number, stepMs: number, half: number): LtWindows {
+    const minutes = this.#ltIn(instrumentId, from, to), open = this.#pending.get(instrumentId);
+    if (open && open.n > 0 && open.t >= from && open.t < to) {
+      const lt = ltMean(open.lt, open.ltN);
+      minutes.push({ t: open.t, n: open.n, ...(lt ? { lt, ltN: open.ltN } : {}) });
+    }
+    return ltWindows(minutes, Math.max(COLUMN_MS, stepMs), half);
   }
 
   /** What is held, in bins: the columns in memory, the hours read back and kept, the merged windows kept (for diagnostics and measuring). */
@@ -468,13 +517,35 @@ export class DepthRecorder {
    * Columns in [from, to), optionally merged into stepMs windows (a multiple of COLUMN_MS, aligned to it). The open minute is included.
    * A window that lies wholly inside the question and has ended (none of its minutes can change) is kept, so zooming and panning over
    * the same days merges each of them once (and, reading back, reads them from the store once).
+   *
+   * `close`: each window is the book at its close instead of its average (Karl, 2026-10-30: the scripts' depth bands; a book averaged over a
+   * candle with a move in it reads the side the price came from thin): its latest recorded minute, its last where that was recorded and
+   * never one of another window, the open minute for the window under way, stamped with the window's start and saying its minute (`at`).
+   * Kept as the averages are, under keys of their own.
    */
-  query(instrumentId: string, from: number, to: number, stepMs = COLUMN_MS): Column[] {
+  /**
+   * Where this instrument's newest run of minutes begins: the oldest minute reached going back from the newest without a gap of more than
+   * `gapMs` (a book away for a few minutes does not end its run; an hour not imported does). +Infinity when nothing is held. The page's long
+   * history draws what lies before it (app/archive/), the same for every question.
+   */
+  contiguousSince(instrumentId: string, gapMs: number): number {
+    const list = this.columns.get(instrumentId) ?? [], open = this.#pending.get(instrumentId);
+    if (!list.length) return open && open.n > 0 ? open.t : Infinity;
+    let k = list.length - 1;
+    if (open && open.n > 0 && open.t - list[k]!.t > gapMs) return open.t;
+    while (k > 0 && list[k]!.t - list[k - 1]!.t <= gapMs) k--;
+    return list[k]!.t;
+  }
+
+  query(instrumentId: string, from: number, to: number, stepMs = COLUMN_MS, close = false): Column[] {
     const open = this.#pending.get(instrumentId), openColumn = open && open.n > 0 && open.t >= from && open.t < to ? finalize(open, this.#minBinUsd) : null;
-    if (stepMs <= COLUMN_MS) { const inRange = this.#columnsIn(instrumentId, from, to); if (openColumn) inRange.push(openColumn); return inRange; }
+    if (stepMs <= COLUMN_MS) {
+      const inRange = this.#columnsIn(instrumentId, from, to); if (openColumn) inRange.push(openColumn);
+      return close ? inRange.map(c => closeOf(c, c.t)) : inRange;
+    }
     const settled = Math.min(Math.floor(this.#now() / COLUMN_MS) * COLUMN_MS, open ? open.t : Infinity);
     const whole = (t: number): boolean => t >= from && t + stepMs <= to && t + stepMs <= settled;
-    const keyOf = (t: number): string => `${instrumentId}|${stepMs}|${t}`;
+    const keyOf = (t: number): string => close ? `${instrumentId}|${stepMs}|${t}|close` : `${instrumentId}|${stepMs}|${t}`;
     const isKept = (t: number): boolean => whole(t) && this.#merged.has(keyOf(t));
     // Only the windows between the first minute held (in memory or the store) and the last have any.
     const list = this.columns.get(instrumentId) ?? [], stored = this.#extent.get(instrumentId);
@@ -492,7 +563,7 @@ export class DepthRecorder {
       if (openColumn && openColumn.t >= t && openColumn.t < end) columns.push(openColumn);
       for (let w = t, at = 0; w < end; w += stepMs) {
         let stop = at; while (stop < columns.length && columns[stop]!.t < w + stepMs) stop++;
-        const column = stop > at ? mergeWindow(columns, at, stop, w, this.#minBinUsd) : null;
+        const column = stop > at ? close ? closeOf(columns[stop - 1]!, w) : mergeWindow(columns, at, stop, w, this.#minBinUsd) : null;
         if (column) out.push(column);
         if (whole(w)) { const kept = column ?? { t: w, n: 0, bins: new Int32Array(0), bid: new Float32Array(0), ask: new Float32Array(0) }; this.#merged.set(keyOf(w), kept, weight(kept)); }
         at = stop;
@@ -503,6 +574,8 @@ export class DepthRecorder {
   }
 }
 
+/** A window `t` as the book of one of its minutes (`query`'s `close`): that minute's arrays, shared and never changed, and its time as `at`. */
+const closeOf = (c: Column, t: number): Column => ({ t, n: c.n, bins: c.bins, bid: c.bid, ask: c.ask, at: c.t });
 /** What a kept window weighs in the cache: its bins, and at least one (an empty window is kept too). */
 const weight = (column: Column): number => Math.max(1, column.bins.length);
 /** What a kept hour of columns weighs: their bins, and at least one (an hour with none is kept too). */

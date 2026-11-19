@@ -1,50 +1,74 @@
 import { TIMEFRAMES } from './hub.ts';
-import { PALETTES, THEME_ORDER } from './theme.ts';
-import { AVAILABLE_LAYERS, type Store, type AppState, type Layer } from './store.ts';
+import { PALETTES, THEME_ORDER, paletteOf, themeKey } from './theme.ts';
+import { loadCustomThemes, registerCustomThemes } from './custom-themes.ts';
+import { buildThemeEditor, newThemeEditorState } from './theme-editor.ts';
+import { buildBackup, newBackupState } from './backup-panel.ts';
+import { AVAILABLE_LAYERS, autoTheme, flippedTheme, prefersDark, themeChange, type Store, type AppState, type Layer, type PhoneTape } from './store.ts';
 import { VPN_HINT, VenueNotice, blockedVenues, idleText, idleVenues } from './venue-notice.ts';
 import type { VenueEntry } from './source.ts';
 import { clock, usd, zoneName } from './format.ts';
 import { venueLabel } from './panes/ladder-pane.ts';
 import { el } from './dom.ts';
+import { BAR_ZOOM_FLOOR, arrangeBar, type BarFit } from './bar-fit.ts';
 import { lazy } from './lazy.ts';
+import { alignRows } from './ui/fit-grid.ts';
 import { setTip } from './tip.ts';
 import { InstallButton } from './install.ts';
 import { toggleAuthor } from './author.ts';
-import { HELP, helpButton, showGuide, type HelpId } from './help.ts';
+import { PLUS_NAME, togglePlus } from './plus/panel.ts';
+import { plus } from './plus/pass.ts';
+import { HELP, helpButton, setTourStarter, showGuide, showTour, type HelpId } from './help.ts';
 import { openVenueDialog } from './venue-dialog.ts';
 import type { VenueControl } from './source.ts';
 import { coverage } from './panes/levels-data.ts';
 import { SCOPE_OPTIONS, activeIds, chipClick, heatmapSourceOf, kindOf, scopeCounts, scopedOut } from './scope.ts';
 import { HIGHLIGHT_LIMITS } from './anomaly.ts';
-import { rangeRow, switchRow, note, togglePanel, checkRow, heading, selectRow, numberRow, openedPanel, button, sizeRow } from './ui.ts';
+import { rangeRow, switchRow, note, togglePanel, openPanel, checkRow, heading, selectRow, numberRow, openedPanel, button, sizeRow } from './ui.ts';
 import { SIZE_MAX_USD } from './sizes.ts';
 import { GROUP_TITLES, SHORTCUTS, togglePatch, type Feature, type ShortcutGroup } from './shortcuts.ts';
-import { buildLayoutsPanel, type LayoutsPanelState, type PaneHost } from './layouts/panel.ts';
+import { buildGallery, newGalleryState } from './layouts/gallery.ts';
+import type { LayoutActions } from './layouts/actions.ts';
+import { TourInvite } from './tour/invite.ts';
+import { UpdateNotice } from './update-notice.ts';
+import type { BuildAnswer } from './update-check.ts';
 import { clampGoTo, formatDateTime, parseDateTime } from './price-line.ts';
 import { ABSORPTION_LIMITS, type AbsorptionSettings } from './absorption.ts';
 import { BUBBLE_LIMITS, BUBBLE_MINIMUMS, type BubbleSettings } from './prints.ts';
 import { LIQUIDATION_LIMITS, LIQUIDATION_MINIMUMS, coverageLines, type LiquidationSettings } from './liquidations.ts';
 import { buildKeyLevelPanel } from './keylevels/panel.ts';
-import { buildVwapPanel, type WhaleInfo } from './vwap/panel.ts';
+import { buildLiqLevelPanel } from './liq-panel.ts';
+import type { LiqLevelsSource } from './liq-levels.ts';
+import { liqLevelsUrl } from './liq-url.ts';
+import type { AnchorSnapshot } from './traded/anchor.ts';
+import type { Anchor } from './anchors/anchors.ts';
+import type { ProfileAnchorStart } from './traded/anchor.ts';
+import { buildVwapPanel, type DrawnFrom, type RollingReach, type RuleStart, type VwapMarkets, type WhaleInfo } from './vwap/panel.ts';
+import { buildTpoPanel, type TpoInfo } from './tpo/panel.ts';
 import { buildFootprintPanel } from './footprint/panel.ts';
 import type { FlowBook } from './flow-book.ts';
 import type { KeyLevelHistory } from './keylevels/history.ts';
 import { INLINE_CHIPS, chipPlan, exchangeGroups } from './chips.ts';
-import { openMenu } from './menu.ts';
+import { openMenu, type MenuItem } from './menu.ts';
+import { buildCandleColorsPanel } from './candle-colours-panel.ts';
 import { buildSoundPanel } from './sound/panel.ts';
 import type { Sounds } from './sound/sounds.ts';
 import type { Alerts } from './sound/alerts.ts';
 import type { Panel } from './ui.ts';
 import { HEAT_STYLES, legendBackground, type HeatStyleId } from './heatmap/lut.ts';
 import { CONTRAST } from './heatmap/window.ts';
-import { compactBar, isPhone, onLayoutMode } from './device.ts';
-import { openSheet, type Sheet } from './sheet.ts';
+import { CHART_HIDDEN, CHART_TYPES, chartChoiceName, chartChoiceOf, chartChoicePatch, chartTypeGlyph, chartTypeName, chartTypeTip, readChartChoice, type ChartChoice } from './chart-type.ts';
+import { compactBar, isCoarse, isPhone, onLayoutMode } from './device.ts';
+import { effectiveChoice, isHandheldPhone, savesData, type PhoneHistory } from './history-window.ts';
+import { closeSheet, openSheet, type Sheet } from './sheet.ts';
+import { toast } from './toast.ts';
 import { wakeLockSupported } from './wake.ts';
 import { LANGUAGES, language, pickLanguage, saveLanguage, savedLanguage } from './i18n.ts';
 import { t, tn } from './i18n.ts';
 import { coinChoice, currentCoin, scaledUsd, unscaledUsd } from './coin.ts';
 import { buildTradedPanel } from './traded/panel.ts';
+import type { ProfileRoom } from './traded/arrange.ts';
 import { venueMark } from './venue-marks.ts';
+import { readWaveStrength } from './glass/waves.ts';
 import { gridStepFor } from '../shared/grid.ts';
 
 /** How a timeframe is said in a tooltip. */
@@ -56,14 +80,33 @@ function hiddenByFilter(venue: string, kind: 'spot' | 'perp' | null, scope: stri
   if (kind === 'spot') return t('{venue} is a spot venue, so the Perp filter hides it. Click to show it: the filter goes back to Both.', { venue });
   return back ? t('{venue} is an unclassified venue, so the Spot filter hides it. Click to show it: the filter goes back to Both.', { venue }) : t('{venue} is an unclassified venue, so the Perp filter hides it. Click to show it: the filter goes back to Both.', { venue });
 }
-const LAYERS: [Layer, string][] = [['liquidity', t('Liquidity')], ['liquidation', t('Liquidation levels')], ['stopLoss', t('Stop loss')], ['takeProfit', t('Take profit')]];
+// Liquidation levels are not a layer but the Chart deck's Liq levels, drawn over the heatmap.
+const LAYERS: [Layer, string][] = [['liquidity', t('Liquidity')], ['stopLoss', t('Stop loss')], ['takeProfit', t('Take profit')]];
+/** What the Waves strength does, for its slider in the Waves panel and in a phone's Settings. */
+const WAVE_STRENGTH_TIP = t('How strongly the waves are drawn, from barely there at the left to strong at the right. A busy market is held back at any strength.');
 /** A chosen venue that has no book for this long gets a chip saying so (a start-up that is merely slow does not). */
 const IDLE_GRACE_MS = 20_000;
 /** What the dropdown says next to a layer that cannot be chosen yet. */
 const UPCOMING = 'upcoming';
+/**
+ * Whether there is a layer to choose (Karl, 2026-11-12: each button in the bar a precious resource): the Layer menu stands in the Heatmap deck
+ * and in Settings only once a second layer can be drawn; while Liquidity is the only one it is left out.
+ */
+const LAYER_CHOICE = AVAILABLE_LAYERS.length > 1;
+/** The heatmap's colour range and smoothing, said alike by Settings' rows and the Heatmap key's panel. */
+const COLOUR_RANGE_TIP = t('Auto: the colour window follows the data (recomputed on recenter, market change, zoom and every 10 s). Off: it stays where it is.');
+const SMOOTHING_TIP = t('Vertical smoothing when price rows get thin (zoomed out): Auto smooths with a ~5 px Gaussian below 15 px per row, so far walls stay visible; Off draws every row exactly.');
 
-/** The pane switches in the top bar, in order: the two side columns first (they vanish and return at once), then what the map shows. */
-const PANE_TOGGLES: readonly (readonly [keyof AppState['show'], string])[] = [['cvd', t('Flow')], ['book', t('Book')], ['profile', t('Profile')], ['depth', t('Depth')], ['oi', 'OI'], ['delta', t('Delta')], ['ls', t('L/S')], ['candles', t('Candles')], ['lt', 'LT'], ['mirror', t('Mirror')], ['volume', t('Volume')]];
+/** The Chart type menu's row that opens the Candle colours panel (not a chart type). */
+const CANDLE_COLOURS_ITEM = 'candle-colours';
+
+/**
+ * The pane switches in the top bar, in order: the two side columns first (they vanish and return at once), then what the map shows. The
+ * candles have no switch here since 2026-11-12: the Chart type button takes them off the map (Hidden) and is lit while they are drawn. Nor
+ * has Mirror (the same day, Karl: each button a precious resource): it is no pane but what hovering the profile column or the book shows, and
+ * its switch is in the order book's Cues panel.
+ */
+const PANE_TOGGLES: readonly (readonly [keyof AppState['show'], string])[] = [['cvd', t('Flow')], ['book', t('Book')], ['profile', t('Profile')], ['depth', t('Depth')], ['oi', 'OI'], ['delta', t('Delta')], ['ls', t('L/S')], ['funding', t('Funding')], ['lt', 'LT'], ['volume', t('Volume')], ['stats', t('Stats')]];
 
 /** Assign a form control's value only when it differs: assigning to an open select closes its popup. */
 function setValue(control: HTMLSelectElement | HTMLInputElement, value: string): void { if (control.value !== value) control.value = value; }
@@ -87,12 +130,21 @@ function settingsKey(name: string): HTMLButtonElement {
  * One deck of the full top bar: a framed group (a fieldset, whose legend sits in the frame line) of up to two rows of controls. Its frame is
  * the theme's (chrome.css): an etched group box on the bevel, a double rule in text mode, a hairline pair in the editor.
  */
+/** The decks whose rows end together, in aligned columns where that costs no width (Toolbar #alignDecks), and how much width is rounding: any
+ *  more would widen the deck, and the bar would zoom or break sooner. */
+const ALIGNED_DECKS = new Set(['market', 'heat', 'chart', 'alerts']), ALIGN_SLACK_PX = 0.5;
+
 function deck(id: string, title: string, ...rows: HTMLElement[][]): HTMLElement {
-  return el('fieldset', { class: `deck deck-${id}` }, el('legend', { textContent: title }),
+  const box = el('fieldset', { class: `deck deck-${id}` }, el('legend', { textContent: title }),
     ...rows.filter(r => r.length).map(r => el('div', { class: 'deck-row' }, ...r)));
+  box.dataset.deck = id;
+  return box;
 }
 
 /** Top bar: market, timeframe, layer, pane toggles, heatmap colour, venues, theme. */
+/** The id of the theme menu's last row (it opens the Theme panel rather than choosing a theme). */
+const EDIT_THEMES = 'edit-themes';
+
 export class Toolbar {
   readonly root = el('header', { class: 'toolbar' });
   /** The coin every view shows; choosing another loads the page again for it (app/coin.ts). */
@@ -101,22 +153,36 @@ export class Toolbar {
   #coinNotice = el('div', { class: 'notice info', role: 'status', hidden: true });
   #market = el('select', { class: 'market', ariaLabel: t('Market'), tip: t("Market: whose candles, footprint and open interest the chart shows. The heatmap always combines every enabled venue's book, whatever is chosen here.") });
   #timeframes = el('div', { class: 'seg' });
-  #layer = el('select', { ariaLabel: t('Layer'), tip: t('Layer drawn on the map. Liquidity is the order-book heatmap; liquidation, stop-loss and take-profit layers are upcoming (they need data a static page cannot hold a key for).') });
+  #layer = el('select', { ariaLabel: t('Layer'), tip: t('Layer drawn on the map. Liquidity is the order-book heatmap; stop-loss and take-profit layers are upcoming (they need data a static page cannot hold a key for).') });
   #toggles = el('div', { class: 'seg toggles' });
   #chips = el('div', { class: 'chips' });
   /** Venues this location cannot reach, beside the live ones, so their absence is explained where it is noticed. */
   #blocked = el('div', { class: 'chips blocked-chips' });
   readonly #notice = new VenueNotice();
   readonly #install = new InstallButton();
-  #guide = el('button', { type: 'button', class: 'guide-btn', textContent: t('Guide'), tip: t('A ten-minute tour of what everything is and how to use it, with moving pictures. Every button also explains itself on hover.'), onclick: () => { showGuide(); } });
+  #guide = el('button', { type: 'button', class: 'guide-btn', textContent: t('Guide'), tip: t('The whole story of what everything is and how to use it, with moving pictures. Every button also explains itself on hover.'), onclick: () => { showGuide(); } });
+  /** The quick tour (tour/tour.ts), which lights the page a part at a time; beside the Guide, which is the whole story. */
+  #tour = el('button', { type: 'button', class: 'tour-btn', textContent: t('Tour'), tip: t('A one-minute tour of the page: what the map shows and where everything is. The Guide goes deeper.'), onclick: () => { this.#sheet?.close(); this.startTour(); } });
+  /** Offers the tour once to a visitor who has never been offered it (a notice under the bar). */
+  readonly #invite = new TourInvite(() => this.startTour(), () => compactBar() ? t('You can take the tour any time from Settings.') : t('You can take the tour any time from the Guide.'));
+  /**
+   * Plus, the paid tier (`plus/`): in the bar where the Tour stood (Karl, 2026-11-17: the bar has no room for one more button without
+   * breaking into two rows on a 1,366 px screen; the Tour is the Guide's first button and the first visit's invitation). Lit while this
+   * browser has Plus; it opens what Plus is, and the way to it.
+   */
+  #plus = el('button', { type: 'button', class: 'plus-btn', textContent: PLUS_NAME, tip: t('Plus: the liquidation levels\' whole history, the liquidations of profitable and proven traders, and stop and take-profit levels, for a monthly price that pays for the servers behind this page. Everything else stays free.'), onclick: () => { togglePlus(this.#plus); } });
+  /** Says when the site serves a newer build than this tab runs (update-notice.ts): in the status bar on a computer, under the bar otherwise. */
+  readonly #update = new UpdateNotice();
   #shot = el('button', { type: 'button', class: 'icon-btn', ariaLabel: t('Screenshot'), tip: t('Take a picture of the chart (keyboard: S): select an area or click a pane, draw on it, hide anything private with pixelate or blur, then copy or save it.'), onclick: () => { void lazy(() => import('./screenshot/editor.ts')).then(m => m?.startScreenshot()); } });
-  #author = el('button', { type: 'button', textContent: t('Author'), tip: t('Who made this, and where to find the code. Free, no sign-ups, open source.') });
+  #author = el('button', { type: 'button', textContent: t('Author'), tip: t('Who made this, and where to find the code. Free to use, no account, open source.') });
   #scope = el('div', { class: 'seg scope', tip: t('Which markets the liquidity views draw. A filter on the enabled venues: it never switches a venue on or off.') });
-  #soundButton = el('button', { class: 'led-btn sound-btn', textContent: t('Sound'), tip: t('Sound notifications') });
+  #soundButton = el('button', { class: 'led-btn sound-btn', textContent: t('Sounds'), tip: t('Sound notifications') });
   #soundPanel: Panel | null = null;
   #sounds: Sounds | null = null;
   /** Where the language and theme buttons live on a desktop screen (the status bar), or null. */
   #statusHost: HTMLElement | null = null;
+  /** Where the update notice lives on a desktop screen (its slot in the status bar), or null. */
+  #statusNotices: HTMLElement | null = null;
   #venueMenu: Panel | null = null;
   #alerts: Alerts | null = null;
   /**
@@ -128,11 +194,12 @@ export class Toolbar {
   /** The settings keys of the Chart deck's split buttons (`splitButton`): each opens its feature's panel, which is placed from the key. */
   #settingsKeys: Record<Exclude<Feature, 'highlights'>, HTMLButtonElement> = {
     trades: settingsKey(t('Trades')), footprint: settingsKey(t('Footprint')), vwap: settingsKey(t('VWAP')), keyLevels: settingsKey(t('Key levels')),
-    liquidations: settingsKey(t('Liquidations')), traded: settingsKey(t('Volume profile')), absorption: settingsKey(t('Absorption')),
+    liquidations: settingsKey(t('Liquidations')), liqLevels: settingsKey(t('Liquidation levels')), traded: settingsKey(t('Volume profile')), absorption: settingsKey(t('Absorption')),
+    tpo: settingsKey(t('TPO')),
   };
-  /** The Alerts deck's settings keys: Highlights and Sound are switched and set the same way. */
-  #alertKeys = { highlights: settingsKey(t('Highlights')), sound: settingsKey(t('Sound')) };
-  #alertSplits: { highlights: HTMLElement; sound: HTMLElement } | null = null;
+  /** The Alerts deck's settings keys: Highlights, Sound and Waves are switched and set the same way. */
+  #alertKeys = { highlights: settingsKey(t('Highlights')), sound: settingsKey(t('Sounds')), waves: settingsKey(t('Waves')) };
+  #alertSplits: { highlights: HTMLElement; sound: HTMLElement; waves: HTMLElement } | null = null;
   /** The split buttons themselves (the button and its key), built once the buttons and keys exist. */
   #splits: Record<Exclude<Feature, 'highlights'>, HTMLElement> | null = null;
   #absorption = el('button', { class: 'led-btn', textContent: t('Absorption'), tip: HELP.absorption.tip });
@@ -142,6 +209,11 @@ export class Toolbar {
   /** The previous day's, week's and month's levels (keylevels/), set in its panel. */
   #keyLevels = el('button', { class: 'led-btn', textContent: t('Key levels'), tip: HELP.keyLevels.tip });
   #keyLevelPanel: Panel | null = null;
+  /** Hyperliquid's liquidation levels over the map and in the profile column (liq-levels.ts), set in its panel; only where its file has an address. */
+  #liqLevels = el('button', { class: 'led-btn liq-levels-btn', textContent: t('Liq levels'), tip: HELP.liqLevels.tip });
+  #liqLevelPanel: Panel | null = null;
+  /** The levels' source (set by the page once the hub exists), for its panel. */
+  liqSource: LiqLevelsSource | null = null;
   /** The footprint (on/off is `show.footprint`), set in its panel: a lamp button since it holds settings, not one of the pane toggles. */
   #footprint = el('button', { class: 'led-btn', textContent: t('Footprint'), tip: HELP.footprint.tip });
   #footprintPanel: Panel | null = null;
@@ -149,13 +221,45 @@ export class Toolbar {
   flow: FlowBook | null = null;
   /** The VWAP lines (vwap/), set in its panel. */
   #vwap = el('button', { class: 'led-btn', textContent: t('VWAP'), tip: HELP.vwap.tip });
+  /**
+   * The person's scripts (script/): the lamp is `show.script` (they run and draw: on the map, and in rows under it for those placed there),
+   * the key opens the Scripts panel, where they are written and switched on one by one (`onOpenScripts`, set by the page).
+   */
+  #scripts = el('button', { class: 'led-btn', textContent: t('Scripts'), tip: HELP.script.tip });
+  #scriptsKey = settingsKey(t('Scripts'));
+  #scriptsSplit = splitButton(this.#scripts, this.#scriptsKey);
+  /** The key that opens the Scripts panel: where the panel opens from when nothing was pressed (an agent's draft). */
+  get scriptsAnchor(): HTMLElement { return this.#scriptsKey; }
+  onOpenScripts: (anchor: HTMLElement) => void = () => {};
   #vwapPanel: Panel | null = null;
+  /** The TPO (tpo/), set in its panel. */
+  #tpo = el('button', { class: 'led-btn', textContent: t('TPO'), tip: HELP.tpo.tip });
+  #tpoPanel: Panel | null = null;
+  /** The Auto row size and whose candles the TPO reads (set by the page), for its panel. */
+  tpoInfo: () => TpoInfo = () => ({ auto: 0, market: null, minutes: 30 });
   /** What the page knows of the whale sums (set by the page), for the VWAP panel. */
   whaleInfo: () => WhaleInfo | null = () => null;
+  /** Whether each rolling VWAP's history holds a whole window (set by the page), for the VWAP panel to say which have no line. */
+  rollingReach: RollingReach = () => 'coming';
+  /** The markets the VWAP lines read and how each stands (`HeatPane.vwapMarketStates`), for the VWAP panel. */
+  vwapMarkets: VwapMarkets = () => [];
+  /** Where a live anchor's rule lands now (`HeatPane.ruleStart`), for the VWAP and Volume profile panels' anchor rows. */
+  ruleStart: RuleStart = () => ({ state: 'coming' });
+  /** Where each anchored VWAP's line is drawn from (`HeatPane.anchorDrawnFrom`), for the VWAP panel's rows. */
+  anchorDrawnFrom: DrawnFrom = () => null;
   /** The key levels' candles (set by the page), for the panel to say whose they are and whether they could be read. */
   keyHistory: KeyLevelHistory | null = null;
   /** The volume profile's candles of one bar size (set by the page), for its panel to say whether they could be read. */
   profileHistory: ((barMs: number) => KeyLevelHistory) | null = null;
+  /** The room the map's profiles have (heat-pane.ts `profileRoom`), for the Volume profile panel to say what has none; set by the page. */
+  profileRoom: (() => ProfileRoom) | null = null;
+  /** The columns' anchored window and taking it again now (heat-pane.ts `anchoredWindow`, `updateAnchored`), for the Volume profile panel; set by the page. */
+  anchoredWindow: (() => AnchorSnapshot | null) | null = null;
+  updateAnchored: (() => void) | null = null;
+  /** Where the profile's anchor starts now (`HeatPane.profileAnchorStart`), for its row in the Volume profile panel; set by the page. */
+  profileAnchorStart: ((a: Anchor) => ProfileAnchorStart) | null = null;
+  /** The bar a profile anchor at a moment is worked out on (`HeatPane.profileAnchorBar`), for the panel's date field. */
+  profileAnchorBar: ((at: number) => number) | null = null;
   /** Where the page's data comes from (set by the page): a page reading the exchanges itself keeps liquidations only while it is open. */
   sourceKind: 'server' | 'browser' = 'server';
   #highlights = el('button', { class: 'led-btn', textContent: t('Highlights'), tip: t('What stands out: unusual volume, open-interest changes and depth imbalance') });
@@ -177,8 +281,11 @@ export class Toolbar {
   #goto = el('button', { type: 'button', class: 'map-goto', textContent: t('Go to'), tip: t('Go to a date and time (keyboard: G)'), onclick: () => this.openGoTo() });
   /** What Go to moves and reads (set by main). */
   goTo: { centre(): number; earliest(): { depth: number | null; candles: number | null }; go(t: number): void; live(): void; replay(t: number): void } | null = null;
-  /** The Range button, which its panel opens beside. */
-  get rangeButton(): HTMLElement { return this.#range; }
+  /**
+   * The Range button on the page as it is laid out, which a Range panel with no selection to stand beside opens by: the map corner's Select on
+   * a desktop (the toolbar's Range is then left out of the bar), else the toolbar's (a phone's sheet).
+   */
+  get rangeButton(): HTMLElement { return this.#rangeCorner.isConnected && this.#rangeCorner.getClientRects().length ? this.#rangeCorner : this.#range; }
   /** The show/hide buttons of the panes, in the order of `PANE_TOGGLES`. */
   #toggleButtons: HTMLButtonElement[] = [];
   #tradePanel: Panel | null = null;
@@ -189,22 +296,44 @@ export class Toolbar {
     style: el('select', { ariaLabel: t('Colours'), tip: `${t('Heatmap colouring.')} ${HEAT_STYLES.map(s => `${s.label}: ${s.title}.`).join(' ')}` }),
     lo: el('i'), hi: el('i'), legend: el('span', { class: 'legend' }),
     contrast: el('input', { type: 'range', min: String(CONTRAST.min), max: String(CONTRAST.max), step: '1', tip: t('Contrast: right reveals thinner liquidity, left keeps only the biggest walls, and the far left tones even those down. Double-click to reset.') }),
-    smooth: el('select', { ariaLabel: t('Smoothing'), tip: t('Vertical smoothing when price rows get thin (zoomed out): Auto smooths with a ~5 px Gaussian below 15 px per row, so far walls stay visible; Off draws every row exactly.') }),
-    auto: el('button', { class: 'led-btn', textContent: t('Auto'), tip: t('Auto: the colour window follows the data (recomputed on recenter, market change, zoom and every 10 s). Off: it stays where it is.') }),
+    smooth: el('select', { ariaLabel: t('Smoothing'), tip: SMOOTHING_TIP }),
+    auto: el('button', { class: 'led-btn', textContent: t('Auto'), tip: COLOUR_RANGE_TIP }),
   };
   #source = el('select', { class: 'heat-source', ariaLabel: t('Source'), tip: t('Heatmap source') });
   #theme = el('button', { class: 'theme-btn', tip: t('Theme: hover to preview, click to keep') });
   /** Solid or glass, in any theme (store `material`): a lamp on the full bar, a switch in a phone's Settings. */
   #glass = el('button', { type: 'button', class: 'led-btn glass-btn', textContent: t('Waves'), tip: t('Waves: the bars and panels around the chart turn to glass; large orders and large flow changes light it and send waves across the screen') });
   #glassSwitch = el('input', { type: 'checkbox' });
+  /** How strongly the waves are drawn (store `waveStrength`): a slider under the Waves switch in a phone's Settings; the full bar has it in the Waves panel. */
+  #waveStrength = el('input', { type: 'range', min: '0', max: '100', step: '5', ariaLabel: t('Wave strength') });
+  #waveStrengthOut = el('output');
   /** The page's language: the code of the one in use, and a menu of the others (a language is chosen before the page is built, so choosing one reloads it). */
   /** Which clock the page's times are on: UTC, or the computer's own. */
   #zone = el('button', { class: 'zone-btn' });
+  /** The time zone in a phone's Settings: both clocks side by side, the one in use lit (the bar's single button names only the current one). */
+  #zoneLocal = el('button', { type: 'button', textContent: t('Local') });
+  #zoneUtc = el('button', { type: 'button', textContent: 'UTC' });
+  #zoneSeg = el('div', { class: 'seg zone-seg', role: 'group', ariaLabel: t('Time zone') }, this.#zoneLocal, this.#zoneUtc);
+  /** A phone's Settings: how much recorded history it reads when the page opens (app/history-window.ts). */
+  #historyChoices = new Map<Exclude<PhoneHistory, 'auto'>, HTMLButtonElement>([['recent', el('button', { type: 'button', textContent: t('3 h') })], ['day', el('button', { type: 'button', textContent: t('Day') })], ['off', el('button', { type: 'button', textContent: t('Off') })]]);
+  #historySeg = el('div', { class: 'seg zone-seg', role: 'group', ariaLabel: t('History'), tip: t('How much recorded history this device downloads when the page opens: the last 3 hours (a few MB), the whole day (tens of MB) or none. It applies the next time the page opens.') }, ...this.#historyChoices.values());
+  /** The compact bar's light-or-dark key (Karl, 2026-11-01): one tap swaps the light theme and the dark one last shown (`flippedTheme`). */
+  #flip = el('button', { type: 'button', class: 'flip-btn' });
+  /**
+   * A phone's Tape tab: the tape as a list or as a chart (Karl, 2026-11-14: "a direct button at the top bar ... a wave icon"). A wave while the
+   * list shows (press for the chart), lines while the chart does (press for the list); right after the spacer, so nothing else in the bar
+   * moves when it comes, and only on that tab (`setTapeView`).
+   */
+  #tapeView = el('button', { type: 'button', class: 'tape-view-btn', hidden: true, onclick: () => this.store.set({ phoneTape: this.store.state.phoneTape === 'chart' ? 'list' : 'chart' }) });
   /** The list of keyboard shortcuts (also the ? key); on the status bar, so a phone, which has no keyboard, does not show it. */
   #keys = el('button', { type: 'button', class: 'keys-btn', textContent: t('Keys'), tip: t('Keyboard shortcuts (?)'), onclick: () => this.openShortcuts() });
-  /** Saved layouts (the status bar, beside Keys); `panes` is the page's Layout, set by main. */
-  #layouts = el('button', { type: 'button', class: 'layouts-btn', textContent: t('Layouts'), tip: t('Save the panes and what the chart shows under a name, and switch between them'), onclick: () => this.#openLayouts() });
-  panes: PaneHost | null = null;
+  /** The browser tab's switches (tab-title.ts): the price in its title, the candle under way as its icon. The status bar's key opens them; the Settings sheet holds them as rows. */
+  #tab = el('button', { type: 'button', class: 'tab-btn', textContent: t('Tab'), tip: t('The browser tab: the price in its title and the candle under way as its icon.'), onclick: () => this.#openTab() });
+  #tabPrice = el('input', { type: 'checkbox' });
+  #tabIcon = el('input', { type: 'checkbox' });
+  /** Layouts, from the map's corner (a compact bar has it in Settings): the layout the screen is showing, the ready-made ones and the person's own (layouts/gallery.ts). `layouts` is set by main. */
+  #layoutCorner = el('button', { type: 'button', class: 'map-layout', ariaLabel: t('Layouts'), tip: t('Layouts: choose a ready-made arrangement of the panels, or save your own'), onclick: () => this.#openLayouts(this.#layoutCorner) }, t('Layouts'));
+  layouts: LayoutActions | null = null;
   /** The lamp panel open now, with what redraws it. */
   #open: { panel: Panel; redraw: () => void } | null = null;
   #language = el('button', { class: 'language-btn', ariaLabel: t('Language'), tip: t('Language: the page uses the language of your browser unless you choose another here') }, el('span', { textContent: language().toUpperCase() }));
@@ -226,23 +355,94 @@ export class Toolbar {
   #heatctl = el('span', { class: 'heatctl' });
   /** The colour ramp and the contrast slider under it: one unit, so the Settings sheet can give it a row of its own. */
   #heatScale = el('span', { class: 'scale' });
+  /**
+   * The full bar's key to the heatmap's colour range and smoothing (Karl, 2026-11-12: each button a precious resource), joined to the end of
+   * the colour scale as one unit; a phone's Settings keeps them as rows of their own.
+   */
+  #heatKey = settingsKey(t('Heatmap'));
+  #heatSplit = el('span', { class: 'split heat-split' });
   #spacer = el('span', { class: 'spacer' });
   /** Phone only: the button that opens Settings, where every control that does not fit the top bar lives. */
   #more = el('button', { type: 'button', class: 'more-btn', ariaLabel: t('Settings'), tip: t('Settings: panels, heatmap colouring, venues, sound, theme and the guide.') });
+  /**
+   * Folds the bar away (`state.barCollapsed`), the chart taking its room as a browser's full screen does (Karl, 2026-10-24: "the ability
+   * to collapse the header bar ... on an iPad ... to maximize screen space"). Folded, the bar is a thin strip, `#expand`, that brings it
+   * back: a tab floating over the top of the screen covered one of the map's buttons or another, whatever the layout.
+   */
+  #collapse = el('button', { type: 'button', class: 'bar-collapse', ariaLabel: t('Hide the controls'), tip: t('Hide the controls'), ariaExpanded: 'true', onclick: () => this.store.set({ barCollapsed: true }) });
+  #expand = el('button', { type: 'button', class: 'bar-expand', ariaLabel: t('Show the controls'), tip: t('Show the controls'), onclick: () => this.store.set({ barCollapsed: false }) });
   #sheet: Sheet | null = null;
   /** Where Recenter lives on the full toolbar's screens: in a corner of the map it acts on, not among the venues (null until the map exists). */
   #mapHost: HTMLElement | null = null;
+  /** What the full bar was last fitted to (`#fit`), and the elements that break it into rows where it is. */
+  #fitted: BarFit | null = null; #fittedOrder = ''; #deckBreaks: HTMLElement[] = []; #fitFrame = 0;
+  /** The full bar's decks in their own order (the one row's); in rows they stand in `ROWS_ORDER` (bar-fit.ts). */
+  #decks: HTMLElement[] = [];
+  /** The controls given a span by #alignDecks, so that it can be taken back when they leave their deck. */
+  #spanned: HTMLElement[] = [];
   /** Settings' "Keep screen on" switch (only where the browser can hold the screen awake). */
   #awake = el('input', { type: 'checkbox' });
-  #recenter = el('button', { textContent: t('Recenter'), tip: t('Jump back to the live edge and fit the price range to the recent candles (keyboard: R, Home, or double-click the chart).') });
+  #recenter = el('button', { textContent: t('Recenter'), tip: t('Jump back to the live edge and fit the price range to the recent candles (keyboard: R, Home, or double-click the price scale).') });
   onRecenter: () => void = () => {};
+  /**
+   * The map's maximize button, the corner's last (TradingView's): the map over the whole screen, the panes under it and the columns beside
+   * it out of sight, or all given back. There while there is something to fold away, or the map is maximized (`setMapMax`); the page does the rest.
+   */
+  #mapMax = el('button', { type: 'button', class: 'map-max', hidden: true, onclick: () => this.onMapMax() });
+  onMapMax: () => void = () => {};
+  /** Show the map's maximize button as the map is: `shown` while it would change something, `on` (lit) while the map is maximized. */
+  setMapMax(shown: boolean, on: boolean): void {
+    const words = on ? t('Restore the panels (or double-click the chart)') : t('Maximize the chart to the whole screen (or double-click it)');
+    this.#mapMax.hidden = !shown && !on;
+    this.#mapMax.dataset.state = on ? 'on' : 'off';
+    this.#mapMax.setAttribute('aria-pressed', String(on));
+    if (this.#mapMax.getAttribute('aria-label') !== words) { setTip(this.#mapMax, words); this.#mapMax.setAttribute('aria-label', words); }
+  }
   /** Preview a theme without keeping it (`null` puts the saved one back). */
   onPreviewTheme: (id: string | null) => void = () => {};
+  /** Hovering a row of the Chart type menu draws the map with it without keeping it (Hidden: without the price); leaving the menu puts the kept one back (null). */
+  onPreviewChartType: (id: ChartChoice | null) => void = () => {};
+  /**
+   * How the map draws its price (chart-type.ts): a cell of the Time deck, beside the timeframes, as a chart's type usually sits. Its menu also
+   * takes the price off the map (Hidden), and the button is lit while the price is drawn, as the timeframe in use is.
+   */
+  #chartType = el('button', { type: 'button', class: 'chart-type', ariaLabel: t('Chart type') });
+  #candlePanel: Panel | null = null;
+  /** The drawing tools' button (draw/bar.ts, set by the page), in the map's corner beside Select. */
+  #drawCorner: HTMLElement | null = null;
+  setDrawButton(button: HTMLElement): void { this.#drawCorner = button; this.#arrange(); }
   onSelectMarket: (id: string) => void = () => {};
   /** The person applied a venue selection (a server brings the new feeds up some seconds later). */
   onVenuesApplied: () => void = () => {};
 
+  /**
+   * What the scripts are doing, on their lamp (set by the Scripts pane): `running` while one that is on waits for its first answer (the first
+   * can take a while on a busy page), `error` with the name of one that stopped, '' otherwise. The tip says it.
+   */
+  setScriptsStatus(note: 'running' | 'error' | '', name: string): void {
+    if ((this.#scripts.dataset.note ?? '') !== note) { if (note) this.#scripts.dataset.note = note; else delete this.#scripts.dataset.note; }
+    this.#scripts.dataset.tip = note === 'error' ? `${HELP.script.tip} ${t('“{name}” stopped with an error: open Scripts to see it.', { name })}` : note === 'running' ? `${HELP.script.tip} ${t('running…')}` : HELP.script.tip;
+  }
+
   constructor(private store: Store, private venueControl: VenueControl) {
+    // Whether a press is under way, for a refresh of the open panel that waits for one to end (`refreshOpenPanel`).
+    window.addEventListener('pointerdown', () => { this.#pressing = true; }, true);
+    for (const end of ['pointerup', 'pointercancel'] as const) window.addEventListener(end, () => { this.#pressing = false; }, true);
+    // The Guide's link to the tour starts it as the Tour button does (the bar unfolded for it).
+    setTourStarter(() => this.startTour());
+    // Plus coming or going while the Liquidation levels panel is open redraws it: its Plus tags lock or unlock, and its note says what is drawn.
+    let wasOn = plus().on;
+    const lit = (): void => {
+      this.#plus.classList.toggle('on', plus().on);
+      const on = this.#plus.classList.contains('on');
+      if (on !== wasOn) { wasOn = on; if (this.#liqLevelPanel && this.#open?.panel === this.#liqLevelPanel) this.refreshOpenPanel(); }
+    };
+    lit(); plus().subscribe(lit);
+    // A notice that comes, goes, or wraps differently moves the ones under it.
+    if (typeof ResizeObserver === 'function') {
+      const stack = new ResizeObserver(() => this.#stackNotices());
+      for (const notice of this.#notices()) stack.observe(notice);
+    }
     const missing = coinChoice().notice;
     if (missing) {
       this.#coinNotice.append(el('span', { class: 'notice-mark mark-info', ariaHidden: 'true' }), el('span', { textContent: missing.reason === 'unreadable' ? t('The coin list could not be read, so only BTC is offered.') : t('{coin} is not on the coin list, so the page is on BTC.', { coin: missing.coin }) }),
@@ -250,7 +450,19 @@ export class Toolbar {
       this.#coinNotice.hidden = false;
     }
     this.#market.onchange = () => this.onSelectMarket(this.#market.value);
+    this.#chartType.onclick = () => {
+      // The four types and Hidden (no price), each previewed on the map while the pointer or the keys are on it, and after a line the candles'
+      // colours (a panel). A type draws the price that way, Hidden takes it away and keeps the type (chartChoicePatch).
+      const items: MenuItem[] = [...CHART_TYPES.map(id => ({ id, label: chartTypeName(id) })), { id: CHART_HIDDEN, label: chartChoiceName(CHART_HIDDEN) }, { id: CANDLE_COLOURS_ITEM, label: t('Candle colours…'), action: true }];
+      const state = this.store.state;
+      openMenu(this.#chartType, items, chartChoiceOf(state.chartType, state.show.candles), { onPreview: id => this.onPreviewChartType(readChartChoice(id)), onSelect: id => {
+        this.onPreviewChartType(null);
+        const chosen = readChartChoice(id);
+        if (chosen) this.store.set(chartChoicePatch(chosen, this.store.state.show)); else if (id === CANDLE_COLOURS_ITEM) this.#openCandleColours();
+      } }, 'left', { title: t('Chart type') });
+    };
     for (const tf of Object.keys(TIMEFRAMES)) this.#timeframes.append(el('button', { textContent: tf, tip: t('{timeframe} candles. The footprint, the bar stats and the open-interest bars follow this too.', { timeframe: TIMEFRAME_NAMES[tf] ?? tf }), onclick: () => this.store.set({ timeframe: tf }) }));
+    this.#timeframes.append(this.#chartType);
     for (const [id, label] of LAYERS) {
       const available = AVAILABLE_LAYERS.includes(id), option = new Option(available ? label : `${label} · ${UPCOMING}`, id);
       option.disabled = !available;
@@ -259,6 +471,7 @@ export class Toolbar {
     this.#layer.onchange = () => this.store.set({ layer: this.#layer.value as Layer });
     for (const [key, label] of PANE_TOGGLES) {
       const button = el('button', { textContent: label, tip: HELP[key as HelpId].tip, onclick: () => this.store.set({ show: { ...this.store.state.show, [key]: !this.store.state.show[key] } }) });
+      button.dataset.pane = key;
       this.#toggleButtons.push(button); this.#toggles.append(button);
     }
     this.#settingsKeys.trades.onclick = () => {
@@ -272,10 +485,17 @@ export class Toolbar {
     };
     this.#footprint.onclick = () => this.store.set(togglePatch(this.store.state, 'footprint'));
     this.#settingsKeys.vwap.onclick = () => {
-      const build = (tools: HTMLElement, body: HTMLElement): void => buildVwapPanel(this.store, tools, body, () => this.#vwapPanel?.render(build), this.whaleInfo);
-      this.#vwapPanel = this.#track(togglePanel(this.#settingsKeys.vwap, { title: t('VWAP'), width: 420, align: 'left', stays: true, onClose: () => { this.#vwapPanel = null; if (this.store.state.vwapAnchoring) this.store.set({ vwapAnchoring: false }); } }, build), build);
+      const build = (tools: HTMLElement, body: HTMLElement): void => buildVwapPanel(this.store, tools, body, () => this.#vwapPanel?.render(build), this.whaleInfo, this.rollingReach, this.vwapMarkets, this.ruleStart, this.anchorDrawnFrom);
+      this.#vwapPanel = this.#track(togglePanel(this.#settingsKeys.vwap, { title: t('VWAP'), width: 420, align: 'left', stays: true, onClose: () => { this.#vwapPanel = null; if (this.store.state.vwapAnchoring && !this.#placing) this.store.set({ vwapAnchoring: false }); } }, build), build);
     };
     this.#vwap.onclick = () => this.store.set(togglePatch(this.store.state, 'vwap'));
+    this.#settingsKeys.tpo.onclick = () => {
+      const build = (tools: HTMLElement, body: HTMLElement): void => buildTpoPanel(this.store, tools, body, () => this.#tpoPanel?.render(build), this.tpoInfo);
+      this.#tpoPanel = this.#track(togglePanel(this.#settingsKeys.tpo, { title: t('TPO'), width: 440, align: 'left', onClose: () => { this.#tpoPanel = null; } }, build), build);
+    };
+    this.#tpo.onclick = () => this.store.set(togglePatch(this.store.state, 'tpo'));
+    this.#scripts.onclick = () => this.store.set({ show: { ...this.store.state.show, script: !this.store.state.show.script } });
+    this.#scriptsKey.onclick = () => this.onOpenScripts(this.#scriptsKey);
     this.#settingsKeys.keyLevels.onclick = () => {
       const build = (tools: HTMLElement, body: HTMLElement): void => buildKeyLevelPanel(this.store, tools, body, () => this.#keyLevelPanel?.render(build), this.keyHistory);
       this.#keyLevelPanel = this.#track(togglePanel(this.#settingsKeys.keyLevels, { title: t('Key levels'), width: 420, align: 'left', onClose: () => { this.#keyLevelPanel = null; } }, build), build);
@@ -286,12 +506,17 @@ export class Toolbar {
       this.#liquidationPanel = this.#track(togglePanel(this.#settingsKeys.liquidations, { title: t('Liquidations'), width: 400, align: 'left', onClose: () => { this.#liquidationPanel = null; } }, build), build);
     };
     this.#liquidations.onclick = () => this.store.set(togglePatch(this.store.state, 'liquidations'));
-    this.#alertSplits = { highlights: splitButton(this.#highlights, this.#alertKeys.highlights), sound: splitButton(this.#soundButton, this.#alertKeys.sound) };
+    this.#settingsKeys.liqLevels.onclick = () => {
+      const build = (tools: HTMLElement, body: HTMLElement): void => buildLiqLevelPanel(this.store, tools, body, () => this.#liqLevelPanel?.render(build), this.liqSource);
+      this.#liqLevelPanel = this.#track(togglePanel(this.#settingsKeys.liqLevels, { title: t('Liquidation levels'), width: 400, align: 'left', onClose: () => { this.#liqLevelPanel = null; } }, build), build);
+    };
+    this.#liqLevels.onclick = () => this.store.set(togglePatch(this.store.state, 'liqLevels'));
+    this.#alertSplits = { highlights: splitButton(this.#highlights, this.#alertKeys.highlights), sound: splitButton(this.#soundButton, this.#alertKeys.sound), waves: splitButton(this.#glass, this.#alertKeys.waves) };
     const k = this.#settingsKeys;
     this.#splits = {
       trades: splitButton(this.#trades, k.trades), footprint: splitButton(this.#footprint, k.footprint), vwap: splitButton(this.#vwap, k.vwap),
-      keyLevels: splitButton(this.#keyLevels, k.keyLevels), liquidations: splitButton(this.#liquidations, k.liquidations),
-      traded: splitButton(this.#traded, k.traded), absorption: splitButton(this.#absorption, k.absorption),
+      keyLevels: splitButton(this.#keyLevels, k.keyLevels), liquidations: splitButton(this.#liquidations, k.liquidations), liqLevels: splitButton(this.#liqLevels, k.liqLevels),
+      traded: splitButton(this.#traded, k.traded), absorption: splitButton(this.#absorption, k.absorption), tpo: splitButton(this.#tpo, k.tpo),
     };
     for (const [value, label] of SCOPE_OPTIONS) this.#scope.append(el('button', { textContent: label, onclick: () => this.store.set({ scope: value }) }));
     this.#alertKeys.sound.onclick = () => {
@@ -310,9 +535,20 @@ export class Toolbar {
       this.#track(togglePanel(this.#alertKeys.highlights, { title: t('Highlights'), width: 380, align: 'left' }, build), build);
     };
     this.#highlights.onclick = () => this.store.set(togglePatch(this.store.state, 'highlights'));
+    this.#alertKeys.waves.onclick = () => {
+      const build = (tools: HTMLElement, body: HTMLElement): void => this.#buildWaves(tools, body);
+      this.#track(togglePanel(this.#alertKeys.waves, { title: t('Waves'), width: 400, align: 'left' }, build), build);
+    };
+    this.#heatKey.onclick = () => {
+      const build = (tools: HTMLElement, body: HTMLElement): void => this.#buildHeat(tools, body);
+      this.#track(togglePanel(this.#heatKey, { title: t('Heatmap'), width: 380, align: 'left' }, build), build);
+    };
     this.#settingsKeys.traded.onclick = () => {
-      const build = (tools: HTMLElement, body: HTMLElement): void => buildTradedPanel(this.store, tools, body, () => this.#tradedPanel?.render(build), () => gridStepFor(this.store.state.mark.price > 0 ? this.store.state.mark.price : 1), { browser: this.sourceKind === 'browser', candles: this.profileHistory });
-      this.#tradedPanel = this.#track(togglePanel(this.#settingsKeys.traded, { title: t('Volume profile'), width: 520, align: 'left', onClose: () => { this.#tradedPanel = null; } }, build), build);
+      const build = (tools: HTMLElement, body: HTMLElement): void => buildTradedPanel(this.store, tools, body, () => this.#tradedPanel?.render(build), () => gridStepFor(this.store.state.mark.price > 0 ? this.store.state.mark.price : 1), { browser: this.sourceKind === 'browser', candles: this.profileHistory, room: () => this.profileRoom?.() ?? null, anchored: () => this.anchoredWindow?.() ?? null, updateNow: () => this.updateAnchored?.(), anchorStart: a => this.profileAnchorStart?.(a) ?? { state: 'coming' }, anchorBar: at => this.profileAnchorBar?.(at) ?? 5 * 60_000 });
+      // While Place the anchor is armed the panel stays open over a click on the map (that click places it, Sol: closing it first disarmed
+      // it); otherwise a press outside closes it as before.
+      const store = this.store;
+      this.#tradedPanel = this.#track(togglePanel(this.#settingsKeys.traded, { title: t('Volume profile'), width: 520, align: 'left', get stays(): boolean { return store.state.profileAnchoring; }, onClose: () => { this.#tradedPanel = null; if (this.store.state.profileAnchoring && !this.#placing) this.store.set({ profileAnchoring: false }); } }, build), build);
     };
     this.#traded.onclick = () => this.store.set(togglePatch(this.store.state, 'traded'));
     this.#settingsKeys.absorption.onclick = () => {
@@ -332,6 +568,10 @@ export class Toolbar {
     this.#theme.onclick = () => this.#openThemes();
     this.#language.onclick = () => this.#openLanguages();
     this.#zone.onclick = () => this.store.set({ timeZone: this.store.state.timeZone === 'utc' ? 'local' : 'utc' });
+    this.#zoneLocal.onclick = () => this.store.set({ timeZone: 'local' });
+    this.#zoneUtc.onclick = () => this.store.set({ timeZone: 'utc' });
+    for (const [choice, b] of this.#historyChoices) b.onclick = () => this.store.set({ phoneHistory: choice });
+    this.#flip.onclick = () => { const s = this.store.state; this.store.set(themeChange(s, flippedTheme(s), true)); };
     this.#recenter.onclick = () => this.onRecenter();
     // On a phone the button is in Settings, which would cover the map the selection is dragged on.
     this.#range.onclick = () => { this.#sheet?.close(); this.onRange(); };
@@ -349,14 +589,24 @@ export class Toolbar {
     this.#more.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.9"/><circle cx="12" cy="12" r="1.9"/><circle cx="19" cy="12" r="1.9"/></svg>';
     this.#more.onclick = () => this.#toggleSheet();
     this.#awake.onchange = () => this.store.set({ keepAwake: this.#awake.checked });
+    this.#tabPrice.onchange = () => this.store.set({ tabPrice: this.#tabPrice.checked });
+    this.#tabIcon.onchange = () => this.store.set({ tabIcon: this.#tabIcon.checked });
     this.#glass.onclick = () => this.store.set({ material: this.store.state.material === 'glass' ? 'solid' : 'glass' });
     this.#glassSwitch.onchange = () => this.store.set({ material: this.#glassSwitch.checked ? 'glass' : 'solid' });
+    this.#waveStrength.oninput = () => { const v = readWaveStrength(Number(this.#waveStrength.value)); this.#waveStrengthOut.textContent = `${v}%`; this.store.set({ waveStrength: v }); };
     const shoot = this.#shot.onclick;
     // The screenshot is of the page, so Settings must be out of the picture before it is taken.
     this.#shot.onclick = event => { if (!this.#sheet) { shoot?.call(this.#shot, event); return; } this.#sheet.close(); requestAnimationFrame(() => requestAnimationFrame(() => { shoot?.call(this.#shot, event); })); };
     this.#venuesButton = venues;
     this.#arrange();
     onLayoutMode(() => { this.#arrange(); });
+    // The bar is fitted when it is laid out, and again when what its decks' widths depend on changes: the window, the fonts, the theme and
+    // frame, the language. Its own height changing (the fit itself, folding it away) asks again and finds the same answer.
+    const refit = (): void => { if (this.#fitFrame) return; this.#fitFrame = requestAnimationFrame(() => { this.#fitFrame = 0; this.#fit(); }); };
+    addEventListener('resize', refit);
+    void document.fonts?.ready.then(refit);
+    new MutationObserver(refit).observe(document.documentElement, { attributes: true, attributeFilter: ['data-frame', 'data-theme', 'data-bar', 'lang'] });
+    new ResizeObserver(refit).observe(this.root);
   }
 
   /**
@@ -365,18 +615,67 @@ export class Toolbar {
    * the Settings sheet, grouped by purpose. The same elements move in both directions, so their handlers and state survive a rotation
    * or a window resize.
    */
-  /** The heatmap colour controls as the desktop toolbar has them, in one group. */
+  /** The heatmap's colour controls gathered in one holding place, from which the full bar's Heatmap deck and a phone's Settings take them. */
   #fillHeatControls(): void { this.#heatctl.replaceChildren(this.#heat.style, this.#heatScale, this.#heat.auto, this.#heat.smooth); }
 
   /** The desktop status bar takes the language and theme buttons (and the connection text) from the top bar. */
   /** Remember the lamp panel just opened (or none) and how to redraw it. */
+  /** The Candle colours panel (the Chart type menu's last row), under the chart type's button. */
+  #openCandleColours(): void {
+    const build = (tools: HTMLElement, body: HTMLElement): void => buildCandleColorsPanel(this.store, tools, body, () => this.#candlePanel?.render(build));
+    this.#candlePanel = this.#track(togglePanel(this.#chartType, { title: t('Candle colours'), width: 380, align: 'left', onClose: () => { this.#candlePanel = null; } }, build), build);
+  }
+
   #track(panel: Panel | null, build: (tools: HTMLElement, body: HTMLElement) => void): Panel | null {
     this.#open = panel ? { panel, redraw: () => panel.render(build) } : null;
     return panel;
   }
 
   /** Redraw the lamp panel that is open, after its feature was switched from the keyboard, so its switch says what the lamp does. */
-  refreshOpenPanel(): void { if (this.#open && openedPanel() === this.#open.panel) this.#open.redraw(); }
+  refreshOpenPanel(): void {
+    if (!this.#open || openedPanel() !== this.#open.panel) return;
+    // A field being worked in the panel (a date half typed, a colour picker open) is not pulled away by a refresh from the page (history
+    // that landed, a profile taken again): the refresh waits until the field is left (Sol, review 2026-11-11).
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && this.#open.panel.body.contains(active) && active.matches('input:not([type=checkbox]):not([type=radio]), select, textarea')) {
+      if (this.#refreshWaits !== active) {
+        this.#refreshWaits = active;
+        // Not inside the blur: a press on the panel's Move or Add blurs the field first, and a redraw then would remove the button before its
+        // click (Sol, review round 2). After the press is over (its click dispatched), and only for the panel still open.
+        const panel = this.#open.panel, later = (): void => { window.setTimeout(() => { if (this.#refreshWaits === active) this.#refreshWaits = null; if (this.#open?.panel === panel) this.refreshOpenPanel(); }, 0); };
+        active.addEventListener('blur', () => { if (this.#pressing) window.addEventListener('pointerup', later, { once: true, capture: true }); else later(); }, { once: true });
+      }
+      return;
+    }
+    this.#open.redraw();
+  }
+  /** The field of the open panel a refresh waits to be left (`refreshOpenPanel`), if any. */
+  #refreshWaits: HTMLElement | null = null;
+  /** A pointer is down somewhere on the page (a press under way; `refreshOpenPanel` waits for it to end). Kept by the constructor's listeners. */
+  #pressing = false;
+  /** Redraw the Volume profile panel if it is the one open: what of the profiles has no room changed (a resize), and its sketch and note say so. */
+  refreshTradedPanel(): void { if (this.#tradedPanel && this.#open?.panel === this.#tradedPanel) this.refreshOpenPanel(); }
+  /** Set while the panels close for an anchor to be placed on a phone, so their closing does not disarm it. */
+  #placing = false;
+  /**
+   * An anchor (the VWAP's or the profile's) was armed: on a phone or a touch tablet its panel and the Settings sheet cover the map, so they
+   * close, the placement staying armed, and a note says to tap the candle, with Cancel (Sol, code review 2026-11-10: the sheet's scrim took
+   * the tap and its closing disarmed the placement). On a desktop the panel stays open over the map and nothing changes.
+   */
+  anchorArmed(): void {
+    if (!compactBar()) return;
+    this.#placing = true;
+    try { this.#vwapPanel?.close(); this.#tradedPanel?.close(); closeSheet(); } finally { this.#placing = false; }
+    toast(t('Tap the candle on the map where the anchor goes.'), { ms: 30_000, action: { label: t('Cancel'), run: () => this.store.set({ vwapAnchoring: false, profileAnchoring: false }) } });
+  }
+  /**
+   * A word while an anchor is being placed and a click placed nothing (the empty future, too far back): the tool stays armed, with Cancel. On
+   * a phone it says again to tap a candle, and stays as long as the first note did, since it took that note's place.
+   */
+  anchorHint(message: string): void {
+    const phone = compactBar(), text = phone ? `${message} ${t('Tap the candle on the map where the anchor goes.')}` : message;
+    toast(text, { ms: phone ? 30_000 : 4_000, action: { label: t('Cancel'), run: () => this.store.set({ vwapAnchoring: false, profileAnchoring: false }) } });
+  }
 
   /**
    * The Go to panel: a date and time on the page's clock, the map centred on it at its zoom. It says how far back the depth and the candles
@@ -416,11 +715,22 @@ export class Toolbar {
     const panel = togglePanel(this.#goto, { title: t('Go to'), width: 340, align: 'right', stays: true }, build);
   }
 
-  #openLayouts(): void {
-    const panes = this.panes; if (!panes) return;
-    const ui: LayoutsPanelState = { message: null, armed: null };
-    const build = (_tools: HTMLElement, body: HTMLElement): void => buildLayoutsPanel(this.store, panes, body, () => panel?.render(build), ui);
-    const panel = togglePanel(this.#layouts, { title: t('Layouts'), width: 440, align: 'right' }, build);
+  #openLayouts(anchor: HTMLElement): void {
+    const actions = this.layouts; if (!actions) return;
+    const ui = newGalleryState();
+    // A redraw after the panel was closed (a toast's Undo, a frame later) leaves it closed.
+    const build = (_tools: HTMLElement, body: HTMLElement): void => buildGallery(actions, body, () => { if (panel && openedPanel() === panel) panel.render(build); }, ui, () => this.#openBackup(anchor));
+    const panel = togglePanel(anchor, { title: t('Layouts'), width: 560, align: 'right' }, build);
+    // The toast of a deleted layout can outlive the panel it was deleted from: its Undo redraws the Layouts panel that is open then.
+    actions.onListChanged = () => { if (panel && openedPanel() === panel) panel.render(build); };
+  }
+
+  /** The Back up and restore panel (backup-panel.ts), from the Layouts panel or a touch screen's Settings. */
+  #openBackup(anchor: HTMLElement): void {
+    const ui = newBackupState();
+    const build = (_tools: HTMLElement, body: HTMLElement): void => buildBackup(body, () => { if (panel && openedPanel() === panel) panel.render(build); }, ui);
+    // Opened from the Layouts panel, whose button is the same: a toggle would only close that one.
+    const panel = openPanel(anchor, { title: t('Back up and restore'), width: 420, align: 'right' }, build);
   }
 
   /** The list of keyboard shortcuts, made from the table itself so the two cannot disagree (the status bar's Keys button, and ?). */
@@ -440,7 +750,83 @@ export class Toolbar {
     });
   }
 
-  hostStatusControls(host: HTMLElement): void { this.#statusHost = host; this.#arrange(); }
+  hostStatusControls(host: HTMLElement, notices: HTMLElement | null = null): void { this.#statusHost = host; this.#statusNotices = notices; this.#arrange(); }
+
+  /** What the site's answer about the build it serves means (update-check.ts `watchBuild`): offer the newer one, take the offer back, or nothing. */
+  answerBuild(meaning: BuildAnswer): void { this.#update.answer(meaning); }
+
+  /** The browser tab's two switches, from the status bar's Tab key. */
+  #openTab(): void {
+    const build = (_tools: HTMLElement, body: HTMLElement): void => {
+      const s = this.store.state;
+      body.append(
+        switchRow(t('Price in the title'), t('The tab\'s title starts with the price and which way the candle under way is going.'), s.tabPrice, on => this.store.set({ tabPrice: on })),
+        switchRow(t('Candle as the icon'), t('The tab\'s icon is the candle under way, so a pinned tab, which shows no title, still shows where the price is going. Safari keeps the page\'s own icon.'), s.tabIcon, on => this.store.set({ tabIcon: on })));
+    };
+    togglePanel(this.#tab, { title: t('Browser tab'), width: 340, align: 'right' }, build);
+  }
+
+  /** Take the tour (the Tour button, the invitation): a bar folded away is brought back for it and folded again after. */
+  startTour(): void {
+    // The invitation has been answered, whichever button answered it.
+    this.#invite.root.hidden = true;
+    showTour({ prepare: () => {
+      if (!this.store.state.barCollapsed) return () => {};
+      this.store.set({ barCollapsed: false });
+      // The setting is written as it changes: a tab closed or reloaded in the middle of the tour must not leave the bar unfolded for good.
+      const fold = (): void => this.store.set({ barCollapsed: true });
+      window.addEventListener('pagehide', fold);
+      return () => { window.removeEventListener('pagehide', fold); fold(); };
+    } });
+  }
+  /** Offer the tour to a visitor who has not been offered it; false when something is open over the page and it should be tried again. */
+  inviteToTour(): boolean { return this.#invite.offer(); }
+
+  /**
+   * The notices lie over the top of the chart, one under the other, each under the one above by what that one measures now: a notice that wraps on a narrow
+   * screen (the blocked venues' is three lines on a phone) is taller than the fixed step the stylesheet would give it, and the next would cover its words.
+   */
+  #stackNotices(): void {
+    let top = 4;
+    for (const notice of this.#notices()) {
+      // One that lies elsewhere (the update notice in the status bar) is not stacked.
+      if (notice.hidden || notice.parentElement !== this.root) { notice.style.top = ''; continue; }
+      notice.style.top = `calc(100% + ${top}px)`;
+      top += notice.offsetHeight + 4;
+    }
+  }
+
+  /** The notices that can lie under the bar, top first (the update notice is a line of the status bar on a computer). */
+  #notices(): HTMLElement[] { return [this.#notice.root, this.#coinNotice, this.#invite.root, this.#update.root]; }
+
+  /** The Tape tab's switch: `shows` is what the tab shows now, null hides the switch (another tab, or not a phone). */
+  setTapeView(shows: PhoneTape | null): void {
+    const b = this.#tapeView;
+    b.hidden = shows === null;
+    if (shows === null || b.dataset.shows === shows) return;
+    b.dataset.shows = shows;
+    const toChart = shows === 'list';
+    b.setAttribute('aria-label', toChart ? t('Tape as a chart') : t('Tape as a list'));
+    setTip(b, toChart ? t('The tape as a chart: every trade since the page opened, by price, with the book on both sides.') : t('The tape as a list: every order as it arrives, newest on top.'));
+  }
+
+  /** Fold the bar away or bring it back (`state.barCollapsed`): folded, only its strip (`#expand`) and its notices show. */
+  setCollapsed(collapsed: boolean): void {
+    const held = this.root.contains(document.activeElement);
+    this.root.classList.toggle('collapsed', collapsed);
+    this.#collapse.setAttribute('aria-expanded', String(!collapsed));
+    // A control of the bar that held the focus goes with the fold (the Hide button, or the Tour button after a tour that had unfolded the bar): the arrow that unfolds it takes the focus.
+    if (collapsed && held) this.#expand.focus({ preventScroll: true });
+  }
+
+  /**
+   * Open the Volume profile panel (from a band's header on the map, or a tag of what has no room) and show where each measure is drawn: a
+   * band's settings live with the profile's, a click from where it is drawn. An open panel stays and only scrolls there.
+   */
+  openTradedPanel(): void {
+    if (!this.#tradedPanel) this.#settingsKeys.traded.click();
+    this.#tradedPanel?.body.querySelector('[data-section="placement"]')?.scrollIntoView({ block: 'start' });
+  }
 
   /** The Tape view's choices (panes/candle-pane.ts `settingsFields`), a section of the phone's Settings; set by the page. */
   tapeFields: (() => [string, HTMLElement][]) | null = null;
@@ -453,38 +839,157 @@ export class Toolbar {
     if (!compactBar()) {
       this.#sheet?.close();
       this.#fillHeatControls();
+      // The colour scale with the Heatmap key at its end (the scale may come back from a phone's Settings row).
+      this.#heatSplit.replaceChildren(this.#heatScale, this.#heatKey);
       const inCorner = this.#mapHost !== null;
-      if (inCorner) { this.#mapTools.replaceChildren(this.#goto, this.#rangeCorner, this.#recenter); this.#mapHost!.prepend(this.#mapTools); }
+      if (inCorner) { this.#mapTools.replaceChildren(this.#layoutCorner, this.#goto, this.#rangeCorner, ...(this.#drawCorner ? [this.#drawCorner] : []), this.#recenter, this.#mapMax); this.#mapHost!.prepend(this.#mapTools); }
       const host = this.#statusHost;
       // With a status bar the connection state and the language and theme buttons live there.
-      host?.replaceChildren(this.#layouts, this.#keys, this.#zone, this.#language, this.#theme, this.#glass);
+      host?.replaceChildren(this.#keys, this.#tab, this.#zone, this.#language, this.#theme);
       // A console of decks, each a framed group of what belongs together, at most two rows tall, wrapping as whole decks (Karl,
       // 2026-10-16: one wrapping row read as a jumble). The venues are switched from the Venues button, not listed as chips.
       setTip(this.#venuesButton!, t('Venues: switch each exchange on or off for the map, the book and the flow column, or choose which ones feed the page'));
       this.root.classList.add('cockpit');
       const sp = this.#splits!;
-      // The name of the page is the last deck's title: what it holds is about the page itself (the guide, the author, installing it).
-      this.root.replaceChildren(
+      // The name of the page is the last deck's title: what it holds is about the page itself (the guide, the author, installing it). The
+      // arrow that folds the bar away sits on that deck's bottom edge, taking no width: room kept for it at the bar's end wrapped this deck
+      // onto a second row at 1,600 px, doubling the bar, and the top edge holds the title.
+      // Install stands before the screenshot mark, so that the mark keeps its place whether the browser offers installing or not (Install comes in beside Author).
+      const tools = deck('tools', 'LiquidityMapperFast', [this.#plus, this.#guide], [this.#author, this.#install.root, this.#shot, ...(host ? [] : [this.#tab, this.#zone, this.#language, this.#theme, this.#status])]);
+      tools.append(this.#collapse);
+      this.#deckBreaks = []; this.#fitted = null; this.#fittedOrder = '';
+      this.#decks = [
         deck('market', t('Market'), [this.#coin, this.#market], [this.#scope, this.#venuesButton!]),
         deck('time', t('Time'), [this.#timeframes], inCorner ? [] : [this.#recenter]),
-        deck('heat', t('Heatmap'), [this.#source, this.#layer, this.#heat.style], [this.#heatScale, this.#heat.auto, this.#heat.smooth]),
+        deck('heat', t('Heatmap'), [this.#source, ...(LAYER_CHOICE ? [this.#layer] : []), this.#heat.style], [this.#heatSplit]),
         deck('panels', t('Panels'), [this.#toggles]),
-        deck('chart', t('Chart'), [sp.footprint, sp.trades, sp.liquidations, sp.absorption], [sp.traded, sp.keyLevels, sp.vwap, this.#range]),
-        deck('alerts', t('Alerts'), [this.#alertSplits!.highlights], [this.#alertSplits!.sound]),
-        deck('tools', 'LiquidityMapperFast', [this.#guide, this.#shot], [this.#author, this.#install.root, ...(host ? [] : [this.#zone, this.#language, this.#theme, this.#glass, this.#status])]),
-        this.#notice.root, this.#coinNotice);
+        // The Range tool is the map corner's Select when the map holds its tools (Karl, 2026-10-27: the deck's Range was the same button twice).
+        deck('chart', t('Chart'), [sp.footprint, sp.trades, sp.liquidations, ...(liqLevelsUrl() ? [sp.liqLevels] : []), sp.absorption], [sp.traded, sp.tpo, sp.keyLevels, sp.vwap, this.#scriptsSplit, ...(inCorner ? [] : [this.#range])]),
+        // Waves beside Sounds (Karl, 2026-10-30, from the status bar's corner): with Highlights, the three ways the page says that something large
+        // happened, marked, heard and seen across the screen.
+        deck('alerts', t('Alerts'), [this.#alertSplits!.highlights], [this.#alertSplits!.sound, this.#alertSplits!.waves]),
+        tools];
+      // The update notice is a line of the status bar, where it covers nothing (under the bar it would lie over the map's own buttons);
+      // without a status bar it waits under the bar with the others.
+      const notices = host ? this.#statusNotices : null;
+      notices?.replaceChildren(this.#update.root);
+      this.root.replaceChildren(...this.#decks, this.#expand, this.#notice.root, this.#coinNotice, this.#invite.root, ...(notices ? [] : [this.#update.root]));
+      this.#fit();
       return;
     }
     // A phone has Range in Settings and Recenter beside the timeframes: the map's corner stays clear.
     this.#mapTools.remove();
     setTip(this.#venuesButton!, t('Choose which exchanges feed the map. The choice is kept in this browser; nothing changes until you press Apply.'));
     this.root.classList.remove('cockpit');
+    this.#unfit();
     this.root.replaceChildren(
       el('div', { class: 'tb-bar' },
         // The coin alone (Karl, 2026-10-17): the market is chosen in Settings, where the venues are.
-        el('div', { class: 'tb-row tb-main' }, this.#brand, this.#coin, this.#spacer, this.#status, this.#more),
+        el('div', { class: 'tb-row tb-main' }, this.#brand, this.#coin, this.#spacer, this.#tapeView, this.#status, this.#flip, this.#more, this.#collapse),
         el('div', { class: 'tb-row tb-time' }, this.#timeframes, this.#recenter)),
-      this.#notice.root, this.#coinNotice);
+      this.#expand, this.#notice.root, this.#coinNotice, this.#invite.root, this.#update.root);
+  }
+
+  /**
+   * Scale the full bar, or break it into rows, to fit its window (`fitBar`, bar-fit.ts). The decks are measured at their own size, the bar
+   * laid out as one row at zoom 1 (`.fitting`); what is applied is `--bar-zoom` (the stylesheet's `zoom`), a break before each deck that begins
+   * a row, and each deck's own width as how much it grows with its row (`--deck-grow`): the decks of a row grow by one factor, keeping their
+   * proportions. Nothing is written when the answer is the one already applied, so a bar that has not changed does not move.
+   */
+  #fit(): void {
+    const bar = this.root;
+    // A bar folded away has no decks to measure (they are not laid out): its fit stays, and is right again the moment it unfolds.
+    if (!bar.classList.contains('cockpit') || !bar.isConnected || bar.classList.contains('collapsed')) return;
+    this.#alignDecks();
+    const decks = this.#decks.filter(d => d.parentElement === bar), ids = decks.map(d => d.dataset.deck ?? ''), style = getComputedStyle(bar);
+    const gap = parseFloat(style.columnGap) || 0, pad = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+    // The decks' own widths with the bar scaled by `zoom`, in the bar's own px: text drawn at a fractional zoom is a little wider than the
+    // scale alone says (0.3 % for Latte at 0.86, 4 % for Japanese in the text-mode face), enough to push the last deck of a row that just
+    // fits onto a row of its own (Karl, 2026-10-27).
+    const measure = (zoom: number): { widths: number[]; available: number } => {
+      bar.style.setProperty('--fit-zoom', String(zoom)); bar.classList.add('fitting');
+      const widths = decks.map(d => d.getBoundingClientRect().width / zoom), available = bar.getBoundingClientRect().width;
+      bar.classList.remove('fitting');
+      return { widths, available };
+    };
+    // The bevel frame is not scaled: held, a button's borders go from 1 + 1 px to 2 + 0, and under a fractional zoom those snap apart (1 + 1 px, then 1 + 0:
+    // the box loses a pixel when it is pressed or switched on). It takes the two balanced rows at its own size instead.
+    const floor = document.documentElement.dataset.frame === 'bevel' ? 1 : BAR_ZOOM_FLOOR;
+    const first = measure(1), available = first.available, measured = new Set([1]);
+    let widths = first.widths, placed = arrangeBar(ids, widths, gap, pad, available, floor), fit = placed.fit;
+    // A scaled bar is measured again at its scale, and fitted with each deck's widest width so far, until the scale it takes is one it was
+    // measured at: what it is fitted with is never narrower than what it draws at that scale, so no row it is given overflows. A scale is a
+    // hundredth from 1 down to the floor, so this ends within as many measurements (the bound is only a guard).
+    for (let tries = 0; tries < 20 && !measured.has(fit.zoom); tries++) {
+      const there = measure(fit.zoom).widths; measured.add(fit.zoom);
+      widths = widths.map((w, k) => Math.max(w, there[k] ?? 0));
+      placed = arrangeBar(ids, widths, gap, pad, available, floor); fit = placed.fit;
+    }
+    // Its own width is where it starts in its row, not what its contents would ask for (a grid of even columns asks for its widest times
+    // their number), and half a pixel under it, so that rounding never moves a deck of a row that just fits onto the next: the row is broken
+    // where the fit broke it. Written whenever it changes (a theme or a font can change a deck and not the fit), and only then, so a refit
+    // that finds the same answer writes nothing.
+    decks.forEach((d, k) => {
+      const grow = String(Math.round(widths[k]!)), basis = `${Math.max(0, widths[k]! - 0.5).toFixed(2)}px`;
+      if (d.style.getPropertyValue('--deck-grow') !== grow) d.style.setProperty('--deck-grow', grow);
+      if (d.style.getPropertyValue('--deck-w') !== basis) d.style.setProperty('--deck-w', basis);
+    });
+    const was = this.#fitted, order = placed.order.join();
+    if (was && was.zoom === fit.zoom && was.breaks.join() === fit.breaks.join() && this.#fittedOrder === order) return;
+    this.#fitted = fit; this.#fittedOrder = order;
+    bar.style.setProperty('--bar-zoom', String(fit.zoom));
+    for (const b of this.#deckBreaks) b.remove();
+    this.#deckBreaks = [];
+    // The decks in the order taken, moving only those out of place (a deck moved loses the keyboard, which is given back).
+    const active = document.activeElement, shown = placed.order.map(k => decks[k]!);
+    shown.forEach((d, k) => { const here = bar.children[k]; if (here !== d) bar.insertBefore(d, here ?? null); });
+    if (active instanceof HTMLElement && active !== document.activeElement && bar.contains(active)) active.focus({ preventScroll: true });
+    for (const k of fit.breaks) {
+      const at = shown[k]; if (!at) continue;
+      const b = el('span', { class: 'deck-break', ariaHidden: 'true' }); at.before(b); this.#deckBreaks.push(b);
+    }
+    bar.classList.toggle('wrapped', this.#deckBreaks.length > 0);
+  }
+  /**
+   * A deck's rows end together at both its edges (Karl, 2026-11-01: a deck's two rows did not line up, and a row shorter than the other ended
+   * short of the deck's edge). Where it costs the deck no width (ALIGN_SLACK_PX: rounding), its rows are one grid (fit-grid.ts `alignRows`): as
+   * many columns as the longest row has controls, each as wide as the widest control in it, a shorter row's spare column given to the control
+   * that costs least, written as `--deck-cols-px` (the deck at its own width) and `--deck-cols-fr` (a deck grown with its row shares the room
+   * by the same proportions). Where aligning would widen the deck, and so break the bar into rows sooner, each row's controls only share the
+   * room to its end (`deck-flush`). The controls are measured at their own size (the deck laid out in rows, the bar as it is measured). Time,
+   * Panels and Tools are grids of their own.
+   */
+  #alignDecks(): void {
+    const bar = this.root, decks = this.#decks.filter(d => ALIGNED_DECKS.has(d.dataset.deck ?? '') && d.parentElement === bar);
+    for (const c of this.#spanned.splice(0)) c.style.removeProperty('grid-column');
+    if (!decks.length) return;
+    const zoom = bar.style.getPropertyValue('--fit-zoom');
+    bar.style.setProperty('--fit-zoom', '1'); bar.classList.add('fitting');
+    for (const d of decks) d.classList.remove('deck-grid', 'deck-flush');
+    const shown = (c: Element): c is HTMLElement => c instanceof HTMLElement && !c.hidden && getComputedStyle(c).display !== 'none';
+    const rows = decks.map(d => [...d.querySelectorAll(':scope > .deck-row')].map(r => [...r.children].filter(shown)).filter(r => r.length));
+    const widths = rows.map(rs => rs.map(r => r.map(c => c.getBoundingClientRect().width)));
+    const gaps = decks.map(d => { const r = d.querySelector(':scope > .deck-row'); return r ? parseFloat(getComputedStyle(r).columnGap) || 0 : 0; });
+    bar.classList.remove('fitting');
+    if (zoom) bar.style.setProperty('--fit-zoom', zoom); else bar.style.removeProperty('--fit-zoom');
+    decks.forEach((d, k) => {
+      const { cols, spans, width, natural } = alignRows(widths[k]!, gaps[k]!);
+      if (width > natural + ALIGN_SLACK_PX) { d.classList.add('deck-flush'); return; }
+      // A column never narrower than its controls: they are measured at zoom 1, and text drawn at the bar's fractional zoom is a little wider
+      // (Liq levels went onto two lines at 1536-1680 px, Karl 2026-11-02), so each track may grow to its contents.
+      const px = cols.map(w => `${w.toFixed(2)}px`);
+      d.style.setProperty('--deck-cols-px', px.map(p => `minmax(${p}, max-content)`).join(' '));
+      d.style.setProperty('--deck-cols-fr', cols.map(w => `minmax(max-content, ${Math.max(1, w).toFixed(2)}fr)`).join(' '));
+      rows[k]!.forEach((r, i) => r.forEach((c, j) => { const span = spans[i]![j]!; if (span > 1) { c.style.gridColumn = `span ${span}`; this.#spanned.push(c); } }));
+      d.classList.add('deck-grid');
+    });
+  }
+  /** The compact bar is not scaled or broken: what the full bar applied is let go. */
+  #unfit(): void {
+    for (const c of this.#spanned.splice(0)) c.style.removeProperty('grid-column');
+    this.root.style.removeProperty('--bar-zoom'); this.root.classList.remove('fitting', 'wrapped');
+    for (const b of this.#deckBreaks) b.remove();
+    this.#deckBreaks = []; this.#fitted = null; this.#fittedOrder = '';
   }
 
   #toggleSheet(): void {
@@ -495,22 +1000,32 @@ export class Toolbar {
       el('section', { class: 'sheet-sec' }, el('div', { class: 'sheet-sec-head' }, el('h4', { textContent: title }), ...(action ? [action] : [])), ...children);
     // The sheet's own heading says "Venues", so the button beside it says what it does.
     this.#venuesLabel.textContent = t('Choose…'); this.#venuesCount.hidden = true;
+    // Back up and restore: a tool of its own on a phone, which has no Layouts panel; beside Layouts on a tablet.
+    const backup = button(t('Back up and restore'), () => { this.#sheet?.close(); this.#openBackup(this.#more); }, t('Everything the page keeps in this browser, to one file and back'));
     this.#sheet = openSheet(t('Settings'), body => {
       this.#heatctl.replaceChildren();
       body.append(
-        section(t('Tools'), [el('div', { class: 'sheet-tiles' }, this.#range, this.#guide, this.#shot, this.#author, this.#install.root)]),
-        section(t('Panels'), [this.#toggles, el('p', { class: 'sheet-note', textContent: t('Depth, OI, Delta, LT and Footprint each add a tab to the bar under the map.') })]),
-        section(t('Chart'), [el('div', { class: 'sheet-tiles' }, ...(['footprint', 'trades', 'liquidations', 'absorption', 'traded', 'keyLevels', 'vwap'] as const).map(f => this.#splits![f]))]),
+        section(t('Tools'), [el('div', { class: 'sheet-tiles' }, this.#plus, this.#tour, this.#range, this.#guide, this.#shot, this.#author, this.#install.root, ...(isPhone() ? [backup] : []))]),
+        section(t('Panels'), [this.#toggles, el('p', { class: 'sheet-note', textContent: t('Depth, OI, Delta, L/S and Stats each add a tab to the bar under the map.') })]),
+        // A phone arranges its panes by tab; a touch tablet that keeps the desktop's arrangement has the layouts here, its map's corner being clear of buttons.
+        ...(isPhone() ? [] : [section(t('Layouts'), [el('div', { class: 'sheet-tiles' }, button(t('Layouts'), () => { this.#sheet?.close(); this.#openLayouts(this.#more); }, t('Layouts: choose a ready-made arrangement of the panels, or save your own')), backup)])]),
+        section(t('Chart'), [el('div', { class: 'sheet-tiles' }, ...(['footprint', 'trades', 'liquidations', ...(liqLevelsUrl() ? ['liqLevels'] as const : []), 'absorption', 'traded', 'tpo', 'keyLevels', 'vwap'] as const).map(f => this.#splits![f]), this.#scriptsSplit)]),
         // Only a phone has the Tape tab; a touch tablet keeps the desktop's panes and gets this sheet without it.
         ...(this.tapeFields && isPhone() ? [section(t('Tape'), this.tapeFields().map(([label, control]) => field(label, control)), helpButton('candlePane'))] : []),
         section(t('Heatmap'), [
-          field(t('Layer'), this.#layer), field(t('Source'), this.#source), field(t('Colours'), this.#heat.style),
+          ...(LAYER_CHOICE ? [field(t('Layer'), this.#layer)] : []), field(t('Source'), this.#source), field(t('Colours'), this.#heat.style),
           field(t('Contrast'), this.#heatScale, true), field(t('Colour range'), this.#heat.auto), field(t('Smoothing'), this.#heat.smooth)], helpButton('heatmap')),
         section(t('Venues'), [field(t('Market'), this.#market, true), field(t('Markets'), this.#scope, true), el('div', { class: 'sheet-chips' }, this.#chips, this.#blocked)], this.#venuesButton!),
-        section(t('Alerts'), [el('div', { class: 'sheet-tiles' }, this.#alertSplits!.highlights, this.#alertSplits!.sound)]),
-        section(t('Appearance'), [field(t('Language'), this.#language), field(t('Theme'), this.#theme),
-          field(t('Waves'), el('label', { class: 'switch', tip: t('Waves: the bars and panels around the chart turn to glass; large orders and large flow changes light it and send waves across the screen') }, this.#glassSwitch, el('i'))), field(t('Time zone'), this.#zone),
-          ...(wakeLockSupported() ? [field(t('Keep screen on'), el('label', { class: 'switch', tip: t('Stops the screen turning off while this page is open. A screen that sleeps stops the recording, and the map then has a gap where it was.') }, this.#awake, el('i')))] : [])]));
+        section(t('Alerts'), [el('div', { class: 'sheet-tiles' }, this.#alertSplits!.highlights, this.#alertSplits!.sound),
+          field(t('Waves'), el('label', { class: 'switch', tip: t('Waves: the bars and panels around the chart turn to glass; large orders and large flow changes light it and send waves across the screen') }, this.#glassSwitch, el('i'))),
+          field(t('Wave strength'), el('span', { class: 'wave-strength', tip: WAVE_STRENGTH_TIP }, this.#waveStrength, this.#waveStrengthOut))]),
+        section(t('Appearance'), [field(t('Language'), this.#language), field(t('Theme'), this.#theme), field(t('Time zone'), this.#zoneSeg),
+          ...(wakeLockSupported() ? [field(t('Keep screen on'), el('label', { class: 'switch', tip: t('Stops the screen turning off while this page is open. A screen that sleeps stops the recording, and the map then has a gap where it was.') }, this.#awake, el('i')))] : []),
+          field(t('Price in the title'), el('label', { class: 'switch', tip: t('The tab\'s title starts with the price and which way the candle under way is going.') }, this.#tabPrice, el('i'))),
+          field(t('Candle as the icon'), el('label', { class: 'switch', tip: t('The tab\'s icon is the candle under way, so a pinned tab, which shows no title, still shows where the price is going. Safari keeps the page\'s own icon.') }, this.#tabIcon, el('i'))),
+          // A phone in the hand reads only the last hours of the recorded history on opening, and a choice made here holds wherever this
+          // sheet can be opened (the compact bar; app/history-window.ts).
+          field(t('History'), this.#historySeg)]));
     }, () => { this.#sheet = null; this.#more.classList.remove('open'); this.#venuesLabel.textContent = t('Venues'); this.#venuesCount.hidden = false; });
     this.#more.classList.add('open');
   }
@@ -533,22 +1048,40 @@ export class Toolbar {
       this.#market.dataset.key = marketKey;
     }
     setValue(this.#market, state.marketId);
-    [...this.#timeframes.children].forEach(b => b.classList.toggle('on', b.textContent === state.timeframe));
+    [...this.#timeframes.children].forEach(b => { if (b !== this.#chartType) b.classList.toggle('on', b.textContent === state.timeframe); });
+    // Lit while the price is drawn, as the timeframe in use is; its drawing is the type's, kept while the price is hidden.
+    const priceShown = state.show.candles, look = `${state.chartType}|${priceShown}`;
+    if (this.#chartType.dataset.look !== look) {
+      this.#chartType.dataset.look = look;
+      if (this.#chartType.dataset.type !== state.chartType) { this.#chartType.dataset.type = state.chartType; this.#chartType.replaceChildren(chartTypeGlyph(state.chartType)); }
+      this.#chartType.classList.toggle('on', priceShown);
+      this.#chartType.setAttribute('aria-label', `${t('Chart type')}: ${chartChoiceName(chartChoiceOf(state.chartType, priceShown))}`);
+      setTip(this.#chartType, priceShown ? `${chartTypeTip(state.chartType)} ${t('Click for the other ways to draw the price, or Hidden to take it off the map.')}`
+        : t('The price is hidden, so the heatmap and the trade bubbles show with nothing on top. Click to draw it again as candles, outline candles, OHLC bars or a line.'));
+    }
     setValue(this.#layer, state.layer);
     this.#toggleButtons.forEach((b, i) => b.classList.toggle('on', state.show[PANE_TOGGLES[i]![0]]));
-    lamp(this.#heat.auto, state.heat.auto); lamp(this.#trades, state.show.bubbles); lamp(this.#liquidations, state.liquidations.on); lamp(this.#absorption, state.absorption.on); lamp(this.#highlights, state.highlight.on); lamp(this.#traded, state.show.traded); lamp(this.#keyLevels, state.keyLevels.on); lamp(this.#vwap, state.vwap.on); lamp(this.#footprint, state.show.footprint); lamp(this.#range, state.rangeTool || state.range !== null); lamp(this.#rangeCorner, state.rangeTool || state.range !== null);
+    lamp(this.#heat.auto, state.heat.auto); lamp(this.#trades, state.show.bubbles); lamp(this.#liquidations, state.liquidations.on); lamp(this.#liqLevels, state.liqLevels.on); lamp(this.#absorption, state.absorption.on); lamp(this.#highlights, state.highlight.on); lamp(this.#traded, state.show.traded); lamp(this.#keyLevels, state.keyLevels.on); lamp(this.#vwap, state.vwap.on); lamp(this.#tpo, state.tpo.on); lamp(this.#scripts, state.show.script); lamp(this.#footprint, state.show.footprint); lamp(this.#range, state.rangeTool || state.range !== null); lamp(this.#rangeCorner, state.rangeTool || state.range !== null);
     if (this.#awake.checked !== state.keepAwake) this.#awake.checked = state.keepAwake;
+    if (this.#tabPrice.checked !== state.tabPrice) this.#tabPrice.checked = state.tabPrice;
+    if (this.#tabIcon.checked !== state.tabIcon) this.#tabIcon.checked = state.tabIcon;
+    // The choice that applies here: before one is made, a phone's last hours or a tablet's day (`effectiveChoice`).
+    const historyNow = effectiveChoice(isHandheldPhone(), state.phoneHistory, savesData(), true);
+    for (const [choice, b] of this.#historyChoices) { b.classList.toggle('on', historyNow === choice); b.setAttribute('aria-pressed', String(historyNow === choice)); }
     lamp(this.#glass, state.material === 'glass');
     if (this.#glassSwitch.checked !== (state.material === 'glass')) this.#glassSwitch.checked = state.material === 'glass';
+    setValue(this.#waveStrength, String(state.waveStrength));
+    if (this.#waveStrengthOut.textContent !== `${state.waveStrength}%`) this.#waveStrengthOut.textContent = `${state.waveStrength}%`;
     setValue(this.#heat.smooth, state.heat.smooth);
     setValue(this.#heat.style, state.heat.style); setValue(this.#heat.contrast, String(state.heat.contrast));
-    const legendKey = `${state.heat.style}|${state.theme}`;
-    if (this.#heat.legend.dataset.key !== legendKey) { this.#heat.legend.dataset.key = legendKey; this.#heat.legend.style.background = legendBackground(state.heat.style, PALETTES[state.theme] ?? PALETTES.light!); }
+    const legendKey = `${state.heat.style}|${themeKey(state.theme)}`;
+    if (this.#heat.legend.dataset.key !== legendKey) { this.#heat.legend.dataset.key = legendKey; this.#heat.legend.style.background = legendBackground(state.heat.style, paletteOf(state.theme)); }
     const lo = usd(window.lo), hi = usd(window.hi);
     if (this.#heat.lo.textContent !== lo) this.#heat.lo.textContent = lo;
     if (this.#heat.hi.textContent !== hi) this.#heat.hi.textContent = hi;
     this.#showTheme(state.theme);
     this.#showZone(state.timeZone);
+    this.#showFlip(state.theme);
     const soundState = !state.sounds.on ? 'off' : state.soundState !== 'running' ? 'locked' : 'on';
     if (this.#soundButton.dataset.state !== soundState) {
       this.#soundButton.dataset.state = soundState;
@@ -645,17 +1178,26 @@ export class Toolbar {
   /** Redraw the parts of the toolbar that depend on the palette (the legend ramp) for a previewed theme. */
   previewTheme(id: string): void {
     this.#heat.legend.dataset.key = `${this.store.state.heat.style}|${id}`;
-    this.#heat.legend.style.background = legendBackground(this.store.state.heat.style, PALETTES[id] ?? PALETTES.light!);
+    this.#heat.legend.style.background = legendBackground(this.store.state.heat.style, paletteOf(id));
   }
   #showTheme(id: string): void {
-    const p = PALETTES[id] ?? PALETTES.light!;
-    if (this.#theme.dataset.theme === id) return;
-    this.#theme.dataset.theme = id;
+    const p = paletteOf(id), key = themeKey(id);
+    if (this.#theme.dataset.theme === key) return;
+    this.#theme.dataset.theme = key;
     const swatch = el('span', { class: 'swatch' }, ...[p.bg, p.panel, p.bid, p.ask].map(color => { const dot = el('i'); dot.style.background = color; return dot; }));
     this.#theme.replaceChildren(swatch, el('span', { textContent: p.label }));
   }
+  /** The light-or-dark key shows what a tap brings: the sun on a dark theme, the moon on a light one. */
+  #showFlip(id: string): void {
+    const to = paletteOf(id).dark ? 'light' : 'dark';
+    if (this.#flip.dataset.to === to) return;
+    this.#flip.dataset.to = to;
+    this.#flip.setAttribute('aria-label', to === 'light' ? t('Light theme') : t('Dark theme'));
+    setTip(this.#flip, t('Light or dark: one tap switches the theme. Every theme is in Settings, under Appearance.'));
+  }
   /** The zone button says the clock the page is on, and what a click does (the name of the computer's own zone is part of it). */
   #showZone(zone: AppState['timeZone']): void {
+    this.#zoneLocal.classList.toggle('on', zone !== 'utc'); this.#zoneUtc.classList.toggle('on', zone === 'utc');
     if (this.#zone.dataset.zone === zone) return;
     this.#zone.dataset.zone = zone;
     this.#zone.textContent = zone === 'utc' ? 'UTC' : t('Local');
@@ -681,8 +1223,28 @@ export class Toolbar {
   }
 
   #openThemes(): void {
-    const items = THEME_ORDER.map(id => { const p = PALETTES[id]!; return { id, label: p.label, swatch: [p.bg, p.panel, p.text, p.bid, p.ask] }; });
-    openMenu(this.#theme, items, this.store.state.theme, { onPreview: id => this.onPreviewTheme(id), onSelect: id => this.store.set({ theme: id, themePicked: true }) });
+    // As this browser holds them now: another tab may have made or changed one.
+    const ownThemes = loadCustomThemes();
+    registerCustomThemes(ownThemes);
+    // Automatic first, as in the language menu: the page's own choice for this screen (on a phone, its light or dark setting), followed while kept.
+    const auto = autoTheme(isPhone() && isCoarse(), prefersDark()), ap = PALETTES[auto]!;
+    const items: MenuItem[] = [{ id: 'auto', label: `${t('Automatic')} · ${ap.label}`, swatch: [ap.bg, ap.panel, ap.text, ap.bid, ap.ask] },
+      ...THEME_ORDER.map(id => { const p = PALETTES[id]!; return { id, label: p.label, swatch: [p.bg, p.panel, p.text, p.bid, p.ask] }; }),
+      // The person's own themes after the built-in ones, then the row that makes or edits one.
+      ...ownThemes.map(theme => { const p = paletteOf(theme.id); return { id: theme.id, label: p.label, swatch: [p.bg, p.panel, p.text, p.bid, p.ask] }; })];
+    const s = this.store.state, own = s.theme.startsWith('custom-') && items.some(item => item.id === s.theme);
+    items.push({ id: EDIT_THEMES, label: own ? t('Edit this theme…') : t('Make your own…'), action: true });
+    openMenu(this.#theme, items, s.themePicked ? s.theme : 'auto', {
+      onPreview: id => this.onPreviewTheme(id === EDIT_THEMES ? null : id === 'auto' ? auto : id),
+      onSelect: id => { if (id === EDIT_THEMES) this.#openThemeEditor(); else this.store.set(themeChange(this.store.state, id === 'auto' ? auto : id, id !== 'auto')); },
+    });
+  }
+
+  /** The Theme panel (the theme menu's last row): start a theme of one's own, or edit the one on the screen. */
+  #openThemeEditor(): void {
+    const ui = newThemeEditorState();
+    const build = (_tools: HTMLElement, body: HTMLElement): void => buildThemeEditor(this.store, body, () => { if (panel && openedPanel() === panel) panel.render(build); }, ui);
+    const panel = togglePanel(this.#theme, { title: t('Your own theme'), width: 400, align: 'right' }, build);
   }
 
   #buildHighlights(_tools: HTMLElement, body: HTMLElement): void {
@@ -693,6 +1255,34 @@ export class Toolbar {
       rangeRow(t('Sensitivity'), t('How far above its recent average something must be: lower flags more, higher flags only the extremes.'), { ...HIGHLIGHT_LIMITS.mult, value: h.mult, format: v => `${v}σ` }, mult => set({ mult })),
       rangeRow(t('Baseline'), t('How many preceding bars the average and spread are taken from.'), { ...HIGHLIGHT_LIMITS.length, value: h.length, format: v => tn(v, '{n} bar', '{n} bars') }, length => set({ length })),
       note(t('A bar is flagged when its value exceeds the mean plus the sensitivity times the standard deviation of the bars before it. The bar itself never raises its own threshold, and nothing is flagged until a dozen bars exist.')),
+    );
+  }
+
+  /**
+   * The Heatmap key's panel: the colour range (the window the colours span follows the data, or stays) and the vertical smoothing, the two
+   * that left the bar (Karl, 2026-11-12). Both are choices of Auto or Off, as the tips say; a phone's Settings has them as rows.
+   */
+  #buildHeat(tools: HTMLElement, body: HTMLElement): void {
+    const set = (change: Partial<AppState['heat']>): void => { this.store.set({ heat: { ...this.store.state.heat, ...change } }); };
+    const h = this.store.state.heat, choices: [string, string][] = [['auto', t('Auto')], ['off', t('Off')]];
+    tools.append(helpButton('heatmap'));
+    body.append(
+      selectRow(t('Colour range'), COLOUR_RANGE_TIP, choices, h.auto ? 'auto' : 'off', v => set({ auto: v === 'auto' })),
+      selectRow(t('Smoothing'), SMOOTHING_TIP, choices, h.smooth, v => set({ smooth: v === 'off' ? 'off' : 'auto' })),
+    );
+  }
+
+  /**
+   * The Waves panel (Karl, 2026-11-06: "a configuration key to the Waves button just like the Sounds button has, with a scale so people can
+   * adjust the strength"): the same switch as the lamp, how strongly the waves are drawn, and what holds them back on a busy market.
+   */
+  #buildWaves(_tools: HTMLElement, body: HTMLElement): void {
+    const s = this.store.state;
+    // Nothing else in the panel depends on the switch, so it is not built again: the keyboard stays on the switch.
+    body.append(
+      switchRow(t('Waves'), t('Waves: the bars and panels around the chart turn to glass; large orders and large flow changes light it and send waves across the screen'), s.material === 'glass', on => this.store.set({ material: on ? 'glass' : 'solid' })),
+      rangeRow(t('Strength'), WAVE_STRENGTH_TIP, { min: 0, max: 100, step: 5, value: s.waveStrength, format: v => `${v}%` }, v => this.store.set({ waveStrength: readWaveStrength(v) })),
+      note(t('A busy market holds its waves back by itself: orders that come together at one place make one larger wave, only a few start each second, and the fuller the screen already is, the smaller each new one, so a cascade looks about as lively as an ordinary busy moment. The strength applies on top.')),
     );
   }
 

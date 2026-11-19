@@ -1,12 +1,13 @@
 import type { AppState } from '../store.ts';
 import type { FlowBook } from '../flow-book.ts';
 import type { Note } from './rules.ts';
-import { alertNotes, type AlertKind } from './rules.ts';
+import { alertNotes, scriptNotes, type AlertKind } from './rules.ts';
 import { Cooldowns, RateCap, WallWatch, ImbalanceWatch, bookBins, imbalanceOf } from './alert-rules.ts';
 import { burst } from '../cvd/burst.ts';
 import { flowIds } from '../cvd/ids.ts';
 import { familyKey, venueOfInstrument } from '../cvd/families.ts';
-import { activeIds, kindOf, marketIds } from '../scope.ts';
+import { activeIds, kindOf } from '../scope.ts';
+import { bookIds, bookMarketIds } from '../book-markets.ts';
 import { anomalies } from '../anomaly.ts';
 import { oiChangeByTime } from '../oi-change.ts';
 import { signedUsd } from '../cvd/text.ts';
@@ -20,7 +21,7 @@ import { replaying } from '../replay/clock.ts';
 import { DepthWatch, depthMinutes } from './depth-watch.ts';
 import type { ColumnsFrame } from '../wire.ts';
 
-export type AlertPanel = 'flow' | 'bars' | 'book' | 'depth' | 'depthPane' | 'oi';
+export type AlertPanel = 'flow' | 'bars' | 'book' | 'depth' | 'depthPane' | 'oi' | 'script' | 'drawing';
 /** What was decided for one alert: kept for the panel's "recent" list and for the harness; audible is false when the engine was locked or muted. */
 export interface AlertEntry { at: number; panel: AlertPanel; kind: AlertKind; side: 'buy' | 'sell' | null; text: string; audible: boolean }
 
@@ -29,6 +30,10 @@ export interface AlertsHost { state: AppState }
 export interface Player { play(notes: readonly Note[], force?: boolean): boolean; unlock(): Promise<unknown> }
 
 const FLOW_COOLDOWN_MS = 90_000, WALL_COOLDOWN_MS = 30_000, IMBALANCE_COOLDOWN_MS = 300_000, BOOK_EVERY_MS = 2_000;
+/** One call of a script's `alert` sounds at most this often (a script that alerts on every candle of a one-minute chart still can). */
+const SCRIPT_COOLDOWN_MS = 20_000;
+/** A drawn level sounds at most this often (a price hovering at it crosses it again and again). */
+const LEVEL_COOLDOWN_MS = 60_000;
 /** A reading older than this is history (a tab catching up after being asleep): it does not sound. */
 const FRESH_MS = 4_000;
 /** A candle that closed longer ago than this is not news: it was loaded, or the tab slept through it. (A new candle shows when its first tick arrives, a few seconds after the close.) */
@@ -67,7 +72,17 @@ export class Alerts {
   readonly #cap = new RateCap(4, 10_000);
   readonly #walls = new WallWatch();
   readonly #balance = new ImbalanceWatch();
-  #balanceStarts = -1;
+  /** What the balance's watch was last started over for (`#book`): the walls' warm-up while it counts their books, its own otherwise. */
+  #balanceKey = '';
+  /** When the balance last started over (`#balanceKey` changed): it only watches for ten seconds after, whichever books it counts. */
+  #balanceSince = 0;
+  /**
+   * The balance's own warm-up while it counts other books than the walls (the two book panes' Venues: book-markets.ts): what its books are,
+   * when it started (ten seconds of only watching, as the walls'), the last look (one more than ten seconds later starts it over) and how many
+   * times it has started.
+   */
+  #own: { context: string; start: number; last: number } | null = null;
+  #ownStarts = 0;
   #lastBook = 0; #lastBar = 0; #lastOi = 0;
   /** Which market and timeframe the candles (and the open-interest bars) being watched belong to: another one starts from scratch. */
   #barKey = ''; #oiKey = '';
@@ -97,11 +112,12 @@ export class Alerts {
 
   get #s(): AppState { return this.host.state; }
 
-  #fire(now: number, panel: AlertPanel, kind: AlertKind, side: 'buy' | 'sell' | null, text: string, key: string, cooldownMs: number): void {
+  #fire(now: number, panel: AlertPanel, kind: AlertKind, side: 'buy' | 'sell' | null, text: string, key: string, cooldownMs: number, notes = alertNotes(kind, side, this.#s.sounds.volume)): void {
     const sounds = this.#s.sounds;
     if (!sounds.on) return;
     if (!this.#cool.take(key, now, cooldownMs) || !this.#cap.allow(now)) return;
-    const audible = this.player.play(alertNotes(kind, side, sounds.volume));
+    // An alert with no sound (a script's `sound=none`) is only listed: there was nothing to hear.
+    const audible = notes.length ? this.player.play(notes) : true;
     this.log.push({ at: now, panel, kind, side, text, audible });
     if (this.log.length > 100) this.log.splice(0, this.log.length - 100);
     this.onChange();
@@ -133,20 +149,37 @@ export class Alerts {
     if (now - this.#lastBook < BOOK_EVERY_MS) return;
     this.#lastBook = now;
     const s = this.#s, panels = s.sounds.panels, mark = s.mark.price;
-    if (!panels.book.wall && !panels.depth.imbalance) { this.#walls.reset(); return; }
+    if (!panels.book.wall && !panels.depth.imbalance) { this.#walls.reset(); this.#own = null; return; }
     if (!s.levels || !(mark > 0) || now - s.levels.asOf > FRESH_MS) return;
     const active = new Set(activeIds(s)), bins = bookBins(s.levels, active, mark, 0.01);
-    // The books the bins are made of and the market whose price centres them: when either changes (a venue chip, a venue that dropped out of
-    // the feed, another chart market) the walls start over, and the balance only watches until they have warmed up again.
-    const context = `${s.levels.books.filter(book => active.has(book.id)).map(book => book.id).sort().join(',')}|${s.marketId}|${s.seriesInstrument}`;
+    // The balance counts the books the Depth pane and the Liquidity Tracker add up (their Venues): the walls' (the venues switched on), or under
+    // another choice its own, whatever the chips say (so a chip changing never starts it over). Its own starts over for another set of books,
+    // another market or a gap, not for another grid step as the walls do: its totals do not depend on the bins' width.
+    const same = s.bookMarkets === 'all', counted = same ? [] : bookIds(s);
+    // The books the bins are made of, what each covers, and the market whose price centres them: when any changes (a venue chip, a venue that
+    // dropped out of the feed, a book seeded again or whose coverage grew, another chart market) the walls start over, and the balance only
+    // watches until they have warmed up again.
+    const context = `${s.levels.books.filter(book => active.has(book.id)).map(book => book.epoch ? `${book.id}#${book.epoch}` : book.id).sort().join(',')}|${s.marketId}|${s.seriesInstrument}`;
     for (const signal of this.#walls.update(now, bins, mark, scaledUsd(panels.book.usd), context)) {
       if (!panels.book.wall) continue;
       const word = signal.kind === 'appeared' ? t('wall appeared') : t('wall pulled');
       this.#fire(now, 'book', signal.kind === 'appeared' ? 'wall-appeared' : 'wall-pulled', signal.side, `${signal.side === 'buy' ? t('Bid') : t('Ask')} ${word}: $${usd(signal.usd)}`, `wall:${signal.side}:${signal.kind}`, WALL_COOLDOWN_MS);
     }
-    // The balance starts over with the walls (another set of books or market, a gap), so a book found lopsided before says nothing now.
-    if (this.#walls.starts !== this.#balanceStarts) { this.#balance.reset(); this.#balanceStarts = this.#walls.starts; }
-    const tip = this.#balance.update(imbalanceOf(bins), panels.depth.pct, !this.#walls.warming(now));
+    // The balance starts over with the walls (another set of books or market, a gap), so a book found lopsided before says nothing now. Over
+    // other books it has a warm-up of its own, by the walls' rules: another set of them or market, or a look more than ten seconds after the last.
+    let key: string, warm: boolean, judged = bins;
+    if (same) { this.#own = null; key = `walls:${this.#walls.starts}`; warm = !this.#walls.warming(now); }
+    else {
+      const own = new Set(counted), held = this.#own;
+      const context = `${s.levels.books.filter(book => own.has(book.id)).map(book => book.epoch ? `${book.id}#${book.epoch}` : book.id).sort().join(',')}|${s.marketId}|${s.seriesInstrument}`;
+      if (!held || held.context !== context || now - held.last > 10_000) { this.#own = { context, start: now, last: now }; this.#ownStarts++; }
+      else held.last = now;
+      key = `own:${this.#ownStarts}`; warm = now - this.#own!.start >= 10_000; judged = bookBins(s.levels, own, mark, 0.01);
+    }
+    // Any start over (another set of books: a Venues choice back to the walls' books too, whose warm-up may be long past) only watches for ten
+    // seconds: a book found past the line then is the book as it was found, not news.
+    if (key !== this.#balanceKey) { this.#balance.reset(); this.#balanceKey = key; this.#balanceSince = now; }
+    const tip = this.#balance.update(imbalanceOf(judged), panels.depth.pct, warm && now - this.#balanceSince >= 10_000);
     if (tip && panels.depth.imbalance) this.#fire(now, 'depth', 'imbalance', tip, tip === 'buy' ? t('Bids outweigh asks within 1% of the price') : t('Asks outweigh bids within 1% of the price'), 'imbalance', IMBALANCE_COOLDOWN_MS);
   }
 
@@ -204,12 +237,16 @@ export class Alerts {
    */
   #depthPane(now: number): void {
     const s = this.#s, rule = s.sounds.panels.depthPane;
-    if (!s.sounds.on || !rule.extreme || !this.columns) {
+    // The sound is the order book's: while the Depth pane shows liquidation levels it is quiet (the switch keeps its setting).
+    if (!s.sounds.on || !rule.extreme || !this.columns || s.depthSource === 'liq') {
       if (this.#depthKey) { this.#depth.reset(); this.#depthKey = ''; this.depthState = null; }
       return;
     }
-    // The markets from the market list, so a book that drops out is a gap (`DepthWatch` leaves such minutes out), not a reload of the hours.
-    const ids = marketIds(s), key = `${ids.join(',')}|${rule.range}|${rule.hours}`;
+    // The markets from the market list, so a book that drops out is a gap (`DepthWatch` leaves such minutes out), not a reload of the hours: those
+    // of the Depth pane's Venues (book-markets.ts), so the sound and the pane count the same books.
+    const ids = bookMarketIds(s), key = `${ids.join(',')}|${rule.range}|${rule.hours}`;
+    // No market to read (none chosen, or no chart market yet): nothing is loading, and the Sounds panel says nothing about it.
+    if (!ids.length) { if (this.#depthKey) { this.#depth.reset(); this.#depthKey = ''; } this.depthState = null; return; }
     if (key !== this.#depthKey) { this.#depth.reset(); this.#depthKey = key; this.#depthTo = 0; this.#depthWait = 0; this.depthState = { minutes: 0, loading: true }; }
     if (this.#depthBusy || now < this.#depthWait || !ids.length) return;
     // Every minute before `settled` has been committed; the first question goes back the whole baseline, an hour at a time.
@@ -229,7 +266,7 @@ export class Alerts {
       try {
         for (const m of minutes) {
           const signal = this.#depth.judge(m.t, rule);
-          if (!signal || this.clock() - (m.t + MINUTE) > DEPTH_FRESH_MS || replaying() || !this.#s.sounds.panels.depthPane.extreme) continue;
+          if (!signal || this.clock() - (m.t + MINUTE) > DEPTH_FRESH_MS || replaying() || !this.#s.sounds.panels.depthPane.extreme || this.#s.depthSource === 'liq') continue;
           const change = (v: number, usual: number): string => usual > 0 ? `${v >= usual ? '+' : '-'}${Math.round(Math.abs(v / usual - 1) * 100)}%` : '–';
           const values = { range: `${Math.round(rule.range * 1_000) / 10}%`, pct: String(rule.pct), hours: String(rule.hours), bids: change(signal.bid, signal.usualBid), asks: change(signal.ask, signal.usualAsk) };
           this.#fire(this.clock(), 'depthPane', 'depth-extreme', signal.side, signal.side === 'buy'
@@ -263,6 +300,21 @@ export class Alerts {
   }
 
   /** Play a sample of a panel's alert (the Test buttons): works with sounds off, so a person can hear what the rule would sound like. */
+  /**
+   * A script's alert (`alert(...)` in a script that is on, made new by the Scripts pane): under the same Sounds switch, cap and list as the
+   * panels' alerts, with a cool-down of its own per call of `alert` in the script (`key`).
+   */
+  script(now: number, text: string, sound: Parameters<typeof scriptNotes>[0], key: string): void {
+    if (replaying()) return;
+    this.#fire(now, 'script', 'script', null, text, `script:${key}`, SCRIPT_COOLDOWN_MS, scriptNotes(sound, this.#s.sounds.volume));
+  }
+
+  /** A level drawn on the map with its alert on was reached (draw/controller.ts): the chime, under the same Sounds switch, cap and list. */
+  drawing(now: number, text: string, key: string): void {
+    if (replaying()) return;
+    this.#fire(now, 'drawing', 'script', null, text, `drawing:${key}`, LEVEL_COOLDOWN_MS, scriptNotes('chime', this.#s.sounds.volume));
+  }
+
   test(kind: AlertKind, side: 'buy' | 'sell' | null = 'buy'): void {
     void this.player.unlock().then(() => { this.player.play(alertNotes(kind, side, this.#s.sounds.volume), true); });
   }

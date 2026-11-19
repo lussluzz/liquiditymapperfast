@@ -56,6 +56,34 @@ test('a long view comes in slices, newest first, each bar asked for once; then o
   } finally { time.restore(); }
 });
 
+test('before the markets\' step is known it is asked alone, and the view is then asked on the drawn rows, never on the finest', async () => {
+  const asked: { from: number; to: number; rows: number; cuts: number; budget: number; venues: boolean }[] = [];
+  const load = async (_i: string, _tf: string, from: number, to: number, rows: number, cuts: readonly number[], budget: number, venues: boolean): Promise<FootprintResponse> => {
+    asked.push({ from, to, rows, cuts: cuts.length, budget, venues });
+    const bars = []; for (let t = Math.ceil(from / H) * H; t + H <= to; t += H) bars.push({ t, rows: [[100, 1, 1]] as [number, number, number][], buyUsd: 1, sellUsd: 1, minutes: 60 });
+    return { step: rows > 0 ? rows : 0.5, fine: 0.5, bars };
+  };
+  // As the heat pane does: the row size from the step known before the look (rows 128 times the recorded step at this zoom).
+  const data = new FootprintData(), view = { t0: 10 * H, t1: 12 * H, p0: 0, p1: 1 };
+  const look = async (tf = '1h') => { data.ensure('a,b', tf, view, data.fine > 0 ? data.fine * 128 : 0, load, () => {}, [100_000], 20 * H); await turn(); };
+  await look();
+  assert.deepEqual(asked, [{ from: 0, to: 1, rows: 0, cuts: 0, budget: 0, venues: false }], 'the step first, from a window that holds nothing');
+  assert.equal(data.fine, 0.5);
+  assert.equal(data.bars.size, 0, 'and no bars from it');
+  await look();
+  assert.deepEqual(asked.slice(1).map(a => [a.from / H, a.to / H, a.rows, a.venues]), [[9, 13, 64, true]], 'then the view once, on the rows drawn');
+  assert.deepEqual([...data.bars.keys()].map(t => t / H), [9, 10, 11, 12]);
+  await look('4h');
+  assert.deepEqual(asked.slice(2).map(a => a.rows), [64], 'another timeframe of the same markets is asked on the rows at once');
+
+  // Markets with nothing recorded have no step: asked it once, then as before (an empty answer), and not again on every look.
+  const none: number[][] = [];
+  const empty = async (_i: string, _tf: string, from: number, to: number, rows: number): Promise<FootprintResponse> => { none.push([from, to, rows]); return { step: 0, fine: 0, bars: [] }; };
+  const fresh = new FootprintData();
+  for (let i = 0; i < 4; i++) { fresh.ensure('c', '1h', view, 0, empty, () => {}, [], 20 * H); await turn(); }
+  assert.deepEqual(none, [[0, 1, 0], [9 * H, 13 * H, 0]]);
+});
+
 test('another row size asks again from the view, and an old source that answers the whole window is taken whole', async () => {
   const asked: number[][] = [];
   const whole = async (_i: string, _tf: string, from: number, to: number): Promise<FootprintResponse> => {
@@ -102,6 +130,18 @@ test('a view with more bars than are held for long is not asked for again on eve
     past.clear();
     assert.equal(past.bars.size, 0, 'no markets to count: no bars');
   } finally { time.restore(); }
+});
+
+test('the bars held are said to be those of the markets and timeframe asked last, or of none once cleared', () => {
+  const data = new FootprintData(), { load } = source(100), view = { t0: 10 * H, t1: 20 * H, p0: 0, p1: 1 };
+  assert.equal(data.holds([], '1h'), true, 'nothing asked yet: no markets');
+  assert.equal(data.holds(['a', 'b'], '1h'), false);
+  data.ensure('a,b', '1h', view, 5, load, () => {}, [], 30 * H);
+  assert.equal(data.holds(['a', 'b'], '1h'), true);
+  assert.equal(data.holds(['a'], '1h'), false, 'other markets: the bars are not theirs yet');
+  assert.equal(data.holds(['a', 'b'], '5m'), false, 'another timeframe');
+  data.clear();
+  assert.deepEqual([data.holds([], '1h'), data.holds(['a', 'b'], '1h')], [true, false], 'every venue off: the cleared bars are the none counted');
 });
 
 test('venue rows read as ids whatever each answer\'s order, a malformed one is left out whole, and the order follows the volume held', () => {

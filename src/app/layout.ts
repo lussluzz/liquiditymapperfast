@@ -1,69 +1,176 @@
 import { setTip } from './tip.ts';
-import { isPhone } from './device.ts';
+import { el } from './dom.ts';
+import { openMenu, type MenuItem } from './menu.ts';
+import { isCoarse, isPhone } from './device.ts';
 import { t } from './i18n.ts';
-import { arrangeOrder, defaultColumns, fitHeights, type PaneArrangement } from './layouts/layouts.ts';
-/** Resizable, reorderable layout: splitters between panes, persisted in localStorage. */
-interface Saved { sideW?: number; flowW?: number; heights?: Record<string, number>; order?: string[] }
-const KEY = 'hlm-layout-v2';
+import { arrangeOrder, defaultColumns, fitHeights, stylesheetColumns, type PaneArrangement } from './layouts/layouts.ts';
+import { MAP_PLOT_FLOOR, SIDES, chooseFold, clonePlan, columnState, defaultPlan, laidOutWidths, leadOf, legacyPlan, maxColumnWidth, minWidthOf, moveSide, nudge, openIn, otherSide, readPlan, sideOf, splitWeights, swapSides, type DockPlan, type FoldSide, type Side, type SidePaneId } from './layouts/dock-model.ts';
+import { dropTarget, type Box, type DropScene, type DropTarget } from './layouts/dock-drop.ts';
+import { canMaximize, columnKey, savedHeight, staysMaximized } from './layouts/maximize.ts';
+
+/**
+ * Resizable, reorderable layout, kept in localStorage. The map's column holds the map and the panes under it (splitters between them, a grip
+ * on each header to reorder); the flow column and the order book stand beside it, each on the side the plan says (`layouts/dock-model.ts`),
+ * alone or one over the other. A column with nothing open shows an edge tab for each pane it holds, which opens it again.
+ */
+interface Saved { order?: string[]; heights?: Record<string, number>; dock?: unknown }
+const KEY = 'hlm-layout-v3', V2_KEY = 'hlm-layout-v2';
 /** The widths the columns had before they followed the window (420 and 300): a save holding one was written by a save of something else (a height), not by a drag. */
 const OLD_SIDE_W = 420, OLD_FLOW_W = 300;
 
-function read(): Saved { try { return JSON.parse(window.localStorage.getItem(KEY) ?? '{}') as Saved; } catch { return {}; } }
+/** The saved arrangement: this version's, or the one before it (`hlm-layout-v2`: the flow column left of the map and the book right of it, a width kept only where a drag set it), read as this version's. */
+function read(): Saved {
+  try {
+    const now = window.localStorage.getItem(KEY);
+    const raw = JSON.parse(now ?? window.localStorage.getItem(V2_KEY) ?? '{}') as Record<string, unknown>;
+    const order = Array.isArray(raw.order) ? raw.order.filter((id): id is string => typeof id === 'string') : undefined;
+    const heights: Record<string, number> = {};
+    if (raw.heights && typeof raw.heights === 'object') for (const [id, h] of Object.entries(raw.heights as Record<string, unknown>)) if (typeof h === 'number' && Number.isFinite(h)) heights[id] = h;
+    return { order, heights, dock: now !== null ? raw.dock : legacyPlan(raw.flowW, raw.sideW, OLD_FLOW_W, OLD_SIDE_W) };
+  } catch { return {}; }
+}
 function write(saved: Saved): void { try { window.localStorage.setItem(KEY, JSON.stringify(saved)); } catch { /* storage unavailable */ } }
 
-export interface LayoutPane { id: string; root: HTMLElement; /** Initial height in px for fixed-height panes; the flexible pane has none. */ height?: number; min?: number; head?: HTMLElement | null }
+export interface LayoutPane {
+  id: string; root: HTMLElement; /** Initial height in px for fixed-height panes; the flexible pane has none. */ height?: number; min?: number; head?: HTMLElement | null;
+  /** False for a pane with no close button. */
+  closable?: boolean;
+  /**
+   * What the close button (and its menu's item) says, for a pane whose close is not its switch: the Scripts pane's switches off the scripts
+   * drawn in it, as its switch is the Scripts feature, which draws on the map too (the page's `onClose` does it). Else "Hide this panel".
+   */
+  closeLabel?: string;
+}
+/**
+ * A pane that stands beside the map: its header (the controls it has), and the name its edge tab and its buttons give it. A pane with `views`
+ * (the flow column: its flow lines, Trades) gets an edge tab for each, which opens it on that view.
+ */
+export interface SidePane { id: SidePaneId; root: HTMLElement; head: HTMLElement; title: string; views?: readonly { id: string; title: string }[] }
+
+/** A pane that can be moved by its header: a side pane or a pane under the map. */
+interface Mover { id: string; kind: 'side' | 'strip'; root: HTMLElement; head: HTMLElement; title: () => string; closable: boolean; closeLabel?: string }
+
+/** The width of a column's splitter (px; the stylesheet's `.splitter` says the same). */
+const SPLIT_W = 6;
 
 export class Layout {
   #saved = read();
   #panes: LayoutPane[];
   readonly #splitters: HTMLElement[] = [];
-  /** The vertical splitters: between the flow column and the map, and between the map and the book. */
-  #flowSplit: HTMLElement | null = null;
-  #sideSplit: HTMLElement;
+  /** Which side pane is where, and how wide each column is (null: it follows the window, as the stylesheet sizes it). */
+  #plan: DockPlan;
+  /** Which of the side panes are open (the page's switches). */
+  #shown: Record<SidePaneId, boolean> = { cvd: true, book: true };
+  /**
+   * The side columns folded to their edge tabs to leave the map its plot (`chooseFold`, Karl 2026-11-03: "let desktop minimize side panes if
+   * needed"). Not a switch and not the plan: nothing of it is saved, so a narrow window never rewrites a wide one's layout.
+   */
+  #folded = new Set<Side>();
+  /** A folded column's tab was pressed: nothing folds until the window no longer needs it (then the rule is back). */
+  #foldOff = false;
+  /** The plot a map pane this wide is left with (the map's own columns taken off, `gutterAt`); until the page gives it nothing folds. */
+  plotAt: ((paneW: number) => number) | null = null;
+  readonly #sidePanes = new Map<SidePaneId, SidePane>();
+  /** The columns beside the map, the splitter between each and the map, and the tabs a column with nothing open shows. */
+  readonly #regions: Record<Side, HTMLElement>;
+  readonly #vsplit = {} as Record<Side, HTMLElement>;
+  readonly #rails = {} as Record<Side, HTMLElement>;
+  #railKeys: Record<Side, string> = { left: '', right: '' };
+  readonly #stackBars = new Map<string, HTMLElement>();
+  readonly #movers = new Map<string, Mover>();
   /** The heights `#fit` last gave the panes under the map: a pane still at one of them was not resized by hand, and keeps its own height when saved. */
   #fitted = new Map<string, number>();
-  /** Whether each column was sized by hand (dragged, or from a saved layout): until then it follows the window (the stylesheet's `max(…, 19.1vw)`) and is not saved. */
-  #sideHand = false; #flowHand = false;
   /** The arrangement the page starts with when nothing is saved (the Default layout). */
   readonly #defaults: PaneArrangement;
+  /**
+   * The pane of the map's column shown alone over the whole screen (TradingView's maximize, Karl 2026-11-17): the map, or a pane under it,
+   * over the map's column, with the flow column and the book folded away (`#visible`, `#applyColumns`), the top bar and the status bar kept.
+   * Nothing of it is saved and nothing else changes: the other panes keep their sizes, laid out under it unseen, and come back as they were.
+   * The map goes on drawing (a maximized pane under it follows its view and shows its time axis); the covered panes under it draw nothing
+   * meanwhile (the page's `onMaximized`, TimePane.cover). Desktop only.
+   */
+  #max: string | null = null;
+  /** The panes the column showed when one was maximized: another pane opened or closed since gives the column back (`rebuild`). */
+  #maxKey = '';
+  /** Where the pointer last was (the Z key maximizes the pane of the map's column under it, `pointed`), or null for a finger. */
+  #pointer: { x: number; y: number } | null = null;
+  /** Each pane-under-the-map's maximize button, shown lit while it is maximized. */
+  readonly #maxButtons = new Map<string, HTMLButtonElement>();
+  /** Whether a double click may maximize a pane now: not while a tool that clicks on the panes is armed (set by the page). */
+  canMaximize: () => boolean = () => true;
+  /** A pane was maximized, or the column given back (null): the map's own button follows it (set by the page). */
+  onMaximized: (id: string | null) => void = () => {};
+  /** The height of the time axis along the map's bottom (heat-pane.ts `TIME_H`): it stays in sight under a maximized pane, which has none. */
+  mapAxisH = 22;
+  /** What the close button of a pane, and the edge tab of a closed one, do (the page's switches are the page's). */
+  onClose: (id: string) => void = () => {};
+  onOpen: (id: string) => void = () => {};
+  /** An edge tab of one of a pane's views was pressed: the page shows that view (before the pane opens, so it opens on it). */
+  onView: (id: SidePaneId, view: string) => void = () => {};
 
-  constructor(private main: HTMLElement, private chart: HTMLElement, private side: HTMLElement, panes: LayoutPane[], private flow: HTMLElement | null = null) {
+  constructor(private main: HTMLElement, private chart: HTMLElement, regions: Record<Side, HTMLElement>, panes: LayoutPane[], sidePanes: SidePane[]) {
     this.#panes = panes;
-    this.#defaults = { order: panes.map(p => p.id), heights: Object.fromEntries(panes.flatMap(p => p.height !== undefined ? [[p.id, p.height]] : [])), ...defaultColumns(window.innerWidth) };
+    this.#regions = regions;
+    this.#plan = readPlan(this.#saved.dock) ?? defaultPlan();
+    this.#defaults = { order: panes.map(p => p.id), heights: Object.fromEntries(panes.flatMap(p => p.height !== undefined ? [[p.id, p.height]] : [])), ...defaultColumns(window.innerWidth), dock: defaultPlan() };
+    for (const pane of sidePanes) { this.#sidePanes.set(pane.id, pane); this.#mover({ id: pane.id, kind: 'side', root: pane.root, head: pane.head, title: () => pane.title, closable: true }); }
     // Restore pane order and heights: the saved order, and a pane it does not know (one added since) after the others, so a new pane does
     // not undo a person's order.
     this.#panes = arrangeOrder(this.#saved.order ?? [], panes.map(p => ({ id: p.id, fixed: p.height !== undefined }))).map(id => panes.find(p => p.id === id)!);
     for (const pane of this.#panes) {
       if (pane.height !== undefined) this.#setHeight(pane, this.#saved.heights?.[pane.id] ?? pane.height);
       this.chart.append(pane.root);
-      if (pane.head) this.#grip(pane);
+      if (pane.head) this.#mover({ id: pane.id, kind: 'strip', root: pane.root, head: pane.head, title: () => pane.head!.querySelector('strong')?.textContent ?? pane.id, closable: pane.closable !== false, ...(pane.closeLabel ? { closeLabel: pane.closeLabel } : {}) });
+      // A double click on a pane under the map maximizes it, or gives the column back: on its plot or its header, never on one of its controls,
+      // and not from a finger (a double tap is the pane's own gesture). The map has its own (heat-pane.ts): its axes recentre it.
+      if (pane.height !== undefined) {
+        let finger = false;
+        pane.root.addEventListener('pointerdown', e => { finger = e.pointerType === 'touch'; }, { capture: true });
+        pane.root.addEventListener('dblclick', e => {
+          if (finger || !(e.target instanceof Element) || e.target.closest('button, select, input, textarea, a, label') || !this.canMaximize()) return;
+          if (this.toggleMax(pane.id)) window.getSelection()?.removeAllRanges();
+        });
+      }
     }
-    // Column splitter between the chart and side columns.
-    const column = document.createElement('div'); column.className = 'splitter v'; setTip(column, t('Drag to resize'));
-    this.main.insertBefore(column, this.side);
-    this.#sideSplit = column;
-    if (this.#saved.sideW !== undefined && this.#saved.sideW !== OLD_SIDE_W) { this.#sideHand = true; this.#setSideWidth(this.#saved.sideW); }
-    this.#drag(column, (dx) => { this.#sideHand = true; this.#setSideWidth(startSide - dx); }, () => { startSide = this.#sideWidth(); }, () => this.#persist());
-    let startSide = this.#sideWidth();
-    if (this.flow) {
-      const left = document.createElement('div'); left.className = 'splitter v'; setTip(left, t('Drag to resize'));
-      this.main.insertBefore(left, this.chart);
-      this.#flowSplit = left;
-      if (this.#saved.flowW !== undefined && this.#saved.flowW !== OLD_FLOW_W) { this.#flowHand = true; this.#setFlowWidth(this.#saved.flowW); }
-      this.#drag(left, (dx) => { this.#flowHand = true; this.#setFlowWidth(startFlow + dx); }, () => { startFlow = this.#flowWidth(); }, () => this.#persist());
-      var startFlow = this.#flowWidth();
+    window.addEventListener('pointermove', e => { this.#pointer = e.pointerType === 'touch' ? null : { x: e.clientX, y: e.clientY }; }, { passive: true });
+    // The splitters between the map and each column; a drag sets that column's width, a double click gives it back to the window.
+    for (const side of SIDES) {
+      const bar = this.#vsplit[side] = el('div', { class: 'splitter v', tip: t('Drag to resize') });
+      this.main.insertBefore(bar, side === 'left' ? this.chart : regions.right);
+      let start = 0;
+      this.#drag(bar, dx => this.#setWidth(side, side === 'left' ? start + dx : start - dx), () => { start = this.#width(side); }, () => { this.#afterDrag(side); this.#persist(); });
+      bar.addEventListener('dblclick', () => { this.#plan[side === 'left' ? 'leftW' : 'rightW'] = null; this.#relayout(); this.#persist(); });
+      const rail = this.#rails[side] = el('div', { class: 'edge-rail' });
+      regions[side].append(rail);
     }
     this.rebuild();
-    window.addEventListener('resize', () => this.#fit());
+    this.#renderSides();
+    // A window that becomes a phone (or stops being one) is laid out again: a phone arranges its panes by tab, and the weights of a stack are the desktop's.
+    let phone = isPhone();
+    // A window resized may fold a column, or open one again: the sides are laid out again then, the widths alone otherwise.
+    window.addEventListener('resize', () => { this.#fit(); if (isPhone() !== phone) { phone = !phone; this.#setMax(null); this.#renderSides(); } else this.#relayout(); });
   }
 
-  /** The column's width as it is laid out (the variable may be an expression of the window's width); a hidden column has none, so the saved or default one. */
-  #flowWidth(): number { return Math.round(this.flow?.getBoundingClientRect().width || this.#saved.flowW || defaultColumns(window.innerWidth).flowW); }
-  #setFlowWidth(w: number): void { this.main.style.setProperty('--flow-w', `${Math.round(Math.max(200, Math.min(window.innerWidth * 0.5, w)))}px`); }
-  #sideWidth(): number { return Math.round(this.side.getBoundingClientRect().width || this.#saved.sideW || defaultColumns(window.innerWidth).sideW); }
-  /** The widths to save: a column's only when it was sized by hand, so the others keep following the window. */
-  #widths(): Pick<Saved, 'sideW' | 'flowW'> { return { sideW: this.#sideHand ? this.#sideWidth() : undefined, flowW: this.#flowHand ? this.#flowWidth() : undefined }; }
-  #setSideWidth(w: number): void { this.main.style.setProperty('--side-w', `${Math.round(Math.max(260, Math.min(window.innerWidth * 0.7, w)))}px`); }
+  /** What a column is now: its width as it is laid out; one that is not laid out has none, so the width it keeps or the window's. */
+  #width(side: Side): number {
+    const laid = this.#regions[side].getBoundingClientRect().width;
+    return Math.round(laid > 0 && this.#regions[side].dataset.state === 'open' ? laid : this.#wanted(side));
+  }
+  /** The width a column is asked for: the one dragged to, else what the stylesheet gives its lead pane (the book, the wider, where it is open in it) at this window. */
+  #wanted(side: Side): number {
+    const own = this.#plan[side === 'left' ? 'leftW' : 'rightW'];
+    if (own !== null) return own;
+    const wide = defaultColumns(window.innerWidth);
+    return leadOf(this.#plan, side, this.#shown) === 'book' ? wide.sideW : wide.flowW;
+  }
+  /** A column made `w` wide, within what its panes need and what the map is to keep. */
+  #setWidth(side: Side, w: number): void {
+    const vis = this.#visible(), other = otherSide(side), otherW = columnState(this.#plan, other, vis) === 'open' ? this.#width(other) : 0;
+    const min = minWidthOf(openIn(this.#plan, side, vis), isCoarse()), max = maxColumnWidth(window.innerWidth, otherW, min);
+    this.#plan[side === 'left' ? 'leftW' : 'rightW'] = Math.round(Math.max(min, Math.min(max, w)));
+    this.#applyColumns();
+  }
+
   #height(pane: LayoutPane): number { return pane.root.getBoundingClientRect().height; }
   #setHeight(pane: LayoutPane, h: number): void { pane.root.style.flex = `0 0 ${Math.round(Math.max(pane.min ?? 70, h))}px`; }
   #persist(): void {
@@ -72,16 +179,23 @@ export class Layout {
     const heights: Record<string, number> = {};
     for (const p of this.#panes) {
       if (p.height === undefined || p.root.hidden) continue;
-      // A pane shrunk to fit the window keeps the height it was given; one resized by hand since gets its new one.
-      const shown = Math.round(this.#height(p)), fitted = this.#fitted.get(p.id), own = this.#saved.heights?.[p.id];
-      heights[p.id] = fitted !== undefined && own !== undefined && Math.abs(shown - fitted) <= 1 ? own : shown;
+      // A pane shrunk to fit the window keeps the height it was given; one resized by hand since gets its new one; a maximized one, the height
+      // it comes back at (it stands over the whole column).
+      heights[p.id] = savedHeight({ maxed: p.id === this.#max, shown: Math.round(this.#height(p)), fitted: this.#fitted.get(p.id), own: this.#saved.heights?.[p.id], initial: p.height });
     }
-    write({ ...this.#widths(), heights: { ...this.#saved.heights, ...heights }, order: this.#panes.map(p => p.id) });
+    write({ heights: { ...this.#saved.heights, ...heights }, order: this.#panes.map(p => p.id), dock: this.#plan });
     this.#saved = read();
   }
 
   /** Pointer-drag helper: calls `move(totalDx, totalDy)` while a button is held on `handle`. */
   #drag(handle: HTMLElement, moveX: ((dx: number) => void) | null, start: () => void, end: () => void, moveY?: (dy: number) => void): void {
+    // A splitter is a separator the keyboard can move too: the arrow keys along its axis, sixteen pixels a press, sixty-four with Shift.
+    handle.tabIndex = 0; handle.setAttribute('role', 'separator'); handle.setAttribute('aria-orientation', moveY ? 'horizontal' : 'vertical'); handle.setAttribute('aria-label', t('Drag to resize'));
+    handle.addEventListener('keydown', e => {
+      const step = e.shiftKey ? 64 : 16, d = moveY ? (e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0) : (e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0);
+      if (!d) return;
+      e.preventDefault(); start(); moveX?.(d); moveY?.(d); end();
+    });
     handle.addEventListener('pointerdown', e => {
       if (e.button !== 0) return;
       e.preventDefault(); handle.setPointerCapture(e.pointerId); start(); handle.classList.add('active');
@@ -92,26 +206,160 @@ export class Layout {
     });
   }
 
+  /** The side panes laid out: open by the page's switches and not in a folded column. */
+  #visible(): Record<SidePaneId, boolean> {
+    // A maximized chart takes the whole screen: the flow column and the book are folded away with it (Karl, 2026-11-17), not closed.
+    if (this.#max !== null) return { cvd: false, book: false };
+    const folded = (id: SidePaneId): boolean => this.#folded.has(sideOf(this.#plan, id));
+    return { cvd: this.#shown.cvd && !folded('cvd'), book: this.#shown.book && !folded('book') };
+  }
+  /** Which columns the rule folds at this window, the page's switches and its map's columns (none on a phone, or before `plotAt`). */
+  #foldRule(): Side[] {
+    if (!this.plotAt || isPhone()) return [];
+    const rail = parseFloat(getComputedStyle(this.main).getPropertyValue('--rail-w')) || 22;
+    const css = stylesheetColumns(window.innerWidth);
+    const side = (s: Side): FoldSide => {
+      const open = openIn(this.#plan, s, this.#shown), dragged = this.#plan[s === 'left' ? 'leftW' : 'rightW'] !== null;
+      const exact = dragged ? undefined : leadOf(this.#plan, s, this.#shown) === 'book' ? css.sideW : css.flowW;
+      return { state: columnState(this.#plan, s, this.#shown), want: this.#wanted(s), min: minWidthOf(open, isCoarse()), book: open.includes('book'), exact };
+    };
+    return chooseFold({ windowW: window.innerWidth, sides: { left: side('left'), right: side('right') }, splitW: SPLIT_W, railW: rail, plotAt: this.plotAt, floor: MAP_PLOT_FLOOR }).fold;
+  }
+  /** Fold what the rule folds (unless a folded tab was pressed and the rule still wants it); true when that changed. */
+  #refold(): boolean {
+    const rule = this.#foldRule();
+    if (!rule.length) this.#foldOff = false;
+    const before = [...this.#folded].sort().join();
+    this.#folded = new Set(this.#foldOff ? [] : rule);
+    return [...this.#folded].sort().join() !== before;
+  }
+  /** Weigh the fold again after something that changes the map's own columns (the volume profile's places, the market): laid out again only when it changed. */
+  refit(): void { if (this.#refold()) this.#renderSides(); }
+  /** The columns laid out again after their widths changed (a resize, a column given back its own width): the sides too when the fold changed. */
+  #relayout(): void { if (this.#refold()) this.#renderSides(); else this.#applyColumns(); }
   /**
-   * Show or hide the two side columns (the flow column left of the map and the book right of it) and give the grid the columns that are left.
-   * Hiding is instant: nothing is rebuilt, a column and its splitter just stop being laid out.
+   * A column's width let go of (a drag, or the arrow keys on its splitter): the fold is weighed then, not under the pointer (Sol, 2026-11-03:
+   * the Book dragged to 500 px at 1,500 left the map 285 px; the Flow folded gives it 556). The column dragged is the person's choice: when
+   * it is the one the rule would fold, it stays open, as when its folded tab is pressed.
    */
-  columns(show: { flow: boolean; book: boolean }): void {
-    const flow = show.flow && this.flow !== null, book = show.book;
-    if (this.flow) this.flow.hidden = !flow;
-    if (this.#flowSplit) this.#flowSplit.hidden = !flow;
-    this.side.hidden = !book; this.#sideSplit.hidden = !book;
+  #afterDrag(side: Side): void {
+    if (this.#foldRule().includes(side)) this.#foldOff = true;
+    this.#relayout();
+  }
+
+  /**
+   * Tell the layout which of the side panes are open. A column with an open pane is laid out; one with none shows an edge tab for each pane it
+   * holds (a pane that was closed keeps its place); one that holds none is not there. All instant: nothing is rebuilt, a pane or a column that
+   * is not shown is simply not laid out.
+   */
+  sides(shown: Readonly<Record<SidePaneId, boolean>>): void {
+    // A side pane opened or closed (its switch, [ or ]) gives the screen back, so that what was asked for is seen.
+    if (this.#max !== null && (shown.cvd !== this.#shown.cvd || shown.book !== this.#shown.book)) this.#setMax(null);
+    this.#shown = { cvd: shown.cvd, book: shown.book };
+    this.#renderSides();
+  }
+
+  /** Put each side pane in its column, in the plan's order, with a splitter between two that are open and the edge tabs of a column that has none open. */
+  #renderSides(): void {
+    this.#refold();
+    const vis = this.#visible();
+    for (const pane of this.#sidePanes.values()) pane.root.hidden = !vis[pane.id];
+    for (const side of SIDES) {
+      const region = this.#regions[side], list = this.#plan[side], open = openIn(this.#plan, side, vis);
+      const nodes: HTMLElement[] = [];
+      let above: SidePaneId | null = null;
+      for (const id of list) {
+        const pane = this.#sidePanes.get(id); if (!pane) continue;
+        if (vis[id] && above !== null) nodes.push(this.#stackBar(above, id));
+        nodes.push(pane.root);
+        // A phone shows one pane at a time and sizes it in the stylesheet: a share written here would beat that and leave the pane short of the area.
+        pane.root.style.flex = open.length > 1 && !isPhone() ? `${this.#plan.weights[id] ?? 1} 1 0px` : '';
+        if (vis[id]) above = id;
+      }
+      const closed = list.filter(id => !vis[id]);
+      this.#railTabs(side, closed, this.#folded.has(side) ? closed.filter(id => this.#shown[id]) : []);
+      nodes.push(this.#rails[side]);
+      // Only what is out of place is moved: a pane taken out of the page and put back loses what it scrolls and what it has focused.
+      for (const old of [...region.children]) if (!nodes.includes(old as HTMLElement)) old.remove();
+      nodes.forEach((node, i) => { if (region.children[i] !== node) region.insertBefore(node, region.children[i] ?? null); });
+    }
+    this.#applyColumns();
+  }
+
+  /** The splitter between two panes standing one over the other in a column: it shares the column's height between them (one per pair, kept). */
+  #stackBar(above: SidePaneId, below: SidePaneId): HTMLElement {
+    const key = `${above}>${below}`, kept = this.#stackBars.get(key);
+    if (kept) return kept;
+    const bar = el('div', { class: 'splitter h', tip: t('Drag to resize') });
+    const a = this.#sidePanes.get(above)!.root, b = this.#sidePanes.get(below)!.root;
+    let ah = 0, bh = 0;
+    this.#drag(bar, null, () => { ah = a.getBoundingClientRect().height; bh = b.getBoundingClientRect().height; }, () => this.#persist(), dy => {
+      const min = 90, span = ah + bh;
+      if (!(span > 0)) return;
+      // The pair's weights add up to 2 whatever they were (an imported plan may hold 10 and 10, which a drag would take past the limit a file is read back at).
+      const [wa, wb] = splitWeights(Math.max(min, Math.min(span - min, ah + dy)) / span);
+      this.#plan.weights[above] = wa; this.#plan.weights[below] = wb;
+      a.style.flex = `${wa} 1 0px`; b.style.flex = `${wb} 1 0px`;
+    });
+    bar.addEventListener('dblclick', () => { delete this.#plan.weights[above]; delete this.#plan.weights[below]; this.#renderSides(); this.#persist(); });
+    this.#stackBars.set(key, bar);
+    return bar;
+  }
+
+  /**
+   * An edge tab for each closed pane of a column: the column is a strip along the window's edge until one is pressed. A pane folded to leave the
+   * map room (`folded`) says so, never put away without a word (Karl's rule); pressing it shows it anyway, the map narrower.
+   */
+  #railTabs(side: Side, closed: readonly SidePaneId[], folded: readonly SidePaneId[] = []): void {
+    const key = `${closed.join()}|${folded.join()}`;
+    if (this.#railKeys[side] === key) return;
+    this.#railKeys[side] = key;
+    this.#rails[side].replaceChildren(...closed.flatMap(id => {
+      const pane = this.#sidePanes.get(id), fold = folded.includes(id);
+      // A pane of several views has a tab for each (Karl, 2026-11-12: "similar buttons for the other things" on the collapsed column's strip).
+      const views: readonly ({ id: string; title: string } | null)[] = pane?.views?.length ? pane.views : [null];
+      return views.map(view => {
+        const title = view?.title ?? pane?.title ?? id;
+        const words = fold ? t('{name} is folded to leave the map room. Show it anyway', { name: title }) : t('Show {name}', { name: title });
+        const open = (): void => { if (view) this.onView(id, view.id); if (fold) { this.#foldOff = true; this.#renderSides(); } else this.onOpen(id); };
+        const tab = el('button', { type: 'button', class: fold ? 'edge-tab folded' : 'edge-tab', tip: words, ariaLabel: words, onclick: open }, el('i', { class: 'edge-chev', ariaHidden: 'true' }), el('span', { textContent: title }));
+        tab.dataset.pane = id;
+        if (view) tab.dataset.view = view.id;
+        return tab;
+      });
+    }));
+  }
+
+  /** Lay the columns out: which are there, how wide, and the grid of the page that holds them. */
+  #applyColumns(): void {
+    // While a chart is maximized there is no column beside the map at all, not even its edge tabs: the chart has the whole width.
+    const vis = this.#visible(), maxed = this.#max !== null;
+    const states = { left: maxed ? 'none' as const : columnState(this.#plan, 'left', vis), right: maxed ? 'none' as const : columnState(this.#plan, 'right', vis) };
+    for (const side of SIDES) {
+      this.#regions[side].hidden = states[side] === 'none'; this.#regions[side].dataset.state = states[side]; this.#regions[side].dataset.side = side;
+      this.#vsplit[side].hidden = states[side] !== 'open';
+    }
     // A phone's columns are the stylesheet's (mobile.css): the desktop's template written here beat its landscape grid and left the pane beside the map 0 to 120 px wide.
     if (isPhone()) { this.main.style.removeProperty('grid-template-columns'); return; }
+    // The widths: the stylesheet's own (it follows the window) for a column that was not dragged, the dragged one otherwise, and both taken down together when they would leave the map too little.
+    const wide = window.innerWidth;
+    const min = (side: Side): number => minWidthOf(openIn(this.#plan, side, vis), isCoarse());
+    const [lw, rw] = laidOutWidths([this.#wanted('left'), this.#wanted('right')], [min('left'), min('right')], [states.left === 'open', states.right === 'open'], wide);
+    for (const side of SIDES) {
+      const own = this.#plan[side === 'left' ? 'leftW' : 'rightW'], fitted = side === 'left' ? lw : rw, asked = this.#wanted(side);
+      this.main.style.setProperty(side === 'left' ? '--left-w' : '--right-w', own === null && fitted === asked ? (leadOf(this.#plan, side, this.#shown) === 'book' ? 'var(--side-w)' : 'var(--flow-w)') : `${fitted}px`);
+    }
     const tracks: string[] = [];
-    if (flow) tracks.push('var(--flow-w)', '6px');
+    if (states.left === 'open') tracks.push('var(--left-w)', `${SPLIT_W}px`); else if (states.left === 'rail') tracks.push('var(--rail-w)');
     tracks.push('minmax(0,1fr)');
-    if (book) tracks.push('6px', 'var(--side-w)');
+    if (states.right === 'open') tracks.push(`${SPLIT_W}px`, 'var(--right-w)'); else if (states.right === 'rail') tracks.push('var(--rail-w)');
     this.main.style.gridTemplateColumns = tracks.join(' ');
   }
 
   /** Recreate the horizontal splitters between visible panes (call after panes are shown, hidden or reordered). */
   rebuild(): void {
+    // A pane opened or closed (the maximized one too) gives the column back, so that what was asked for is seen; a change of anything else does not.
+    if (this.#max !== null && (isPhone() || !staysMaximized(this.#max, this.#maxKey, this.#visibleKey()))) this.#setMax(null);
     for (const s of this.#splitters.splice(0)) s.remove();
     const visible = this.#panes.filter(p => !p.root.hidden);
     visible.forEach((below, i) => {
@@ -125,6 +373,8 @@ export class Layout {
         if (below.height !== undefined) this.#setHeight(below, belowStart - dy);
         if (above.height !== undefined) this.#setHeight(above, aboveStart + dy);
       });
+      // As on the columns' splitters (and the one between two side panes): a double click gives the panes it parts back their own height.
+      bar.addEventListener('dblclick', () => this.#resetHeights([above, below]));
     });
     this.#fit();
   }
@@ -138,33 +388,37 @@ export class Layout {
     const fixed = this.#panes.filter(p => !p.root.hidden && p.height !== undefined);
     const avail = this.chart.clientHeight - this.#splitters.length * 6;
     if (!fixed.length || avail <= 0) return;
-    const flexible = this.#panes.filter(p => !p.root.hidden && p.height === undefined), mapMin = flexible.reduce((sum, p) => sum + (parseFloat(getComputedStyle(p.root).minHeight) || 0), 0);
+    // The map's floor is its own (`min`), not read from the page while a pane is maximized: that rule sets the maximized pane's, and the map's, to 0.
+    const flexible = this.#panes.filter(p => !p.root.hidden && p.height === undefined), mapMin = flexible.reduce((sum, p) => sum + (this.#max !== null ? p.min ?? 0 : parseFloat(getComputedStyle(p.root).minHeight) || 0), 0);
     const want = fixed.map(p => this.#saved.heights?.[p.id] ?? p.height!), heights = fitHeights(want, fixed.map(p => p.min ?? 70), avail, Math.max(mapMin, 1));
     this.#fitted.clear();
     fixed.forEach((p, i) => { this.#setHeight(p, heights[i]!); if (heights[i] !== want[i]) this.#fitted.set(p.id, heights[i]!); });
   }
 
   /** The arrangement the page starts with when nothing is saved. */
-  defaults(): PaneArrangement { return { ...this.#defaults, ...defaultColumns(window.innerWidth), order: [...this.#defaults.order], heights: { ...this.#defaults.heights } }; }
+  defaults(): PaneArrangement { return { ...this.#defaults, ...defaultColumns(window.innerWidth), order: [...this.#defaults.order], heights: { ...this.#defaults.heights }, dock: defaultPlan() }; }
 
-  /** The panes as they are now: order, heights (a hidden pane's as it will come back), and the column widths. */
+  /** The panes as they are now: order, heights (a hidden pane's as it will come back), which side each side pane is on, and the column widths. */
   arrangement(): PaneArrangement {
     const heights: Record<string, number> = {};
     // A pane shrunk to fit this window keeps its own height (as #persist does); a hidden one the height it will come back at.
     for (const p of this.#panes) {
       if (p.height === undefined) continue;
       const own = this.#saved.heights?.[p.id] ?? p.height;
-      heights[p.id] = Math.round(p.root.hidden || this.#fitted.has(p.id) ? own : this.#height(p));
+      heights[p.id] = Math.round(p.root.hidden || p.id === this.#max || this.#fitted.has(p.id) ? own : this.#height(p));
     }
-    return { order: this.#panes.map(p => p.id), heights, sideW: this.#sideWidth(), flowW: this.flow ? this.#flowWidth() : this.#saved.flowW ?? defaultColumns(window.innerWidth).flowW };
+    return { order: this.#panes.map(p => p.id), heights, sideW: this.#width(sideOf(this.#plan, 'book')), flowW: this.#width(sideOf(this.#plan, 'cvd')), dock: clonePlan(this.#plan) };
   }
 
   /**
    * Arrange the panes as `a` says (a saved layout): their order (panes it does not know after the others), every fixed pane's height,
-   * hidden ones too so they come back at it, and the column widths; then keep it as the page's own. Not on a phone, which arranges by tab.
+   * hidden ones too so they come back at it, which side the flow column and the book stand on and the column widths; then keep it as the
+   * page's own. A layout from before the side panes could move has none of that: the flow column is left of the map and the book right of it.
+   * Not on a phone, which arranges by tab.
    */
   apply(a: PaneArrangement): void {
     if (isPhone()) return;
+    this.#setMax(null);
     const known = this.#defaults.order.map(id => ({ id, fixed: this.#defaults.heights[id] !== undefined }));
     const ids = arrangeOrder(a.order, known);
     this.#panes = ids.map(id => this.#panes.find(p => p.id === id)!);
@@ -172,41 +426,240 @@ export class Layout {
     for (const p of this.#panes) if (p.height !== undefined) { const h = a.heights[p.id] ?? heights[p.id] ?? p.height; this.#setHeight(p, h); heights[p.id] = Math.round(Math.max(p.min ?? 70, h)); }
     // A width that is the default for this window is not a hand's: the column goes back to following the window.
     const wide = defaultColumns(window.innerWidth);
-    this.#sideHand = a.sideW !== wide.sideW;
-    if (this.#sideHand) this.#setSideWidth(a.sideW); else this.main.style.removeProperty('--side-w');
-    if (this.flow) { this.#flowHand = a.flowW !== wide.flowW; if (this.#flowHand) this.#setFlowWidth(a.flowW); else this.main.style.removeProperty('--flow-w'); }
-    else this.#flowHand = a.flowW !== wide.flowW;
+    this.#plan = a.dock ? clonePlan(a.dock) : legacyPlan(a.flowW, a.sideW, wide.flowW, wide.sideW);
     // What was asked for, not what is measured (a pane hidden now has no height to measure); kept first, as the fit reads it.
-    write({ sideW: this.#sideHand ? this.#sideWidth() : undefined, flowW: this.#flowHand ? (this.flow ? this.#flowWidth() : a.flowW) : undefined, heights, order: ids });
+    write({ heights, order: ids, dock: this.#plan });
     this.#saved = read();
+    this.#renderSides();
     this.#reattach();
+  }
+
+  /** What a pane is called (its header's title), for what is said about it. */
+  title(id: string): string { return this.#movers.get(id)?.title() ?? id; }
+
+  /** Move a side pane to `side`, before `beforeId` in that column (the end of it when null). */
+  moveSidePane(id: SidePaneId, side: Side, beforeId: SidePaneId | null = null): void {
+    if (isPhone()) return;
+    // A move is seen: a maximized chart gives the screen back first (review r4).
+    this.#setMax(null);
+    this.#plan = moveSide(this.#plan, id, side, beforeId, this.#shown);
+    this.#renderSides(); this.#persist();
+  }
+  /** The two columns exchanged: what stood on the left stands on the right. */
+  swapSides(): void {
+    if (isPhone()) return;
+    this.#setMax(null);
+    this.#plan = swapSides(this.#plan);
+    this.#renderSides(); this.#persist();
   }
 
   /** Set a fixed-height pane's height (its content changed size) and remember it. */
   setPaneHeight(id: string, h: number): void {
     const pane = this.#panes.find(candidate => candidate.id === id);
     if (!pane || pane.height === undefined) return;
+    // A maximized pane is saved at its own height (`savedHeight`), not measured: the new one is written as its own.
+    if (id === this.#max) this.#saved = { ...this.#saved, heights: { ...this.#saved.heights, [id]: Math.round(Math.max(pane.min ?? 70, h)) } };
     this.#setHeight(pane, h); this.#persist();
   }
 
-  /** Header grip that reorders fixed panes by dragging over their neighbours. */
-  #grip(pane: LayoutPane): void {
-    const grip = document.createElement('span'); grip.className = 'grip'; setTip(grip, t('Drag to move this pane'));
-    pane.head!.prepend(grip);
-    grip.addEventListener('pointerdown', e => {
-      if (e.button !== 0) return;
-      e.preventDefault(); grip.setPointerCapture(e.pointerId); pane.root.classList.add('moving');
-      const onMove = (m: PointerEvent) => {
-        const others = this.#panes.filter(p => p !== pane && !p.root.hidden && p.height !== undefined);
-        for (const other of others) {
-          const r = other.root.getBoundingClientRect(), mid = r.top + r.height / 2;
-          const i = this.#panes.indexOf(pane), j = this.#panes.indexOf(other);
-          if ((j < i && m.clientY < mid) || (j > i && m.clientY > mid)) { this.#panes.splice(i, 1); this.#panes.splice(j, 0, pane); this.#reattach(); break; }
-        }
-      };
-      const onUp = () => { pane.root.classList.remove('moving'); grip.removeEventListener('pointermove', onMove); grip.removeEventListener('pointerup', onUp); this.#persist(); };
-      grip.addEventListener('pointermove', onMove); grip.addEventListener('pointerup', onUp);
+  /**
+   * What a pane carries to be moved and closed: a handle to drag it by (its place is the page's to change: either side of the map for a side
+   * pane, between the panes under the map for the others), a menu of the same moves for a keyboard and a touch screen (also on a right click),
+   * and a close button, which hides the pane (the page's switch for it; a side pane's edge tab brings it back). They sit in the pane's own header,
+   * which is a handle all over where it holds no control: a pane under the map carries them at the end of it; a side pane, whose column can be
+   * made as narrow as 200 px, keeps them on the first line behind its name (`.side-head` in styles.css) and lets its first controls join that
+   * line where the column is wide. A title bar of its own above that header (Karl, 2026-11-01: "double header rows") left the header's first line
+   * holding only the "?" and the settings key: three rows where two or one do.
+   */
+  #mover(m: Mover): void {
+    this.#movers.set(m.id, m);
+    const more = el('button', { type: 'button', class: 'pane-more', tip: t('Move, resize or hide this panel'), ariaLabel: t('Move, resize or hide this panel'), onclick: () => this.#menu(m, more) });
+    const closeLabel = m.closeLabel ?? t('Hide this panel');
+    const close = el('button', { type: 'button', class: 'panel-x pane-x', tip: closeLabel, ariaLabel: closeLabel, onclick: () => this.onClose(m.id) });
+    close.dataset.pane = m.id;
+    // A pane under the map can be maximized over the map's column (TradingView's button; a double click on the pane does the same).
+    const max = m.kind === 'strip' ? el('button', { type: 'button', class: 'pane-max', onclick: () => this.toggleMax(m.id) }) : null;
+    if (max) { max.dataset.pane = m.id; this.#maxButtons.set(m.id, max); this.#paintMax(max, false); }
+    const tools = el('div', { class: 'pane-tools' }, ...(max ? [max] : []), more, ...(m.closable ? [close] : []));
+    const handle = m.head;
+    handle.prepend(el('span', { class: 'grip', tip: t('Drag to move this pane') }));
+    if (m.kind === 'side') {
+      // Behind the name, where the CSS puts them on the first line; the break after them ends that line where the pane's controls do not join it.
+      handle.classList.add('side-head');
+      const name = handle.querySelector(':scope > strong');
+      const rest = [tools, el('span', { class: 'side-break', ariaHidden: 'true' })];
+      if (name) name.after(...rest); else handle.append(...rest);
+    } else {
+      handle.classList.add('has-tools'); handle.append(tools);
+    }
+    handle.addEventListener('pointerdown', e => { if (!(e.target instanceof Element) || e.target.closest('button, select, input, textarea, a, label, canvas')) return; this.#startDrag(m, e); });
+    handle.addEventListener('contextmenu', e => {
+      if (isPhone() || !(e.target instanceof Element) || e.target.closest('select, input, textarea, button, a, canvas')) return;
+      e.preventDefault(); this.#menu(m, more);
     });
   }
+
+  /** The moves a pane's menu offers now: only those that go somewhere. */
+  #menu(m: Mover, anchor: HTMLElement): void {
+    const items: MenuItem[] = [];
+    if (m.kind === 'side') {
+      const id = m.id as SidePaneId, side = sideOf(this.#plan, id);
+      items.push({ id: side === 'left' ? 'right' : 'left', label: side === 'left' ? t('Move to the right side') : t('Move to the left side') });
+      if (nudge(this.#plan, id, -1, this.#shown) !== this.#plan) items.push({ id: 'up', label: t('Move up') });
+      if (nudge(this.#plan, id, 1, this.#shown) !== this.#plan) items.push({ id: 'down', label: t('Move down') });
+      items.push({ id: 'swap', label: t('Swap the two sides') });
+    } else {
+      items.push({ id: 'max', label: this.#max === m.id ? t('Restore the panels') : t('Maximize this panel') });
+      // Not while one is maximized: the move would not be seen.
+      const fixed = this.#panes.filter(p => !p.root.hidden && p.height !== undefined), i = this.#max !== null ? -1 : fixed.findIndex(p => p.id === m.id);
+      if (i > 0) items.push({ id: 'up', label: t('Move up') });
+      if (i >= 0 && i < fixed.length - 1) items.push({ id: 'down', label: t('Move down') });
+    }
+    items.push({ id: 'reset', label: t('Reset the size') });
+    if (m.closable) items.push({ id: 'hide', label: m.closeLabel ?? t('Hide this panel') });
+    openMenu(anchor, items, '', { onPreview: () => {}, onSelect: action => this.#act(m, action) });
+  }
+
+  #act(m: Mover, action: string): void {
+    if (action === 'hide') { this.onClose(m.id); return; }
+    if (m.kind === 'side') {
+      const id = m.id as SidePaneId, key = sideOf(this.#plan, id) === 'left' ? 'leftW' : 'rightW';
+      if (action === 'left' || action === 'right') this.moveSidePane(id, action);
+      else if (action === 'up' || action === 'down') { this.#plan = nudge(this.#plan, id, action === 'up' ? -1 : 1, this.#shown); this.#renderSides(); this.#persist(); }
+      else if (action === 'swap') this.swapSides();
+      else if (action === 'reset') { this.#plan[key] = null; for (const other of this.#plan[sideOf(this.#plan, id)]) delete this.#plan.weights[other]; this.#renderSides(); this.#persist(); }
+      return;
+    }
+    if (action === 'max') { this.toggleMax(m.id); return; }
+    const fixed = this.#panes.filter(p => !p.root.hidden && p.height !== undefined), i = fixed.findIndex(p => p.id === m.id), pane = fixed[i];
+    if (action === 'up' && i > 0) this.#moveStrip(m.id, fixed[i - 1]!.id);
+    else if (action === 'down' && i >= 0 && i < fixed.length - 1) this.#moveStrip(m.id, fixed[i + 2]?.id ?? null);
+    else if (action === 'reset' && pane) this.#resetHeights([pane]);
+  }
+
+  /** The panes under the map (those with a height of their own) given back the height they start with; the map keeps what is left. */
+  #resetHeights(panes: readonly LayoutPane[]): void {
+    const heights = { ...this.#saved.heights };
+    for (const pane of panes) {
+      if (pane.height === undefined) continue;
+      // Kept as that height, not left out: a window too short for it shows the pane smaller (`#fit`), and what is kept is what a taller window gives back.
+      heights[pane.id] = pane.height; this.#setHeight(pane, pane.height);
+    }
+    this.#saved = { ...this.#saved, heights };
+    this.#fit(); this.#persist();
+  }
+
+  /** A pane under the map put before `beforeId` (the last when that is null), among the panes under the map: the map keeps its own place. */
+  #moveStrip(id: string, beforeId: string | null): void {
+    if (isPhone()) return;
+    const fixed = this.#panes.filter(p => p.height !== undefined).map(p => p.id).filter(x => x !== id);
+    const at = beforeId === null ? -1 : fixed.indexOf(beforeId);
+    if (at < 0) fixed.push(id); else fixed.splice(at, 0, id);
+    const ids = arrangeOrder(fixed, this.#panes.map(p => ({ id: p.id, fixed: p.height !== undefined })));
+    if (ids.join() === this.#panes.map(p => p.id).join()) return;
+    this.#panes = ids.map(i => this.#panes.find(p => p.id === i)!);
+    this.#reattach(); this.#persist();
+  }
+
+  /** The page measured for `dropTarget`: where the columns, the panes in them and the map's column are now. */
+  #scene(): DropScene {
+    const box = (node: Element): Box => { const r = node.getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height }; };
+    const column = (side: Side): DropScene['columns'][Side] => {
+      const region = this.#regions[side], open = region.dataset.state === 'open';
+      return { box: box(region), open, panes: open ? openIn(this.#plan, side, this.#visible()).map(id => ({ id, box: box(this.#sidePanes.get(id)!.root) })) : [] };
+    };
+    return {
+      main: box(this.main), edge: Math.max(260, Math.round(window.innerWidth * 0.2)), columns: { left: column('left'), right: column('right') },
+      strip: { box: box(this.chart), panes: this.#panes.filter(p => !p.root.hidden).map(p => ({ id: p.id, box: box(p.root), fixed: p.height !== undefined })) },
+    };
+  }
+
+  /**
+   * Drag a pane by its grip: a small label follows the pointer and a mark shows where the pane would stand (a bar between two panes, a strip
+   * along the edge where a column is not there); letting go moves it there, Escape or a drop anywhere else leaves it.
+   */
+  #startDrag(m: Mover, down: PointerEvent): void {
+    if (down.button !== 0 || isPhone()) return;
+    down.preventDefault();
+    if (m.kind === 'strip' && this.#max !== null) return;
+    const grip = down.currentTarget as HTMLElement;
+    try { grip.setPointerCapture(down.pointerId); } catch { /* the drag does not need it */ }
+    const drag = m.kind === 'side' ? { kind: 'side' as const, id: m.id as SidePaneId } : { kind: 'strip' as const, id: m.id };
+    let live = false, target: DropTarget | null = null, scene: DropScene | null = null, ghost: HTMLElement | null = null, mark: HTMLElement | null = null;
+    const move = (e: PointerEvent): void => {
+      if (e.pointerId !== down.pointerId) return;
+      if (!live) {
+        if (Math.hypot(e.clientX - down.clientX, e.clientY - down.clientY) < 4) return;
+        live = true; scene = this.#scene();
+        document.body.classList.add('pane-dragging'); m.root.classList.add('moving');
+        ghost = el('div', { class: 'pane-ghost' }, el('i', { class: 'grip-mark' }), el('span', { textContent: m.title() }));
+        mark = el('div', { class: 'drop-mark', hidden: true });
+        document.body.append(mark, ghost);
+      }
+      ghost!.style.transform = `translate(${Math.round(e.clientX + 14)}px, ${Math.round(e.clientY + 12)}px)`;
+      target = dropTarget(scene!, drag, e.clientX, e.clientY);
+      mark!.hidden = target === null;
+      if (target) {
+        mark!.className = target.kind === 'side' && target.area ? 'drop-mark area' : 'drop-mark';
+        Object.assign(mark!.style, { left: `${target.box.x}px`, top: `${target.box.y}px`, width: `${target.box.w}px`, height: `${target.box.h}px` });
+      }
+    };
+    const stop = (commit: boolean): void => {
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', cancel); window.removeEventListener('keydown', key, true);
+      try { grip.releasePointerCapture(down.pointerId); } catch { /* it was never held */ }
+      ghost?.remove(); mark?.remove(); document.body.classList.remove('pane-dragging'); m.root.classList.remove('moving');
+      if (live && commit && target) { if (target.kind === 'side') this.moveSidePane(m.id as SidePaneId, target.side, target.beforeId); else this.#moveStrip(m.id, target.beforeId); }
+    };
+    const up = (e: PointerEvent): void => { if (e.pointerId === down.pointerId) stop(true); };
+    const cancel = (e: PointerEvent): void => { if (e.pointerId === down.pointerId) stop(false); };
+    const key = (e: KeyboardEvent): void => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); stop(false); } };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up); window.addEventListener('pointercancel', cancel); window.addEventListener('keydown', key, true);
+  }
   #reattach(): void { for (const p of this.#panes) this.chart.append(p.root); this.rebuild(); }
+
+  /** The pane of the map's column maximized now, or null. */
+  get maximized(): string | null { return this.#max; }
+  /** The pane of the map's column under the pointer now (where a mouse last was), or null. */
+  get pointed(): string | null {
+    const at = this.#pointer, hit = at ? document.elementFromPoint(at.x, at.y) : null;
+    return hit ? this.#panes.find(p => p.root.contains(hit))?.id ?? null : null;
+  }
+  #column(): { id: string; open: boolean }[] { return this.#panes.map(p => ({ id: p.id, open: !p.root.hidden })); }
+  #visibleKey(): string { return columnKey(this.#column()); }
+  /** Whether maximizing `id` would change anything (`canMaximize`): a desktop, the pane open, and another pane open in the column or a side pane open. */
+  canMax(id: string): boolean { return canMaximize(id, this.#column(), isPhone(), this.#shown.cvd || this.#shown.book); }
+  /** Maximize `id`, or give the column back when it is the one maximized: true when either happened. */
+  toggleMax(id: string): boolean {
+    if (this.#max === id) { this.#setMax(null); return true; }
+    if (!this.canMax(id)) return false;
+    this.#setMax(id);
+    return true;
+  }
+  /**
+   * Show `id` alone over the map's column, the columns beside it folded away (null: every pane again). The pane stands over the column and the others are hidden from sight, not
+   * from the layout: their sizes and the map's frames go on. A pane under the map leaves the map's time axis in sight under it (it has none of its
+   * own): the map, at the height it had, is put at the column's bottom, so its axis is the column's last strip.
+   */
+  #setMax(id: string | null): void {
+    if (id === this.#max) return;
+    const map = this.#panes.find(p => p.height === undefined), lower = id !== null && map !== undefined && map.id !== id;
+    if (lower) this.chart.style.setProperty('--max-map-h', `${Math.round(this.#height(map))}px`); else this.chart.style.removeProperty('--max-map-h');
+    this.chart.style.setProperty('--max-axis-h', `${this.mapAxisH}px`);
+    for (const p of this.#panes) p.root.classList.toggle('maxed', p.id === id);
+    this.chart.classList.toggle('has-max', id !== null);
+    this.chart.classList.toggle('max-lower', lower);
+    this.#max = id; this.#maxKey = id === null ? '' : this.#visibleKey();
+    for (const [pid, button] of this.#maxButtons) this.#paintMax(button, pid === id);
+    // The columns beside the map folded away, or back (`#visible`, `#applyColumns`); given back, the panes fitted to the column again (a fit made
+    // meanwhile may have left them too tall for it).
+    this.#renderSides();
+    if (id === null) this.#fit();
+    this.onMaximized(id);
+  }
+  /** A maximize button as its pane is: lit, saying it gives the column back, while the pane is maximized. */
+  #paintMax(button: HTMLButtonElement, on: boolean): void {
+    const words = on ? t('Restore the panels (or double-click the pane)') : t('Maximize this panel (or double-click it)');
+    setTip(button, words); button.setAttribute('aria-label', words); button.setAttribute('aria-pressed', String(on));
+    button.dataset.state = on ? 'on' : 'off';
+  }
 }

@@ -43,6 +43,18 @@ export const sizeBucket = (usd: number): number => { let bucket = 0; for (let i 
 export interface TradeStats { buyN: number; sellN: number; buy: number[]; sell: number[]; v?: number; big?: number[] }
 /** The version of the statistics this recorder writes: 2 counts market orders (the list of large ones is an optional addition, read by older code as nothing). */
 export const STATS_VERSION = 2;
+/**
+ * Whether `list` (signed USD, a buy positive) can be a minute's list of large orders: its buys and its sells each add up to the minute's USD
+ * from the second size bucket up, to $1 or a millionth. A list rebuilt from the prints is kept only then (`fillLists`, and the recorded
+ * history's import, app/browser/history-import.ts).
+ */
+export function listFits(list: readonly number[], stats: Pick<TradeStats, 'buy' | 'sell'>): boolean {
+  const sum = (values: readonly number[]): number => { let s = 0; for (let i = 1; i < values.length; i++) s += values[i]!; return s; };
+  const agrees = (listed: number, boxes: number): boolean => Math.abs(listed - boxes) <= Math.max(1, 1e-6 * boxes);
+  let buys = 0, sells = 0;
+  for (const v of list) if (v > 0) buys += v; else sells -= v;
+  return agrees(buys, sum(stats.buy)) && agrees(sells, sum(stats.sell));
+}
 /** The list of a minute with no large order yet: one shared empty list, replaced at the first order (a week holds about 300,000 instrument-minutes). */
 const NO_BIG = Object.freeze([]) as unknown as number[];
 const emptyStats = (): TradeStats => ({ buyN: 0, sellN: 0, buy: new Array<number>(SIZE_EDGES.length).fill(0), sell: new Array<number>(SIZE_EDGES.length).fill(0), v: STATS_VERSION });
@@ -124,6 +136,8 @@ export interface ProfileInstrument {
 export interface ProfileAnswer { from: number; to: number; instruments: ProfileInstrument[] }
 /** The most instruments one profile question may name. */
 export const MAX_PROFILE_INSTRUMENTS = 48;
+/** The longest window a profile question may cover (a server keeps a week of trades, so nothing older is there to add up). */
+export const MAX_PROFILE_SPAN_MS = 8 * 86_400_000;
 
 /** A profile answer checked field by field against the instruments asked for: the answer, or null when it is anything else. */
 export function parseProfile(value: unknown, ids: readonly string[]): ProfileAnswer | null {
@@ -401,7 +415,7 @@ export class FootprintRecorder {
   #rowsIn(id: string, from: number, to: number): Map<number, Bins> {
     const out = new Map<number, Bins>(), minutes = this.#minutes.get(id);
     if (this.#cold) this.#readBack(id, Math.max(from, this.#cutoff), Math.min(to, this.#hotFrom), out);
-    if (minutes) for (const [t, bins] of [...minutes].sort((a, b) => a[0] - b[0])) if (t >= from && t < to) out.set(t, bins);
+    if (minutes) { const inside: [number, Bins][] = []; for (const [t, bins] of minutes) if (t >= from && t < to) inside.push([t, bins]); for (const [t, bins] of inside.sort((a, b) => a[0] - b[0])) out.set(t, bins); }
     return out;
   }
 
@@ -441,15 +455,17 @@ export class FootprintRecorder {
     const held = this.#hours.get(id)?.get(hour);
     if (held && held.step === step) return held;
     if (!build) return null;
-    const sum = new Map<number, [number, number]>(), into = (bin: number, buy: number, sell: number): void => { const s = sum.get(bin); if (s) { s[0] += buy; s[1] += sell; } else sum.set(bin, [buy, sell]); };
+    const sum = new Map<number, [number, number, number, number]>();
+    const into = (bin: number, buy: number, sell: number, buyN: number, sellN: number): void => { const s = sum.get(bin); if (s) { s[0] += buy; s[1] += sell; s[2] += buyN; s[3] += sellN; } else sum.set(bin, [buy, sell, buyN, sellN]); };
     // An hour only the store holds (no minute of it in memory, none kept read back) is added up from the stored rows as they come: making
     // each minute's map and keeping the hour read back cost more than adding it (measured 2026-10-14).
     const minutes = this.#minutes.get(id), onlyStored = this.#cold && hour + HOUR <= this.#hotFrom && !this.#coldHours.has(`${id}|${hour}`)
       && !(minutes && Array.from({ length: HOUR / MINUTE }, (_, i) => hour + i * MINUTE).some(t => minutes.has(t)));
-    if (onlyStored) for (const row of this.#store!.range!(id, hour, hour + HOUR)) for (const b of row.bins) into(b[0], b[1], b[2]);
-    else for (const bins of this.#rowsIn(id, hour, hour + HOUR).values()) for (const [bin, cell] of bins) into(bin, cell[0], cell[1]);
-    const cells = new Float64Array(3 * sum.size); let i = 0;
-    for (const [bin, [buy, sell]] of sum) { cells[i++] = bin; cells[i++] = buy; cells[i++] = sell; }
+    // A stored minute that counts orders by price has five numbers a row (`StoredBin`), any other three.
+    if (onlyStored) for (const row of this.#store!.range!(id, hour, hour + HOUR)) for (const b of row.bins) into(b[0], b[1], b[2], b[3] ?? 0, b[4] ?? 0);
+    else for (const bins of this.#rowsIn(id, hour, hour + HOUR).values()) for (const [bin, cell] of bins) into(bin, cell[0], cell[1], cell[2], cell[3]);
+    const cells = new Float64Array(HOUR_CELL * sum.size); let i = 0;
+    for (const [bin, [buy, sell, buyN, sellN]] of sum) { cells[i++] = bin; cells[i++] = buy; cells[i++] = sell; cells[i++] = buyN; cells[i++] = sellN; }
     let byHour = this.#hours.get(id); if (!byHour) { byHour = new Map(); this.#hours.set(id, byHour); }
     const rows: HourRows = { step, cells }; byHour.set(hour, rows);
     return rows;
@@ -466,6 +482,12 @@ export class FootprintRecorder {
   get instruments(): string[] { return [...this.#sums.keys()]; }
   /** Whether the minute starting at `t` has rows for `id` (in memory or in the store). */
   holds(id: string, t: number): boolean { return this.#sums.get(id)?.has(t) === true; }
+  /** The first and the last minute recorded for `id` (Infinity and -Infinity when none is). */
+  #recordedSpan(id: string): { first: number; last: number } {
+    let first = Infinity, last = -Infinity;
+    for (const t of this.#sums.get(id)?.keys() ?? []) { if (t < first) first = t; if (t > last) last = t; }
+    return { first, last };
+  }
   /** The start (ms) of the newest minute recorded for `id`, or 0. */
   lastMinute(id: string): number { let newest = 0; for (const t of this.#sums.get(id)?.keys() ?? []) if (t > newest) newest = t; return newest; }
 
@@ -648,15 +670,11 @@ export class FootprintRecorder {
       const minute = Math.floor(p.t / MINUTE) * MINUTE, list = minutes.get(minute);
       if (list) list.push(p.side === 'buy' ? p.usd : -p.usd); else minutes.set(minute, [p.side === 'buy' ? p.usd : -p.usd]);
     }
-    const sum = (values: readonly number[]): number => { let s = 0; for (let i = 1; i < values.length; i++) s += values[i]!; return s; };
-    const agrees = (listed: number, boxes: number): boolean => Math.abs(listed - boxes) <= Math.max(1, 1e-6 * boxes);
     let filled = 0, mismatched = 0;
     for (const [id, minutes] of this.#stats) for (const [t, stats] of minutes) {
       if (stats.big !== undefined || t < from || t >= to) continue;
       const list = found.get(id)?.get(t) ?? NO_BIG;
-      let buys = 0, sells = 0;
-      for (const v of list) if (v > 0) buys += v; else sells -= v;
-      if (!agrees(buys, sum(stats.buy)) || !agrees(sells, sum(stats.sell))) { mismatched++; continue; }
+      if (!listFits(list, stats)) { mismatched++; continue; }
       stats.big = list; filled++;
     }
     return { filled, mismatched };
@@ -670,27 +688,110 @@ export class FootprintRecorder {
   }
 
   /** Traded volume by price for each of `ids` over the minutes that start in [from, to), rows merged to `rowStep` (see `ProfileAnswer`). */
-  profile(ids: readonly string[], from: number, to: number, rowStep: number): ProfileAnswer {
+  profile(ids: readonly string[], from: number, to: number, rowStep: number): ProfileAnswer { return drain(this.#profileRun(ids, from, to, rowStep)); }
+
+  /**
+   * The same answer, read a few hours of a market at a time with the event loop let go between (as `prepare`): a week of twenty-seven markets
+   * read in one go held a server's only thread for 7 to 9 seconds (measured 2026-10-18), and nothing else it does, the feeds included, ran meanwhile.
+   */
+  profileYielding(ids: readonly string[], from: number, to: number, rowStep: number): Promise<ProfileAnswer> { return spread(this.#profileRun(ids, from, to, rowStep)); }
+
+  /** The answer of `profile`, paused (yielded) after every slice of rows read: each minute is read once, from wherever it is held at that moment. */
+  *#profileRun(ids: readonly string[], from: number, to: number, rowStep: number): Generator<void, ProfileAnswer> {
     const instruments: ProfileInstrument[] = [];
     for (const id of ids) {
       const fine = this.#steps.get(id), sums = this.#sums.get(id);
       if (!fine || !sums || !sums.size) { instruments.push({ id, step: 0, rows: [], minutes: 0, first: null, earliest: null }); continue; }
       const factor = Math.max(1, Math.round(rowStep / fine)), step = fine * factor, rows = new Map<number, [number, number, number, number]>();
-      let count = 0, counted = 0, first: number | null = null, earliest: number | null = null;
+      let count = 0, counted = 0, first: number | null = null, earliest: number | null = null, newest = -Infinity;
       // Every recorded minute has its sums held; the rows of those in the window are read where they are held.
       for (const [t, sum] of sums) {
         if (earliest === null || t < earliest) earliest = t;
+        if (t > newest) newest = t;
         if (t < from || t >= to) continue;
         count++; if (first === null || t < first) first = t;
         if (sum.counted) counted++;
       }
-      if (count) for (const bins of this.#rowsIn(id, from, to).values()) {
-        for (const [bin, [buy, sell, buyN, sellN]] of bins) { const row = Math.floor(bin / factor), cell = rows.get(row) ?? [0, 0, 0, 0]; cell[0] += buy; cell[1] += sell; cell[2] += buyN; cell[3] += sellN; rows.set(row, cell); }
+      // No minute outside the recorded stretch has rows, so a window reaching before it or ahead of it (a week not over yet) reads only inside it.
+      const end = Math.min(to, newest + MINUTE);
+      const add = (bin: number, buy: number, sell: number, buyN: number, sellN: number): void => {
+        const row = Math.floor(bin / factor), cell = rows.get(row) ?? [0, 0, 0, 0]; cell[0] += buy; cell[1] += sell; cell[2] += buyN; cell[3] += sellN; rows.set(row, cell);
+      };
+      // Each ended hour inside the window is read added together (`#hourRows`, kept once built, dropped when a minute of it changes), the
+      // minutes around them one by one: a week of 27 markets read minute by minute took 15 s of a server's time (measured 2026-10-19).
+      if (count) for (let a = Math.max(from, earliest!), read = 0; a < end;) {
+        const hour = a % HOUR === 0 && a + HOUR <= end ? this.#hourRows(id, a, true) : null;
+        if (hour && hour.step === fine) {
+          for (let i = 0; i < hour.cells.length; i += HOUR_CELL) add(hour.cells[i]!, hour.cells[i + 1]!, hour.cells[i + 2]!, hour.cells[i + 3]!, hour.cells[i + 4]!);
+          a += HOUR; read += HOUR;
+        } else {
+          const b = Math.min(end, (Math.floor(a / HOUR) + 1) * HOUR);
+          for (const bins of this.#rowsIn(id, a, b).values()) for (const [bin, [buy, sell, buyN, sellN]] of bins) add(bin, buy, sell, buyN, sellN);
+          read += b - a; a = b;
+        }
+        if (read >= READ_SLICE_MS) { read = 0; yield; }
       }
       const sorted = [...rows].sort((a, b) => a[0] - b[0]);
       instruments.push({ id, step, rows: sorted.map(([row, [buy, sell]]): FootprintRow => [row * step, buy, sell]), minutes: count, first, earliest, counts: sorted.map(([, c]): [number, number] => [c[2], c[3]]), counted });
     }
     return { from, to, instruments };
+  }
+
+  /**
+   * Amounts spread over the prices that traded while they came about (the open-interest change by price, shared/oi-profile.ts): each
+   * interval's signed `amount` over the rows of `id`'s minutes that start in [from, to), by each row's share of their USD. In coins
+   * (`coins`) a row's part is valued at its own price, else it is taken as USD. Positive parts add up in a row's first side, negative ones
+   * (as magnitudes) in its second, on rows merged to `rowStep`. An interval whose minutes traded nothing here is not placed: its amount, in
+   * USD (coins at `price`), is `unplaced`, signed. The parts of an interval add up to its amount: nothing is made or lost by the spreading.
+   */
+  spread(id: string, rowStep: number, intervals: readonly { from: number; to: number; amount: number }[], coins: boolean, price: number): { step: number; rows: FootprintRow[]; unplaced: number } {
+    const fine = this.#steps.get(id), usdOf = (amount: number): number => amount * (coins ? price : 1);
+    let unplaced = 0, lo = Infinity, hi = -Infinity;
+    for (const i of intervals) { if (i.from < lo) lo = i.from; if (i.to > hi) hi = i.to; }
+    if (!fine || !(hi > lo)) { for (const i of intervals) unplaced += usdOf(i.amount); return { step: 0, rows: [], unplaced }; }
+    // Minutes older than what memory holds (a server's day) are weighed by the prices of their hours added together (`#hourRows`, the ones
+    // the volume profile reads): reading a week of them back minute by minute took 3 s of a server's time (measured 2026-10-19). Within
+    // memory every change is spread over its own minutes.
+    const hot = this.#cold ? this.#hotFrom : -Infinity;
+    const factor = Math.max(1, Math.round(rowStep / fine)), step = fine * factor, out = new Map<number, [number, number]>(), minutes = this.#rowsIn(id, Math.max(lo, hot), hi);
+    /** Spread `up` (added) and `down` (removed, a magnitude) over these [bin, USD] weights; false when nothing traded under them. */
+    const spreadOver = (cells: readonly [number, number][], total: number, up: number, down: number): boolean => {
+      if (!(total > 0)) return false;
+      for (const [bin, usd] of cells) {
+        const w = usd / total * (coins ? (bin + 0.5) * fine : 1), row = Math.floor(bin / factor), sides = out.get(row) ?? [0, 0];
+        sides[0] += up * w; sides[1] += down * w; out.set(row, sides);
+      }
+      return true;
+    };
+    const hourCells = (from: number, to: number): { cells: [number, number][]; total: number } => {
+      const cells: [number, number][] = []; let total = 0;
+      for (let h = Math.floor(from / HOUR) * HOUR; h < to; h += HOUR) {
+        const hour = this.#hourRows(id, h, true); if (!hour || hour.step !== fine) continue;
+        for (let i = 0; i < hour.cells.length; i += HOUR_CELL) { const usd = hour.cells[i + 1]! + hour.cells[i + 2]!; cells.push([hour.cells[i]!, usd]); total += usd; }
+      }
+      return { cells, total };
+    };
+    // Changes weighed by one and the same hour share its weights: added up per hour (increases and decreases apart) and spread once.
+    const byHour = new Map<number, [number, number]>();
+    for (const { from, to, amount } of intervals) {
+      if (!amount) continue;
+      const up = Math.max(amount, 0), down = Math.max(-amount, 0);
+      if (from < hot) {
+        const h = Math.floor(from / HOUR) * HOUR;
+        if (to <= h + HOUR) { const sum = byHour.get(h) ?? [0, 0]; sum[0] += up; sum[1] += down; byHour.set(h, sum); continue; }
+        const { cells, total } = hourCells(from, to);
+        if (!spreadOver(cells, total, up, down)) unplaced += usdOf(amount);
+        continue;
+      }
+      const cells: [number, number][] = []; let total = 0;
+      for (let t = Math.ceil(from / MINUTE) * MINUTE; t < to; t += MINUTE) { const bins = minutes.get(t); if (bins) for (const [bin, cell] of bins) { cells.push([bin, cell[0] + cell[1]]); total += cell[0] + cell[1]; } }
+      if (!spreadOver(cells, total, up, down)) unplaced += usdOf(amount);
+    }
+    for (const [h, [up, down]] of byHour) {
+      const { cells, total } = hourCells(h, h + HOUR);
+      if (!spreadOver(cells, total, up, down)) unplaced += usdOf(up - down);
+    }
+    return { step, rows: [...out].sort((a, b) => a[0] - b[0]).map(([row, [up, down]]): FootprintRow => [row * step, up, down]), unplaced };
   }
 
   /**
@@ -770,7 +871,7 @@ export class FootprintRecorder {
           const hour = this.#hourRows(id, h, true);
           if (!hour || hour.step !== fine) continue;
           minuteRows(at, h);
-          for (let i = 0; i < hour.cells.length; i += 3) add(hour.cells[i]!, hour.cells[i + 1]! + hour.cells[i + 2]!);
+          for (let i = 0; i < hour.cells.length; i += HOUR_CELL) add(hour.cells[i]!, hour.cells[i + 1]! + hour.cells[i + 2]!);
           at = h + HOUR;
         }
         minuteRows(at, w.to);
@@ -907,7 +1008,7 @@ export class FootprintRecorder {
           if (!held) { const a = Math.max(h, from), b = Math.min(h + HOUR, to), last = rest[rest.length - 1]; if (last && last[1] === a) last[1] = b; else rest.push([a, b]); continue; }
           let rows: Map<number, [number, number, Float64Array | null]> | null = null;
           if (sums) for (let t = h; t < h + HOUR; t += MINUTE) if (sums.has(t)) rows = take(t);
-          if (rows) for (let i = 0; i < held.cells.length; i += 3) add(rows, held.cells[i]!, held.cells[i + 1]!, held.cells[i + 2]!);
+          if (rows) for (let i = 0; i < held.cells.length; i += HOUR_CELL) add(rows, held.cells[i]!, held.cells[i + 1]!, held.cells[i + 2]!);
         }
         if (hi < to) { const a = Math.max(hi, from), last = rest[rest.length - 1]; if (last && last[1] === a) last[1] = to; else rest.push([a, to]); }
       } else rest.push([from, to]);
@@ -932,12 +1033,33 @@ export class FootprintRecorder {
   }
 }
 
-/** An ended hour of one instrument's rows added together: [bin, buy, sell] in a row, on the step it was recorded at. */
+/**
+ * An ended hour of one instrument's rows added together: [bin, buy, sell, buy orders, sell orders] in a row (`HOUR_CELL` numbers), on the
+ * step it was recorded at; the orders are those of its minutes that count them by price (zero in the others, as in a minute's own rows).
+ */
 interface HourRows { step: number; cells: Float64Array }
+const HOUR_CELL = 5;
 /** What a whole hour held added together costs a question's budget (in instrument-minutes): about what two minutes in memory do. */
 const HELD_HOUR_COST = 2;
 /** A preparation lets go of the event loop after this long (ms). */
 const PREPARE_TURN_MS = 8;
+/** The stretch of a market's minutes the profile and value-area questions read between two pauses (whole hours, so a stored hour is read once). */
+const READ_SLICE_MS = 6 * HOUR;
+
+/** Run a generator written to be paused (it yields where it may be) to its end without pausing. */
+function drain<T>(run: Generator<void, T>): T {
+  for (;;) { const step = run.next(); if (step.done) return step.value; }
+}
+
+/** Run such a generator to its end, letting the event loop go whenever a turn has lasted PREPARE_TURN_MS, so other work runs between the slices. */
+async function spread<T>(run: Generator<void, T>): Promise<T> {
+  let turn = performance.now();
+  for (;;) {
+    const step = run.next();
+    if (step.done) return step.value;
+    if (performance.now() - turn > PREPARE_TURN_MS) { await new Promise<void>(resolve => setTimeout(resolve, 0)); turn = performance.now(); }
+  }
+}
 
 /**
  * The recorder's answer to a sizes question (see `SizesAnswer`): each window is the last N whole minutes up to and including the open one,

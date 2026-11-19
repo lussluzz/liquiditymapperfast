@@ -5,10 +5,12 @@ import type { Liquidation } from '../shared/liquidations.ts';
 import type { PrintSumsAnswer } from '../shared/print-sums.ts';
 import type { FlowFrame, FlowMinutesFrame, FlowUpdate } from '../shared/flow.ts';
 import type { ProfileAnswer, RangeAnswer, SizesAnswer, ValueAreaAnswer } from '../shared/footprint.ts';
-import type { AbsorptionAnswer, AbsorptionGroup, AbsorptionMinute } from '../shared/absorption.ts';
+import type { OiProfileAnswer } from '../shared/oi-profile.ts';
+import type { AbsorptionAnswer, AbsorptionGroup, AbsorptionMinute, AbsorptionProfileAnswer } from '../shared/absorption.ts';
 import type { CoverageAnswer, CoverageMetric } from '../shared/coverage.ts';
 import type { RecoveryReport, RecoveryRequest } from '../shared/engine.ts';
-import type { ColumnsFrame, LevelsFrame } from './wire.ts';
+import type { PriceHistoryAnswer } from '../shared/price-history.ts';
+import type { ColumnsFrame, LevelsFrame, LtFrame } from './wire.ts';
 import type { Bar } from './panes/footprint.ts';
 import type { CandleRow, LayerLevel, Market, OiBar } from './store.ts';
 
@@ -27,6 +29,7 @@ export interface TickMessage {
 export interface LayersMessage { t: 'layers'; layers: Record<string, LayerLevel[]> }
 export interface PrintsMessage { t: 'prints'; items: unknown[] }
 export interface LiquidationsMessage { t: 'liquidations'; items: unknown[] }
+export interface OiPushMessage { t: 'oi'; items: unknown[] }
 export interface LiveHandlers {
   /** `failures` counts the connections lost since the last one that worked; `host` is the place being tried. */
   onOpen(): void; onClose(failures: number, host: string): void;
@@ -41,8 +44,16 @@ export interface LiveHandlers {
   onTape?(batch: TapeBatch): void;
   /** Absorption groups found and minutes settled (checked already). */
   onAbsorption?(groups: AbsorptionGroup[], minutes: AbsorptionMinute[]): void;
+  /** New open-interest readings the moment the source has them (each checked by the caller before the bars are touched). */
+  onOiPush?(items: unknown[]): void;
   /** A gap of `id` was filled from the venue's trade history over [from, to): recovered trades, never to flash or sound. */
   onRecovered?(id: string, from: number, to: number): void;
+  /**
+   * The source's recordings and recorded history are in (the browser reads them after its feeds start): where the recording begins has
+   * moved back, and the flow, answered from the live seconds alone until now, is asked for again. `columnsEarly`: the map's columns were
+   * answered meanwhile from the newest recordings alone, and are asked for whole again too.
+   */
+  onHistory?(columnsEarly?: boolean): void;
 }
 
 /** Executions per candle for a window, as the footprint draws them. */
@@ -86,25 +97,68 @@ export type SavingState = 'server' | 'here' | 'other' | 'memory' | 'failed' | 's
  */
 export interface DataSource {
   readonly kind: 'server' | 'browser';
-  bootstrap(): Promise<BootstrapState>;
+  /**
+   * `prefer`: the market the page expects to open on. A source that would wait for a first live price to choose one (the browser) answers
+   * at once when that market is listed; its reference market and mark price may then be missing, and come with a later call.
+   */
+  bootstrap(options?: { prefer?: string }): Promise<BootstrapState>;
   /** `tape`: whether the page draws the trade dust (a server sends its batches only to a page that asked; the browser engine always does). */
   connect(handlers: LiveHandlers): { close(): void; tape(on: boolean): void };
   candles(inst: string, tf: string, from: number, to: number): Promise<CandleRow[]>;
+  /** Exchange history for the display-only price overview, with its own source and resolution; optional on older sources. */
+  priceHistory?(inst: string, tf: string, from: number, to: number, signal?: AbortSignal): Promise<PriceHistoryAnswer>;
   /** `usd`: an inverse market's own USD in place of its coins (the readings that kept one; an older source ignores it and answers coins). */
   oi(inst: string, tf: string, from: number, to: number, usd?: boolean): Promise<OiBar[]>;
   /**
    * A venue's published long/short readings for one market (shared/long-short.ts): `metric` is the Binance series chosen. `signal` cancels the
-   * request; a source whose requests are shared by every question (the browser engine's cache) may answer anyway.
+   * request; a source whose requests are shared by every question (the browser engine's cache) may answer anyway. `budgetMs`: answer within
+   * about that long with what is held, `pending` while the venue is still being read (a server from before it waits for the read).
    */
-  longShort(inst: string, metric: LsMetric, tf: string, from: number, to: number, signal?: AbortSignal): Promise<LsSeries>;
+  longShort(inst: string, metric: LsMetric, tf: string, from: number, to: number, signal?: AbortSignal, budgetMs?: number): Promise<LsSeries>;
   /** Large trades in [from, to), oldest first. */
-  /** Large market orders in [from, to) from `minUsd` (the recording's floor when absent), the newest few thousand of them. */
+  /** Large market orders in [from, to) from `minUsd` (the recording's floor when absent), the largest few thousand of them. */
   prints(from: number, to: number, minUsd?: number): Promise<Print[]>;
   /** Liquidations in a window, from the smallest kept or `minUsd` (a server from before them has none). */
   liquidations?(from: number, to: number, minUsd?: number): Promise<Liquidation[]>;
   /** Whale VWAP sums of `ids` in [from, to) from the size band at `minUsd` up, in steps of `stepMs` (a server from before them answers 404). */
   printSums?(ids: string[], from: number, to: number, minUsd: number, stepMs: number): Promise<PrintSumsAnswer>;
-  columns(ids: string[], from: number, to: number, stepMs: number): Promise<ColumnsFrame>;
+  /**
+   * `close`: each window's book at its close, not its average (the scripts' depth); a source from before answers averages, without `at`.
+   * `early`: the map's own load (`Hub.loadColumns`), which a browser source may answer from its newest recordings while the rest of its day
+   * is read back, saying so when the history lands (`LiveHandlers.onHistory`); every other question is answered from the whole recordings.
+   */
+  columns(ids: string[], from: number, to: number, stepMs: number, close?: boolean, early?: boolean): Promise<ColumnsFrame>;
+  /** Whether the map is drawn from the browser's newest recordings alone for now (a load answered from them, its history not in yet). */
+  previewing?(): boolean;
+  /**
+   * A source whose columns reach back past its own recordings (the browser's, from the long history's tiles: app/archive/) says when more of
+   * them have come; the hub then asks again for what it holds. Optional: the others answer everything they have at once.
+   */
+  setArchiveListener?(listener: (change: { level: number; from: number; to: number } | null) => void): void;
+  /**
+   * The columns of [from, to) at `stepMs` again after the long history brought that range (spliced into what the worker holds); `grids`, per
+   * book, the price grid the page holds its columns on.
+   */
+  archiveRange?(ids: string[], from: number, to: number, stepMs: number, grids?: Readonly<Record<string, number>>): Promise<ColumnsFrame>;
+  /**
+   * The step the map reads now and the windows it holds columns for there (`Hub.loadColumns`): the long history keeps and refreshes the files
+   * meeting them, and no others.
+   */
+  archiveView?(stepMs: number, windows: readonly { from: number; to: number }[]): void;
+  /** Where that long history's depth begins (ms), or null when there is none. */
+  archiveFirst?(): number | null;
+  /** That long history's finest window (ms, its first level: two minutes for BTC, eight for ETH and SOL), or null when there is none. */
+  archiveMinStep?(): number | null;
+  /** Whether a view that includes now is drawn from that long history before the source's own depth too (a coin whose hours carry no book minutes). */
+  archiveLive?(): boolean;
+  /** Where the source's own depth begins for `ids` (the latest of their contiguous runs' starts), or null when it cannot say yet. */
+  depthSince?(ids: readonly string[]): number | null;
+  /**
+   * The Liquidity Tracker alone (lt-lane.ts): these markets' windows of `stepMs` over [from, to) for one half-life (an index into LT_HALF_LIVES), handed
+   * to `onFrame` a part at a time, the newest first, settled when the last has come. Only a server whose live socket answers it has it; it rejects
+   * ('unsupported') where it cannot be asked (a server from before, no socket), and the pane reads the columns instead.
+   */
+  ltLane?(ids: string[], from: number, to: number, stepMs: number, half: number, onFrame: (frame: LtFrame) => void, signal?: AbortSignal): Promise<void>;
   /** Taker buys and sells per second for each instrument over [from, to), from its first recorded minute in that range. */
   flow(ids: string[], from: number, to: number): Promise<FlowFrame>;
   /** The same flow a minute at a time, for windows older than the seconds the page holds; a source that keeps no older flow (the browser keeps a day) has none. */
@@ -118,6 +172,8 @@ export interface DataSource {
   sizes(ids: string[], windows: number[], cuts?: readonly number[]): Promise<SizesAnswer>;
   /** Traded volume by price for `ids` over the minutes that start in [from, to). Rejects when the source cannot say (an older server). */
   profile(ids: string[], from: number, to: number, rowStep: number): Promise<ProfileAnswer>;
+  /** The change in open interest of the perpetuals among `ids` by price (shared/oi-profile.ts). A source without it (an older server) leaves it out. */
+  oiProfile?(ids: string[], from: number, to: number, rowStep: number): Promise<OiProfileAnswer>;
   /** What happened in a selection: the minutes that start in [from, to), at the prices of `band` or at every price (see `RangeAnswer`). Rejects when the source cannot say (an older server). */
   range(ids: string[], from: number, to: number, band: { p0: number; p1: number } | null, rowStep: number): Promise<RangeAnswer>;
   /** The point of control and the value area of each window (whole minutes), on rows of `rowStep`, holding `share` (0..1). Rejects when the source cannot say. */
@@ -135,6 +191,11 @@ export interface DataSource {
   recover?(request: RecoveryRequest): Promise<RecoveryReport>;
   /** Absorption candidates of each of `ids` starting in [from, to) with a largest credit of at least its `mins` entry (at most `limit` each, the largest first), floors, and the minutes since `since`. */
   absorption(ids: string[], mins: number[], from: number, to: number, limit: number, since: number): Promise<AbsorptionAnswer>;
+  /**
+   * The absorption column (shared/absorption.ts `AbsorptionProfile`): the marked USD of every group of `ids` that began in [from, to), each at
+   * its `thresholds` entry, by price on rows of `rowStep`, none left out, and where the rows may be short. No minutes are read.
+   */
+  absorptionProfile(ids: string[], thresholds: number[], from: number, to: number, rowStep: number): Promise<AbsorptionProfileAnswer>;
   readonly venues: VenueControl;
   /** What becomes of the recordings, at `now`; a source whose recordings are kept elsewhere (the server) leaves it out. */
   saving?(now: number): SavingState;

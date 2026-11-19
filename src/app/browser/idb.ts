@@ -3,27 +3,52 @@ import type { FootprintMinuteRow, FootprintStore } from '../../shared/footprint.
 import { largestPrints, type Print, type PrintStore } from '../../shared/prints.ts';
 import type { FlowMinuteRow, FlowStore } from '../../shared/flow.ts';
 import { fullerColumn, fullerFlowMinute, fullerFootprintMinute } from '../../shared/recording-merge.ts';
-import { peakOf, type AbsorptionGroup, type AbsorptionMinute, type AbsorptionStore } from '../../shared/absorption.ts';
+import { hoursOf, peakOf, type AbsorptionGroup, type AbsorptionMinute, type AbsorptionStore } from '../../shared/absorption.ts';
 import type { CoverageRow, CoverageStore } from '../../shared/coverage.ts';
+import { largestLiquidations, liquidationKey, type Liquidation, type LiquidationStore } from '../../shared/liquidations.ts';
+import type { OiReading, OiStore } from '../../shared/engine.ts';
+import { clipCoverage, ownsTime, planAbsorption, planCoverage, planFootprint, tradeImport, type HistoryRows } from './history-import.ts';
 
 /**
  * Recordings kept in this browser (IndexedDB): the same four stores the server keeps in SQLite. The recorders read everything they
- * need once at start (`load` is synchronous), so the database is read before the engine is built, and writes are queued and applied in
- * one transaction every half second or so. A write that fails turns writing off for the session rather than disturbing the live view.
+ * need once at start (`load` is synchronous), so the database is read before the recorders are built (an engine that started without them
+ * builds them again when they come: shared/engine.ts `attach`), and writes are queued and applied every half second or so, in short
+ * transactions (`SLICE_MS`). A write that fails is let go and writing is tried again after a growing pause (the connection
+ * opened again if the browser closed it), so a page open for days keeps saving; only a newer page taking the database over ends it.
  */
 
-const VERSION = 4, WRITE_DELAY_MS = 500;
-type Name = 'columns' | 'footprint' | 'prints' | 'flow' | 'absorption' | 'absorptionMinutes' | 'coverage';
-const STORES: Name[] = ['columns', 'footprint', 'prints', 'flow', 'absorption', 'absorptionMinutes', 'coverage'];
-/** Absorption groups held in memory by the recorder (older ones are read on demand). */
+const VERSION = 6, WRITE_DELAY_MS = 500;
+type Name = 'columns' | 'footprint' | 'prints' | 'flow' | 'absorption' | 'absorptionMinutes' | 'coverage' | 'liquidations' | 'oi';
+const STORES: Name[] = ['columns', 'footprint', 'prints', 'flow', 'absorption', 'absorptionMinutes', 'coverage', 'liquidations', 'oi'];
+/** Absorption groups read when the database opens: the recorder starts with these and reads the rest of its day back after (`AbsorptionRecorder.hydrate`). */
 const ABSORPTION_MEMORY_MS = 2 * 3_600_000;
 interface AbsorptionRow { inst: string; t0: number; side: 'buy' | 'sell'; price: number; peak: number; steps: AbsorptionGroup['steps'] }
 interface AbsorptionMinuteRow { inst: string; t: number; n: number; mean: number; m2: number; floor: number }
 /** `lt`/`ltN`: the Liquidity Tracker kept with the minute (`Column.lt`), absent in rows written before it was kept. */
 interface ColumnRow { inst: string; t: number; step: number; n: number; bins: Int32Array; bid: Float32Array; ask: Float32Array; lt?: Float32Array; ltN?: number }
 interface PrintRow extends Print { k: string }
-/** A stretch of the coverage record, with its end as `t` (the time index every store prunes by). */
-interface CoverRow extends CoverageRow { t: number }
+interface LiquidationRow extends Liquidation { k: string }
+/** An open-interest reading (shared/engine.ts `OiReading`): about one a minute for each of six venues, some 8,600 a day. */
+type OiRow = OiReading;
+/**
+ * A stretch of the coverage record, with its end as `t` (the time index every store prunes by). Metric `history` (never handed to the
+ * recorders) marks an hour of the recorded history read whole (`markImported`): an hour already taken is not read again.
+ */
+interface CoverRow extends Omit<CoverageRow, 'metric'> { metric: CoverageRow['metric'] | 'history'; t: number }
+/**
+ * The mark of an hour of the recorded history read whole is a coverage row of metric `history` whose instrument names the reader's version:
+ * `v2` reads the footprint and absorption too, `v3` also the footprint minutes of kind 11 (f32 USD, no list). An hour an older page read
+ * (instrument '') is read again once, for what that page passed over. An hour from `V3_FROM` on that a `v2` page read is read again once
+ * too, whatever this page holds of it (`staleHours`): that page passed kind 11 over, and in the hour of the service's restart onto kind 11,
+ * which holds both kinds, it also claimed the hour's trades from its kind-7 minutes, so the page would not want it by its coverage. A `v2`
+ * mark before `V3_FROM` stands: the service wrote kind 11 only after this page was published.
+ */
+const IMPORTED = 'history', IMPORTED_INST = 'v3', HOUR = 3_600_000, MINUTE = 60_000;
+/** The hour this page was built in (2026-11-12 22:00Z): the service's hours before it hold no footprint minute of kind 11. */
+const V3_FROM = 1_794_520_800_000;
+export const importedMark = (row: { inst: string; from: number }): boolean => row.inst === IMPORTED_INST || (row.inst === 'v2' && row.from < V3_FROM);
+/** A mark a page from before kind 11 left on an hour that may hold it: the hour is read again (`staleHours`). */
+export const staleMark = (row: { inst: string; from: number }): boolean => row.inst === 'v2' && row.from >= V3_FROM;
 
 /** `name` is the coin's database (app/coin.ts recordingsName): each coin's recordings are kept and read apart. */
 function openDatabase(name: string): Promise<IDBDatabase> {
@@ -31,7 +56,9 @@ function openDatabase(name: string): Promise<IDBDatabase> {
     const request = indexedDB.open(name, VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
-      // Version 2 added the flow store, version 3 the absorption stores, version 4 the coverage record: an older database keeps what it has and gains only those.
+      // Version 2 added the flow store, version 3 the absorption stores, version 4 the coverage record, version 5 the liquidations, version 6
+      // the open-interest readings: an older
+      // database keeps what it has and gains only those.
       if (!db.objectStoreNames.contains('columns')) db.createObjectStore('columns', { keyPath: ['inst', 't'] }).createIndex('t', 't');
       if (!db.objectStoreNames.contains('footprint')) db.createObjectStore('footprint', { keyPath: ['inst', 't'] }).createIndex('t', 't');
       if (!db.objectStoreNames.contains('prints')) db.createObjectStore('prints', { keyPath: 'k' }).createIndex('t', 't');
@@ -39,6 +66,8 @@ function openDatabase(name: string): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('absorption')) db.createObjectStore('absorption', { keyPath: ['inst', 't0', 'side', 'price'] }).createIndex('t', 't0');
       if (!db.objectStoreNames.contains('absorptionMinutes')) db.createObjectStore('absorptionMinutes', { keyPath: ['inst', 't'] }).createIndex('t', 't');
       if (!db.objectStoreNames.contains('coverage')) db.createObjectStore('coverage', { keyPath: ['inst', 'metric', 'from'] }).createIndex('t', 't');
+      if (!db.objectStoreNames.contains('liquidations')) db.createObjectStore('liquidations', { keyPath: 'k' }).createIndex('t', 't');
+      if (!db.objectStoreNames.contains('oi')) db.createObjectStore('oi', { keyPath: ['venue', 't'] }).createIndex('t', 't');
     };
     request.onsuccess = () => {
       const db = request.result;
@@ -47,24 +76,89 @@ function openDatabase(name: string): Promise<IDBDatabase> {
       resolve(db);
     };
     request.onerror = () => reject(request.error ?? new Error('IndexedDB could not be opened'));
-    request.onblocked = () => reject(new Error('IndexedDB is blocked by another tab'));
+    // An older page holds the database open at its version: the request waits, and succeeds once that page lets go (each page closes its
+    // connection when asked, `onversionchange` above). Giving up here kept the recordings from this page even when it let go a moment later.
+    request.onblocked = () => console.warn('the recordings wait for another tab of this page to let go of them');
   });
 }
 
-/** Every row of a store whose time is at or after `since`, oldest first. */
-function readSince<T>(db: IDBDatabase, name: Name, since: number): Promise<T[]> {
+/** `work`, or `late` once it has taken `ms` (the timer goes with the work). */
+const withTimeout = <T>(work: Promise<T>, ms: number, late: Error): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(late), ms); })]).finally(() => clearTimeout(timer));
+};
+/** How long the database may take to open: a tab that never lets go of it would otherwise keep this page without recordings and without a word. */
+const OPEN_TIMEOUT_MS = 10_000;
+/** After a failed write the next waits twice as long each time, up to this. */
+const RETRY_MAX_MS = 60_000;
+/**
+ * How long a write issues its requests before that slice is committed and the rest waits for the next task. The worker that writes runs
+ * the live feeds too: the recorded history read in made batches of thousands of requests, each holding the book and the flow still for
+ * most of a second (2026-11-03).
+ */
+const SLICE_MS = 8;
+/** At most this many rows are put by one queued write (`SLICE_MS` can cut only between writes). */
+const PUTS_PER_WRITE = 250;
+
+/**
+ * What becomes of the writing: `failed` after a write that did not go through (`fatal`: a newer page took the database over, and this one
+ * writes no more), `recovered` when a write goes through again after failures.
+ */
+export interface RecordingEvents { failed?: (error: unknown, fatal: boolean) => void; recovered?: () => void }
+
+/**
+ * Every row of a store whose time is at or after `since` (and before `before`), oldest first: one request for all of them. A cursor walked
+ * them one round trip a row, and a day of the default venues' minutes read that way outlasted the time the page gave the recordings to open,
+ * so the page started with none and saved none (2026-10-19).
+ */
+function readSince<T>(db: IDBDatabase, name: Name, since: number, before = Infinity): Promise<T[]> {
+  if (!(before > since)) return Promise.resolve([]);
   return new Promise((resolve, reject) => {
-    const out: T[] = [], request = db.transaction(name, 'readonly').objectStore(name).index('t').openCursor(IDBKeyRange.lowerBound(since));
-    request.onsuccess = () => { const cursor = request.result; if (cursor) { out.push(cursor.value as T); cursor.continue(); } else resolve(out); };
+    const range = Number.isFinite(before) ? IDBKeyRange.bound(since, before, false, true) : IDBKeyRange.lowerBound(since);
+    const request = db.transaction(name, 'readonly').objectStore(name).index('t').getAll(range);
+    request.onsuccess = () => resolve(request.result as T[]);
     request.onerror = () => reject(request.error);
   });
 }
 
+/**
+ * The newest of the map's minutes, read before anything else (`openRecordings`): those from `since` on, handed to `take` as the columns'
+ * `load` hands them, oldest first. The browser answers the requests one after another (a day of the default books: 3.1 s, the map's last
+ * three hours 0.1-0.2 s, 2026-11-07), so the page can draw the hours it opens on while the rest of the day is read back.
+ */
+export interface RecordingsHead { since: number; take: (columns: StoredColumn[]) => void }
+/** A minute of a book as the recorders take it (`ColumnStore.load`). */
+export interface StoredColumn { instrumentId: string; step: number; column: Column }
+
 /** Structured clone keeps a typed array's whole buffer, so a view onto a larger one is copied out first. */
 const own = <A extends Int32Array | Float32Array>(array: A): A => array.byteLength === array.buffer.byteLength ? array : array.slice() as A;
+/** A stored minute as the recorders take it, its tracker with it when it was kept. */
+const storedColumn = (row: ColumnRow): StoredColumn => ({ instrumentId: row.inst, step: row.step, column: {
+  t: row.t, n: row.n, bins: row.bins, bid: row.bid, ask: row.ask, ...(row.lt instanceof Float32Array && (row.ltN ?? 0) > 0 ? { lt: row.lt, ltN: row.ltN! } : {}) } satisfies Column });
 
 export interface Recordings {
-  columns: ColumnStore; footprint: FootprintStore; prints: PrintStore; flow: FlowStore; absorption: AbsorptionStore; coverage: CoverageStore;
+  columns: ColumnStore; footprint: FootprintStore; prints: PrintStore; flow: FlowStore; absorption: AbsorptionStore; coverage: CoverageStore; liquidations: LiquidationStore; oi: OiStore;
+  /**
+   * Adds minutes recorded elsewhere (the recorded history, app/browser/history-import.ts) before the recorders start: each joins what `load`
+   * hands them, in place of a thinner copy of the same minute, and is stored as this tab's own recordings are. Returns how many it took.
+   */
+  importColumns(columns: readonly { inst: string; step: number; column: Column }[]): number;
+  /**
+   * The same for the other recordings: a flow minute joins second by second where it is the fuller copy, a liquidation or an open-interest
+   * reading the page does not hold is added, a large trade only outside the stretches this page recorded itself (where its own are the ones
+   * to keep: an order rebuilt from the same fills elsewhere may differ in its price), an absorption minute (with its groups) only where this
+   * page did not record the whole minute itself, a footprint minute except where the page recorded the whole minute and already held it when
+   * it opened; the service's stretches of trade coverage join the page's own for the instruments whose footprint minutes were taken (see
+   * `importRows`).
+   */
+  importRows(rows: HistoryRows): number;
+  /** The hours of the recorded history read whole (kept as the coverage record is, so they go with it), and marking more. */
+  importedHours(): number[];
+  /** Hours a page from before kind 11 marked as read that may hold it, to be read again whatever this page holds (see `staleMark`). */
+  staleHours(): number[];
+  /** `since`: `writeEpoch()` before the import; the hours are marked only when every write since went through. */
+  markImported(hours: readonly number[], since: number): Promise<void>;
+  writeEpoch(): number;
   /** Apply what is queued now instead of at the next half second. */
   flush(): Promise<void>;
   close(): void;
@@ -72,28 +166,70 @@ export interface Recordings {
 
 /**
  * Open the database, read what is still inside the retention window, and return stores for the recorders. `canWrite` says whether this
- * tab is the one allowed to write (only one tab records, so two open pages do not write the same minutes twice).
+ * tab is the one allowed to write (only one tab records, so two open pages do not write the same minutes twice). `head`: the map's newest
+ * minutes are read first, on their own, and handed over before the rest is read (see `RecordingsHead`).
  */
-export async function openRecordings(name: string, since: number, canWrite: () => boolean, onError: (error: unknown) => void = () => {}): Promise<Recordings> {
-  const db = await openDatabase(name);
-  const absorptionSince = Math.max(since, Date.now() - ABSORPTION_MEMORY_MS);
-  const [columnRows, footprintRows, printRows, flowRows, absorptionRows, absorptionMinuteRows, coverRows] = await Promise.all([readSince<ColumnRow>(db, 'columns', since), readSince<FootprintMinuteRow>(db, 'footprint', since), readSince<PrintRow>(db, 'prints', since), readSince<FlowMinuteRow>(db, 'flow', since),
-    readSince<AbsorptionRow>(db, 'absorption', absorptionSince), readSince<AbsorptionMinuteRow>(db, 'absorptionMinutes', absorptionSince), readSince<CoverRow>(db, 'coverage', since)]);
-  let queue: ((tx: IDBTransaction) => void)[] = [], timer: ReturnType<typeof setTimeout> | null = null, failed = false, closed = false;
+export async function openRecordings(name: string, since: number, canWrite: () => boolean, events: RecordingEvents = {}, head?: RecordingsHead): Promise<Recordings> {
+  // Only the opening is timed: reading a day back takes as long as it takes (it is what the page is for), and a page that gave up on it
+  // started with nothing and saved nothing.
+  let db = await withTimeout(openDatabase(name), OPEN_TIMEOUT_MS, new Error(`opening the recordings took longer than ${OPEN_TIMEOUT_MS} ms`));
+  /** The connection was closed under this page (by the browser, or for a newer page): it is opened again before the next write. */
+  let lost = false;
+  const watch = (connection: IDBDatabase): void => { connection.onclose = () => { lost = true; }; };
+  watch(db);
+  const absorptionSince = Math.max(since, Date.now() - ABSORPTION_MEMORY_MS), started = performance.now();
+  // The map's newest minutes first and alone: the browser answers the requests one after another, so asked beside the rest they would come
+  // last. Handed over, then the rest of the day (one transaction for all of it was slower, 2026-11-07).
+  const cut = head ? Math.max(since, head.since) : Infinity, headRows = head ? await readSince<ColumnRow>(db, 'columns', cut) : [];
+  if (head) {
+    console.info(`recordings: the map's newest ${headRows.length} minutes read back in ${Math.round(performance.now() - started)} ms`);
+    try { head.take(headRows.map(storedColumn)); } catch (error) { console.warn('the newest recordings could not be handed over:', error); }
+  }
+  const [olderRows, footprintRows, printRows, flowRows, absorptionRows, absorptionMinuteRows, coverRows, liquidationRows, oiRows] = await Promise.all([readSince<ColumnRow>(db, 'columns', since, cut), readSince<FootprintMinuteRow>(db, 'footprint', since), readSince<PrintRow>(db, 'prints', since), readSince<FlowMinuteRow>(db, 'flow', since),
+    readSince<AbsorptionRow>(db, 'absorption', absorptionSince), readSince<AbsorptionMinuteRow>(db, 'absorptionMinutes', absorptionSince), readSince<CoverRow>(db, 'coverage', since), readSince<LiquidationRow>(db, 'liquidations', since), readSince<OiRow>(db, 'oi', since)]);
+  // Oldest first, as one request would have read them.
+  const columnRows = headRows.length ? olderRows.concat(headRows) : olderRows;
+  console.info(`recordings read back in ${Math.round(performance.now() - started)} ms: ${columnRows.length} map minutes, ${footprintRows.length} footprint minutes, ${printRows.length} trades, ${liquidationRows.length} liquidations, ${oiRows.length} open-interest readings`);
+  let queue: ((tx: IDBTransaction) => void)[] = [], timer: ReturnType<typeof setTimeout> | null = null, failed = false, closed = false, failures = 0;
+  // Counts every write let go (not this tab's to make, or a batch that failed): a mark that an hour was imported is kept only when nothing
+  // was let go while it was imported (`markImported`). `writing` is the batch in flight.
+  let epoch = 0, writing: Promise<void> = Promise.resolve();
+  const schedule = (): void => { if (!timer) timer = setTimeout(() => { void write(); }, failures ? Math.min(RETRY_MAX_MS, WRITE_DELAY_MS * 2 ** failures) : WRITE_DELAY_MS); };
 
   const prune = (tx: IDBTransaction, name: Name, before: number): void => {
     const store = tx.objectStore(name), request = store.index('t').openKeyCursor(IDBKeyRange.upperBound(before, true));
     request.onsuccess = () => { const cursor = request.result; if (cursor) { store.delete(cursor.primaryKey); cursor.continue(); } };
   };
-  const write = async (): Promise<void> => {
+  const write = (): Promise<void> => { const run = writing.then(writeNow); writing = run; return run; };
+  /** A batch is written a slice at a time (`SLICE_MS`), each slice its own transaction. */
+  const writeNow = async (): Promise<void> => {
     timer = null;
     const ops = queue; queue = [];
     if (!ops.length || failed || closed) return;
     try {
-      const tx = db.transaction(STORES, 'readwrite');
-      for (const op of ops) op(tx);
-      await new Promise<void>((resolve, reject) => { tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error); });
-    } catch (error) { failed = true; onError(error); }
+      if (lost) {
+        try { db = await withTimeout(openDatabase(name), OPEN_TIMEOUT_MS, new Error(`opening the recordings again took longer than ${OPEN_TIMEOUT_MS} ms`)); }
+        catch (error) {
+          // A newer page has moved the database to its version: that page records now, and this one lets go for good.
+          if (error instanceof DOMException && error.name === 'VersionError') { failed = true; events.failed?.(error, true); return; }
+          throw error;
+        }
+        lost = false; watch(db);
+      }
+      for (let at = 0; at < ops.length;) {
+        const tx = db.transaction(STORES, 'readwrite'), started = performance.now();
+        do ops[at++]!(tx); while (at < ops.length && performance.now() - started < SLICE_MS);
+        await new Promise<void>((resolve, reject) => { tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error); });
+      }
+      if (failures) { failures = 0; events.recovered?.(); }
+    } catch (error) {
+      // The batch is let go (what it held stays on screen, and a minute that changes again is written again) and writing goes on after a
+      // pause that grows. One failed write used to end saving for the session, so a page left open for days could reload to nothing.
+      if (error instanceof DOMException && error.name === 'InvalidStateError') lost = true;
+      failures++; epoch++;
+      events.failed?.(error, false);
+      if (queue.length) schedule();
+    }
   };
   /**
    * Store `row` under `key` unless the row already there is the fuller one. Another tab may have been writing the same minutes (this one
@@ -105,14 +241,13 @@ export async function openRecordings(name: string, since: number, canWrite: () =
     request.onsuccess = () => { const chosen = fuller(request.result as Row | undefined, row); if (chosen) store.put(chosen); };
   };
   const enqueue = (op: (tx: IDBTransaction) => void): void => {
-    if (failed || closed || !canWrite()) return;
+    if (failed || closed || !canWrite()) { epoch++; return; }
     queue.push(op);
-    if (!timer) timer = setTimeout(() => { void write(); }, WRITE_DELAY_MS);
+    schedule();
   };
 
   const columns: ColumnStore = {
-    load: () => columnRows.map(row => ({ instrumentId: row.inst, step: row.step, column: {
-      t: row.t, n: row.n, bins: row.bins, bid: row.bid, ask: row.ask, ...(row.lt instanceof Float32Array && (row.ltN ?? 0) > 0 ? { lt: row.lt, ltN: row.ltN! } : {}) } satisfies Column })),
+    load: () => columnRows.map(storedColumn),
     save: (instrumentId, column, step) => enqueue(tx => {
       const row = { inst: instrumentId, t: column.t, step, n: column.n, bins: own(column.bins), bid: own(column.bid), ask: own(column.ask),
         ...(column.lt && (column.ltN ?? 0) > 0 ? { lt: own(column.lt), ltN: column.ltN! } : {}) } satisfies ColumnRow;
@@ -147,7 +282,12 @@ export async function openRecordings(name: string, since: number, canWrite: () =
     save: (rows, expireBefore) => {
       for (const row of rows) everyPrint.set(printKey(row), { ...row, k: printKey(row) });
       for (const [key, row] of everyPrint) if (row.t < expireBefore) everyPrint.delete(key);
-      enqueue(tx => { const store = tx.objectStore('prints'); for (const row of rows) store.put({ ...row, k: printKey(row) } satisfies PrintRow); prune(tx, 'prints', expireBefore); });
+      // A few hundred to a write: an hour of the recorded history brings thousands, and a write is cut into slices only between them.
+      for (let i = 0; i < rows.length; i += PUTS_PER_WRITE) {
+        const part = rows.slice(i, i + PUTS_PER_WRITE);
+        enqueue(tx => { const store = tx.objectStore('prints'); for (const row of part) store.put({ ...row, k: printKey(row) } satisfies PrintRow); });
+      }
+      enqueue(tx => prune(tx, 'prints', expireBefore));
     },
     close: () => {},
   };
@@ -159,15 +299,46 @@ export async function openRecordings(name: string, since: number, canWrite: () =
     }),
     close: () => {},
   };
-  // Absorption: the recorder holds the last two hours; older groups and minutes are read when the page asks for them, a cursor over the time index.
+  // Absorption: the recorder opens with the last two hours and reads the rest of its day back in the background; until then older groups
+  // and minutes are read when the page asks for them. Either way an hour of the time index at a time, one request each. A cursor walked them one round trip a row: a day of 100,000 groups took 1.9 s that way, 0.9 s in one
+  // request (Chromium, 2026-10-19), and an hour holds at most the per-minute cap's 600 groups an instrument, so no request holds a day.
   const toGroup = (row: AbsorptionRow): AbsorptionGroup => ({ id: row.inst, side: row.side, price: row.price, t0: row.t0, steps: row.steps });
   const toMinute = (row: AbsorptionMinuteRow): AbsorptionMinute => ({ id: row.inst, t: row.t, n: row.n, mean: row.mean, m2: row.m2, floor: row.floor });
-  const scan = <Row>(name: Name, from: number, to: number, keep: (row: Row) => boolean): Promise<Row[]> => new Promise((resolve, reject) => {
-    const out: Row[] = [], range = IDBKeyRange.bound(from, Number.isFinite(to) ? to : Number.MAX_SAFE_INTEGER, false, true);
-    const request = db.transaction(name, 'readonly').objectStore(name).index('t').openCursor(range);
-    request.onsuccess = () => { const cursor = request.result; if (cursor) { const row = cursor.value as Row; if (keep(row)) out.push(row); cursor.continue(); } else resolve(out); };
-    request.onerror = () => reject(request.error);
-  });
+  /** The ranges of [from, to) an hour at a time, from the retention's start on; a range reaching past the next hour (or open) is read in one. */
+  const hourRanges = (from: number, to: number): IDBKeyRange[] => {
+    const out: IDBKeyRange[] = [], start = Math.max(from, since), end = Math.min(to, Date.now() + 3_600_000);
+    for (const hour of hoursOf(start, end)) out.push(IDBKeyRange.bound(hour.from, hour.to, false, true));
+    const rest = Math.max(start, end);
+    if (to > rest) out.push(IDBKeyRange.bound(rest, Number.isFinite(to) ? to : Number.MAX_SAFE_INTEGER, false, true));
+    return out;
+  };
+  /** Each range's rows, with the range's own bounds [lo, hi). */
+  const readHours = async <Row>(name: Name, from: number, to: number, take: (rows: Row[], lo: number, hi: number) => void): Promise<void> => {
+    for (const range of hourRanges(from, to)) take(await new Promise<Row[]>((resolve, reject) => {
+      const request = db.transaction(name, 'readonly').objectStore(name).index('t').getAll(range);
+      request.onsuccess = () => resolve(request.result as Row[]);
+      request.onerror = () => reject(request.error);
+    }), range.lower as number, range.upper as number);
+  };
+  /**
+   * Absorption minutes taken from the recorded history, with their groups (`inst|minute`), kept for the session: the recorder reads what is
+   * older than its first two hours back from the store (`eachHour`, `query`, `minutes`), and a tab that may not write never stores them.
+   * Every read lays them over what the store answers: the store's rows of such a minute (the page's own part of it, or the same rows once
+   * written) give way to them.
+   */
+  const overlay = new Map<string, { minute: AbsorptionMinute; groups: AbsorptionGroup[] }>();
+  const minuteKey = (inst: string, t: number): string => `${inst}|${Math.floor(t / MINUTE) * MINUTE}`;
+  const groupRow = (g: AbsorptionGroup): AbsorptionRow => ({ inst: g.id, t0: g.t0, side: g.side, price: g.price, peak: peakOf(g), steps: g.steps });
+  const minuteRow = (m: AbsorptionMinute): AbsorptionMinuteRow => ({ inst: m.id, t: m.t, n: m.n, mean: m.mean, m2: m.m2, floor: m.floor });
+  const overlaid = (groups: readonly AbsorptionRow[], from: number, to: number, minutes: readonly AbsorptionMinuteRow[] = []): { groups: AbsorptionRow[]; minutes: AbsorptionMinuteRow[] } => {
+    if (!overlay.size) return { groups: [...groups], minutes: [...minutes] };
+    const outGroups = groups.filter(row => !overlay.has(minuteKey(row.inst, row.t0))), outMinutes = minutes.filter(row => !overlay.has(minuteKey(row.inst, row.t)));
+    for (const { minute, groups: list } of overlay.values()) {
+      if (minute.t >= from && minute.t < to) outMinutes.push(minuteRow(minute));
+      for (const g of list) if (g.t0 >= from && g.t0 < to) outGroups.push(groupRow(g));
+    }
+    return { groups: outGroups, minutes: outMinutes };
+  };
   const absorption: AbsorptionStore = {
     load: () => ({ groups: absorptionRows.map(toGroup), minutes: absorptionMinuteRows.map(toMinute) }),
     save: (groups, minutes, expireBefore) => enqueue(tx => {
@@ -177,23 +348,207 @@ export async function openRecordings(name: string, since: number, canWrite: () =
       prune(tx, 'absorption', expireBefore); prune(tx, 'absorptionMinutes', expireBefore);
     }),
     query: async (ids, mins, from, to, limit) => {
-      const min = new Map(ids.map((id, i) => [id, mins[i] ?? Infinity]));
-      const rows = await scan<AbsorptionRow>('absorption', from, to, row => row.peak >= (min.get(row.inst) ?? Infinity));
-      const byId = new Map<string, AbsorptionRow[]>();
-      for (const row of rows) { let list = byId.get(row.inst); if (!list) { list = []; byId.set(row.inst, list); } list.push(row); }
+      const min = new Map(ids.map((id, i) => [id, mins[i] ?? Infinity])), byId = new Map<string, AbsorptionRow[]>();
+      const take = (row: AbsorptionRow): void => { if (row.peak >= (min.get(row.inst) ?? Infinity)) { let list = byId.get(row.inst); if (!list) { list = []; byId.set(row.inst, list); } list.push(row); } };
+      await readHours<AbsorptionRow>('absorption', from, to, (rows, lo, hi) => { for (const row of overlaid(rows, lo, hi).groups) take(row); });
       return [...byId.values()].flatMap(list => list.sort((a, b) => b.peak - a.peak).slice(0, limit).map(toGroup));
     },
-    minutes: async (ids, from, to) => { const wanted = new Set(ids); return (await scan<AbsorptionMinuteRow>('absorptionMinutes', from, to, row => wanted.has(row.inst))).map(toMinute); },
+    minutes: async (ids, from, to) => {
+      const wanted = new Set(ids), out: AbsorptionMinute[] = [];
+      await readHours<AbsorptionMinuteRow>('absorptionMinutes', from, to, (rows, lo, hi) => { for (const row of overlaid([], lo, hi, rows).minutes) if (wanted.has(row.inst)) out.push(toMinute(row)); });
+      return out;
+    },
+    // The column's read, and the recorder's reading its day back (`ids` null): each hour's groups and minutes in one transaction, so they are
+    // of one moment of the store.
+    eachHour: async (ids, mins, from, to, take) => {
+      const min = ids ? new Map(ids.map((id, i) => [id, mins[i] ?? Infinity])) : null;
+      const passes = (inst: string, value: number): boolean => !min || value >= (min.get(inst) ?? Infinity);
+      for (const range of hourRanges(from, to)) {
+        const [rows, minuteRows] = await new Promise<[AbsorptionRow[], AbsorptionMinuteRow[]]>((resolve, reject) => {
+          const tx = db.transaction(['absorption', 'absorptionMinutes'], 'readonly');
+          const groups = tx.objectStore('absorption').index('t').getAll(range), minutes = tx.objectStore('absorptionMinutes').index('t').getAll(range);
+          tx.oncomplete = () => resolve([groups.result as AbsorptionRow[], minutes.result as AbsorptionMinuteRow[]]);
+          const failed = (): void => reject(tx.error ?? new Error('the absorption read was aborted'));
+          tx.onerror = failed; tx.onabort = failed;
+        });
+        const groups: AbsorptionGroup[] = [], minutes: AbsorptionMinute[] = [], held = overlaid(rows, range.lower as number, range.upper as number, minuteRows);
+        for (const row of held.groups) if (passes(row.inst, row.peak)) groups.push(toGroup(row));
+        for (const row of held.minutes) if (passes(row.inst, row.floor)) minutes.push(toMinute(row));
+        take(groups, minutes);
+      }
+    },
     close: () => {},
   };
   // The coverage record: a stretch is written again as it grows (its start is its key), cut at the minute still open (shared/coverage.ts).
   const coverage: CoverageStore = {
-    load: () => coverRows.map(({ t: _t, ...row }) => row),
+    load: () => coverRows.flatMap(({ t: _t, ...row }) => row.metric === IMPORTED ? [] : [row as CoverageRow]),
     save: (rows, expireBefore) => enqueue(tx => { const store = tx.objectStore('coverage'); for (const row of rows) store.put({ ...row, t: row.to } satisfies CoverRow); prune(tx, 'coverage', expireBefore); }),
     close: () => {},
   };
+  // Liquidations, kept as the prints are: every one inside the retention, by the content it is known by (shared/liquidations.ts). They are
+  // few (BTC on the server: 900 to 3,500 a day across the venues, 2026-10-12 to 19), so a day of them is a small part of what is kept.
+  const toLiquidation = ({ k: _k, ...row }: LiquidationRow): Liquidation => row;
+  const everyLiquidation = new Map<string, LiquidationRow>(liquidationRows.map(row => [row.k, row]));
+  const liquidations: LiquidationStore = {
+    load: (_since, limit) => liquidationRows.slice(-limit).map(toLiquidation),
+    query: (from, to, minUsd, limit) => {
+      const out: Liquidation[] = [];
+      for (const row of everyLiquidation.values()) if (row.t >= from && row.t < to && row.usd >= minUsd) out.push(toLiquidation(row));
+      out.sort((a, b) => a.t - b.t);
+      return largestLiquidations(out, limit);
+    },
+    save: (rows, expireBefore) => {
+      for (const row of rows) everyLiquidation.set(liquidationKey(row), { ...row, k: liquidationKey(row) });
+      for (const [key, row] of everyLiquidation) if (row.t < expireBefore) everyLiquidation.delete(key);
+      enqueue(tx => { const store = tx.objectStore('liquidations'); for (const row of rows) store.put({ ...row, k: liquidationKey(row) } satisfies LiquidationRow); prune(tx, 'liquidations', expireBefore); });
+    },
+    close: () => {},
+  };
+  // Open-interest readings, one a venue a minute: read at start, each new one written as it comes.
+  const oi: OiStore = {
+    load: () => oiRows,
+    save: (rows, expireBefore) => enqueue(tx => { const store = tx.objectStore('oi'); for (const row of rows) store.put({ ...row } satisfies OiRow); prune(tx, 'oi', expireBefore); }),
+    close: () => {},
+  };
+  // What the import of the trade side judges by (history-import.ts `TradeImport`): taken now, before anything is imported.
+  const trade = tradeImport(coverRows, footprintRows);
+  /**
+   * The hours read in this import, those of them whose file held footprint minutes, each market's first footprint minute in them (on its
+   * step), and the service's stretches waiting to join the page's coverage.
+   */
+  const hoursRead = new Set<number>(), footprintHours = new Set<number>(), firstFootprint = new Map<string, number>(), pendingCover: CoverageRow[] = [];
+  const footprintAt = new Map<string, number>();
+  footprintRows.forEach((row, i) => footprintAt.set(`${row.inst}|${row.t}`, i));
+  // The minutes it held as it opened, as `trade` is taken (`planFootprint` `heldAtOpen`).
+  const footprintAtOpen = new Set(footprintAt.keys());
+  // Minutes recorded elsewhere join the rows `load` hands the recorder (a thinner copy of the same minute is replaced) and are stored like
+  // the recorder's own (by the tab that writes; another tab shows them and stores nothing, as it does with what it records).
+  const importColumns =(incoming: readonly { inst: string; step: number; column: Column }[]): number => {
+    const at = new Map<string, number>();
+    columnRows.forEach((row, i) => at.set(`${row.inst}|${row.t}`, i));
+    let taken = 0;
+    for (const { inst, step, column } of incoming) {
+      const key = `${inst}|${column.t}`, i = at.get(key), kept = i === undefined ? undefined : columnRows[i];
+      const row = { inst, t: column.t, step, n: column.n, bins: own(column.bins), bid: own(column.bid), ask: own(column.ask), ...(column.lt && (column.ltN ?? 0) > 0 ? { lt: own(column.lt), ltN: column.ltN! } : {}) } satisfies ColumnRow;
+      if (kept && (kept.step !== step || !fullerColumn(kept, row) || kept.n === row.n)) continue;
+      if (i === undefined) { at.set(key, columnRows.length); columnRows.push(row); } else columnRows[i] = row;
+      columns.save(inst, column, step);
+      taken++;
+    }
+    return taken;
+  };
+  const importRows = (incoming: HistoryRows): number => {
+    let taken = 0;
+    // Flow: second by second, the fuller copy (as two tabs' copies of a minute are merged).
+    const flowAt = new Map<string, number>();
+    flowRows.forEach((row, i) => flowAt.set(`${row.inst}|${row.t}`, i));
+    for (const row of incoming.flow) {
+      const i = flowAt.get(`${row.inst}|${row.t}`), merged = fullerFlowMinute(i === undefined ? undefined : flowRows[i], row);
+      if (!merged) continue;
+      if (i === undefined) { flowAt.set(`${row.inst}|${row.t}`, flowRows.length); flowRows.push(merged); } else flowRows[i] = merged;
+      taken++;
+    }
+    if (incoming.flow.length) flow.save(incoming.flow, since);
+    // Liquidations and open-interest readings the page does not hold (a liquidation is known by the venue's own facts).
+    const newLiquidations = incoming.liquidations.filter(row => !everyLiquidation.has(liquidationKey(row)));
+    for (const row of newLiquidations) { const k = liquidationKey(row); everyLiquidation.set(k, { ...row, k }); liquidationRows.push({ ...row, k }); }
+    if (newLiquidations.length) { liquidationRows.sort((a, b) => a.t - b.t); liquidations.save(newLiquidations, since); taken += newLiquidations.length; }
+    // An open-interest minute keeps its newest reading (the minute's last, as the recorders keep it): the service's when it was read later.
+    const oiAt = new Map(oiRows.map((row, i) => [`${row.venue}|${row.t}`, i]));
+    const newOi: OiRow[] = [];
+    for (const row of incoming.oi) {
+      const key = `${row.venue}|${row.t}`, i = oiAt.get(key);
+      if (i === undefined) { oiAt.set(key, oiRows.length); oiRows.push(row); newOi.push(row); }
+      else if ((row.at ?? 0) > (oiRows[i]!.at ?? 0)) { oiRows[i] = row; newOi.push(row); }
+    }
+    if (newOi.length) { oi.save(newOi, since); taken += newOi.length; }
+    // Large trades only where this page did not record the trades itself.
+    const newPrints = incoming.prints.filter(row => !ownsTime(trade, row.id, row.t) && !everyPrint.has(printKey(row)));
+    if (newPrints.length) {
+      for (const row of newPrints) printRows.push({ ...row, k: printKey(row) });
+      printRows.sort((a, b) => a.t - b.t);
+      prints.save(newPrints, since); taken += newPrints.length;
+    }
+    // Footprint minutes on its step, the fuller copy, except a minute this page recorded whole and already held when it opened
+    // (`planFootprint`).
+    const newFootprint = planFootprint(trade, incoming.footprint, key => { const i = footprintAt.get(key); return i === undefined ? undefined : footprintRows[i]; }, key => footprintAtOpen.has(key));
+    for (const row of newFootprint) {
+      const key = `${row.inst}|${row.t}`, i = footprintAt.get(key);
+      if (i === undefined) { footprintAt.set(key, footprintRows.length); footprintRows.push(row); } else footprintRows[i] = row;
+    }
+    if (newFootprint.length) { footprint.save(newFootprint, since); taken += newFootprint.length; }
+    // Absorption minutes where this page did not record the whole minute, with their groups (`planAbsorption`). The page's own groups of
+    // such a minute, found in a part of it, go first: no group is counted twice.
+    const absorbed = planAbsorption(trade, incoming.absorptionMinutes, incoming.absorption);
+    if (absorbed.size) {
+      // What the recorder opens with (the last two hours) is changed the same way; the older part is laid over the store (`overlay`).
+      const keptGroups = absorptionRows.filter(row => !absorbed.has(minuteKey(row.inst, row.t0)));
+      absorptionRows.length = 0; absorptionRows.push(...keptGroups);
+      const minuteAt = new Map(absorptionMinuteRows.map((row, i) => [`${row.inst}|${row.t}`, i]));
+      for (const [key, { minute, groups }] of absorbed) {
+        // Every one is laid over the store too: the recorder's own cut (two hours before it starts, a moment after this) can leave a
+        // minute of the opening arrays out, and a tab that may not write keeps no copy in the store.
+        overlay.set(key, { minute, groups });
+        // A minute that reaches past the opening cut goes into the arrays too: the recorder answers its later part from memory.
+        if (minute.t + MINUTE <= absorptionSince) continue;
+        const i = minuteAt.get(key);
+        if (i === undefined) absorptionMinuteRows.push(minuteRow(minute)); else absorptionMinuteRows[i] = minuteRow(minute);
+        for (const g of groups) absorptionRows.push(groupRow(g));
+      }
+      enqueue(tx => {
+        const store = tx.objectStore('absorption'), perMinute = tx.objectStore('absorptionMinutes');
+        for (const { minute, groups } of absorbed.values()) {
+          perMinute.put(minuteRow(minute));
+          // The minute's groups go in once the page's own are deleted: a cursor still walking the minute would delete them too.
+          const request = store.index('t').openCursor(IDBKeyRange.bound(minute.t, minute.t + MINUTE, false, true));
+          request.onsuccess = () => {
+            const cursor = request.result;
+            if (cursor) { if ((cursor.value as AbsorptionRow).inst === minute.id) cursor.delete(); cursor.continue(); return; }
+            for (const g of groups) store.put(groupRow(g));
+          };
+        }
+      });
+      taken += absorbed.size;
+    }
+    // The service's stretches of trade coverage join the page's own where its footprint minutes were taken (`planCoverage`), only over the
+    // hours whose footprint this page holds (`clipCoverage`): read in this import, or marked read whole by an earlier one, and the hour
+    // after them too (a minute's rows can be written into the next hour), or that hour not over yet. A stretch is written again as it grows
+    // (its start is its key): the longest copy stays.
+    if (incoming.hour !== null) { hoursRead.add(incoming.hour); if (incoming.footprint.length) footprintHours.add(incoming.hour); }
+    for (const row of incoming.footprint) if (row.step === trade.steps.get(row.inst) && !(row.t >= (firstFootprint.get(row.inst) ?? Infinity))) firstFootprint.set(row.inst, row.t);
+    pendingCover.push(...planCoverage(trade, incoming));
+    // An hour counts when its own file held footprint minutes, and the next hour was read too (or marked read earlier, or is not over).
+    const known = new Set([...hoursRead, ...importedHours()]), now = Date.now();
+    const holds = (hour: number): boolean => footprintHours.has(hour) && (known.has(hour + HOUR) || hour + 2 * HOUR > now);
+    // From the minute after a market's first footprint minute: the run that recorded it may have started inside that minute.
+    const coverAt = new Map(coverRows.map((row, i) => [`${row.inst}|${row.metric}|${row.from}`, i]));
+    const newCover: CoverRow[] = [];
+    for (const row of clipCoverage(pendingCover, holds, inst => { const t = firstFootprint.get(inst); return t === undefined ? undefined : t + MINUTE; })) {
+      const key = `${row.inst}|${row.metric}|${row.from}`, i = coverAt.get(key);
+      if (i !== undefined && coverRows[i]!.to >= row.to) continue;
+      const stored: CoverRow = { ...row, t: row.to };
+      if (i === undefined) { coverAt.set(key, coverRows.length); coverRows.push(stored); } else coverRows[i] = stored;
+      newCover.push(stored);
+    }
+    if (newCover.length) { enqueue(tx => { const store = tx.objectStore('coverage'); for (const row of newCover) store.put(row); }); taken += newCover.length; }
+    return taken;
+  };
+  const importedHours = (): number[] => coverRows.filter(row => row.metric === IMPORTED && importedMark(row)).map(row => row.from);
+  const staleHours = (): number[] => coverRows.filter(row => row.metric === IMPORTED && staleMark(row)).map(row => row.from);
+  // Written once what the import queued has been written (or let go), and only when nothing was let go since `since` (`writeEpoch()`
+  // before the import): a mark without its rows would keep the hour from being read again.
+  const markImported = async (hours: readonly number[], since: number): Promise<void> => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    await write();
+    if (epoch !== since || failed || closed || !canWrite()) return;
+    const held = new Set(importedHours()), rows = hours.filter(h => !held.has(h)).map(h => ({ inst: IMPORTED_INST, metric: IMPORTED, from: h, to: h + HOUR, kind: 'live' as const, t: h + HOUR }) satisfies CoverRow);
+    if (!rows.length) return;
+    enqueue(tx => { const store = tx.objectStore('coverage'); for (const row of rows) store.put(row); });
+    await write();
+    if (epoch === since) coverRows.push(...rows);
+  };
   return {
-    columns, footprint, prints, flow, absorption, coverage,
+    columns, footprint, prints, flow, absorption, coverage, liquidations, oi, importColumns, importRows, importedHours, staleHours, markImported, writeEpoch: () => epoch,
     flush() { if (timer) clearTimeout(timer); return write(); },
     close() { if (timer) clearTimeout(timer); void write().finally(() => { closed = true; db.close(); }); },
   };

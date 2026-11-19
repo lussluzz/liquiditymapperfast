@@ -3,12 +3,15 @@ import type { FlowFrame } from '../shared/flow.ts';
 import { checkTape } from '../shared/tape.ts';
 import { TIMEFRAMES } from '../shared/series.ts';
 import { LongShortCache, type LsMetric, type LsSeries } from '../shared/long-short.ts';
+import { IdbLsStore } from './browser/ls-store.ts';
 import { webGet } from '../shared/history.ts';
+import { PriceHistoryCache, priceListing, priceTimeframeMs, type PriceHistoryAnswer } from '../shared/price-history.ts';
 import { toWire } from '../shared/prints.ts';
 import { toWire as liquidationWire, type Liquidation } from '../shared/liquidations.ts';
 import type { PrintSumsAnswer } from '../shared/print-sums.ts';
 import { parseProfile, parseRange, parseSizes, parseValueAreas, type ProfileAnswer, type RangeAnswer, type SizesAnswer, type ValueAreaAnswer } from '../shared/footprint.ts';
-import { parseAbsorptionAnswer, parseAbsorptionLive, type AbsorptionAnswer } from '../shared/absorption.ts';
+import { parseOiProfile, type OiProfileAnswer } from '../shared/oi-profile.ts';
+import { parseAbsorptionAnswer, parseAbsorptionLive, parseAbsorptionProfile, type AbsorptionAnswer, type AbsorptionProfileAnswer } from '../shared/absorption.ts';
 import { parseCoverage, type CoverageAnswer, type CoverageMetric } from '../shared/coverage.ts';
 import type { RecoveryReport, RecoveryRequest } from '../shared/engine.ts';
 import type { FeedsIn, FeedsOut, RpcCall, RpcResult } from './browser/protocol.ts';
@@ -19,6 +22,9 @@ import type { CandleRow, OiBar } from './store.ts';
 import { t } from './i18n.ts';
 import { BTC, EARLIER_BROWSER_VENUES, type Coin } from '../shared/coins.ts';
 import { recorderLockName, recordingsName } from './coin.ts';
+import { historyUrl } from './history-url.ts';
+import { DAY_HOURS } from './history-window.ts';
+import { ArchiveColumns, depthSinceOf, type ArchiveChange } from './archive/archive-source.ts';
 
 /** Where a person's venue choice is kept between visits, and the venues there were when it was made (so ones added since can start). */
 const SELECTION_KEY = 'lmf.venues', KNOWN_KEY = 'lmf.venues.known';
@@ -55,9 +61,20 @@ function saveSelection(selected: readonly string[], known: readonly string[]): v
   try { localStorage.setItem(SELECTION_KEY, JSON.stringify(selected)); if (known.length) localStorage.setItem(KNOWN_KEY, JSON.stringify(known)); } catch { /* private mode: the choice lasts for this visit */ }
 }
 
+/**
+ * A live venue's detail in the page's language: the engine's words for its book (shared/engine.ts, `BookConnector.bookDetail`) are
+ * translated, the reason a book re-synchronises kept as the venue gave it; any other detail as it came.
+ */
+function detailText(detail: string): string {
+  if (detail === 'loading the full book') return t('loading the full book');
+  if (detail === 'no usable book right now (crossed or one-sided)') return t('no usable book right now (crossed or one-sided)');
+  const resync = /^book re-synchronising \((.*)\)$/.exec(detail);
+  return resync ? t('book re-synchronising ({reason})', { reason: resync[1]! }) : detail;
+}
+
 function statusText(venue: VenueStatus): string {
   switch (venue.state) {
-    case 'live': return venue.detail ? t('live — {detail}', { detail: venue.detail }) : t('live');
+    case 'live': return venue.detail ? t('live — {detail}', { detail: detailText(venue.detail) }) : t('live');
     case 'connecting': return t('connecting…');
     case 'off': return t('off');
     case 'blocked': return BLOCKED_TEXT;
@@ -86,6 +103,8 @@ export class BrowserSource implements DataSource, VenueControl {
   #levels: LevelsFrame | null = null;
   #tick: TickMessage | null = null;
   #waited = false;
+  /** The minute a quick start (`bootstrap`) said the recording begins, for every market that has not said so of its own yet. */
+  #since = 0;
   /** Set once the worker has said it is ready: an error before that means it never started, one after it only means something threw. */
   #started = false;
   /** Why the worker cannot be used (it never started): every request fails with this, at once. */
@@ -94,9 +113,29 @@ export class BrowserSource implements DataSource, VenueControl {
   recording = false; persisted = false;
   /** This tab's storage stopped working: nothing it records is kept from here on. */
   storageFailed = false;
-  #readyAt = 0;
+  /** When the worker said whether its recordings opened (0: not yet). */
+  #openedAt = 0;
+  /** The worker has said its recorded history is in: handlers connected after that are told at once (what they asked before may predate it). */
+  #historyIn = false;
+  /** The long history before the page's day (app/archive/): the service's tiles, once the import has read where they are. */
+  #archive: ArchiveColumns | null = null;
+  /** Per book, where the engine's newest run of minutes begins (`ColumnsFrame.since`, from its last answer). */
+  #heldSince = new Map<string, number>();
+  /** Whether the service's hours carry this coin's book minutes (the history message says; BTC's do, a tile-only coin's do not). */
+  #hourBooks = true;
+  /**
+   * The map has been answered from the newest recordings alone (a frame the worker marked `preview`, before the history): until a market
+   * list read after the history says where the recording begins, where it began so far (this minute) is not where the map's depth begins
+   * (`previewing`).
+   */
+  #previewed = false;
 
-  constructor(worker: Worker, { persist = true, coin = BTC, tier = 0 }: { persist?: boolean; coin?: Coin; tier?: number } = {}) {
+  /** `historyHours`: how many of the recorded history's latest hours the worker reads on opening (app/history-window.ts), a day by default. */
+  constructor(worker: Worker, { persist = true, coin = BTC, tier = 0, historyHours = DAY_HOURS }: { persist?: boolean; coin?: Coin; tier?: number; historyHours?: number } = {}) {
+    this.#coin = coin;
+    const history = historyUrl(coin.coin);
+    if (history) this.#archive = new ArchiveColumns(history);
+    this.#longShort = new LongShortCache(webGet, true, undefined, undefined, undefined, undefined, undefined, persist ? new IdbLsStore() : null);
     this.#worker = worker;
     let ready!: () => void, known!: () => void, failReady!: (error: Error) => void, failKnown!: (error: Error) => void;
     this.#ready = new Promise<void>((resolve, reject) => { ready = resolve; failReady = reject; });
@@ -110,7 +149,9 @@ export class BrowserSource implements DataSource, VenueControl {
     worker.onmessage = (event: MessageEvent<FeedsOut>) => {
       const message = event.data;
       switch (message.type) {
-        case 'ready': this.#started = true; this.persisted = message.persisted; this.#readyAt = Date.now(); ready(); break;
+        case 'ready': this.#started = true; ready(); break;
+        case 'recordings': this.persisted = message.persisted; this.#openedAt = Date.now(); break;
+        case 'history': this.#historyIn = true; this.#hourBooks = message.hourBooks ?? true; this.#archive?.setInfo(message.tiles ?? null); this.#handlers?.onHistory?.(message.columnsEarly === true); break;
         case 'failed': this.#fail(new Error(message.error)); break;
         case 'levels': this.#levels = message.frame; this.#handlers?.onLevels(message.frame); break;
         case 'tick': {
@@ -121,13 +162,15 @@ export class BrowserSource implements DataSource, VenueControl {
         case 'prints': this.#handlers?.onPrints(message.items.map(toWire)); break;
         case 'liquidations': this.#handlers?.onLiquidations?.(message.items.map(liquidationWire)); break;
         case 'flow': this.#handlers?.onFlow?.(message.items); break;
+        case 'oi': this.#handlers?.onOiPush?.([message]); break;
         case 'tape': { if (!this.#tapeOn) break; const batch = checkTape(message.batch); if (batch) this.#handlers?.onTape?.(batch); break; }
         case 'absorption': { const found = parseAbsorptionLive(message); this.#handlers?.onAbsorption?.(found.groups, found.minutes); break; }
         case 'status':
           this.#statuses = message.venues; known();
           for (const watcher of this.#watchers) watcher(message.venues.map(toEntry));
           break;
-        case 'recording': this.recording = message.recording; if (message.failed) this.storageFailed = true; break;
+        // A failed write is tried again: the next word from the worker says whether saving works now.
+        case 'recording': this.recording = message.recording; this.storageFailed = message.failed === true; break;
         case 'recovered': if (typeof message.id === 'string' && Number.isFinite(message.from) && Number.isFinite(message.to)) this.#handlers?.onRecovered?.(message.id, message.from, message.to); break;
         case 'rpc': {
           const call = this.#calls.get(message.id); this.#calls.delete(message.id);
@@ -143,7 +186,7 @@ export class BrowserSource implements DataSource, VenueControl {
       // outstanding is failed either way (it may never be answered), and only the first case closes the door.
       if (this.#started) this.#rejectCalls(error); else this.#fail(error);
     };
-    this.#post({ type: 'init', selected: savedSelection(), known: savedKnown(), persist, coin, tier, database: recordingsName(coin.coin), lock: recorderLockName(coin.coin) });
+    this.#post({ type: 'init', selected: savedSelection(), known: savedKnown(), persist, coin, tier, database: recordingsName(coin.coin), lock: recorderLockName(coin.coin), history: historyUrl(coin.coin), historyHours });
     // Recordings still queued are written as the page goes away.
     addEventListener('pagehide', () => this.#post({ type: 'flush' }));
     // The worker has no document: it is told whether the page is shown, so a hidden tab reads no far books (about 220 KB per OKX book every 15 s).
@@ -154,15 +197,15 @@ export class BrowserSource implements DataSource, VenueControl {
   }
 
   /**
-   * What becomes of what this tab records, for the status bar. A moment after the worker is ready it may not have been given the recorder
-   * role yet (the role is asked for as the engine starts), and that moment is not the same as another tab holding it.
+   * What becomes of what this tab records, for the status bar. The engine runs before its recordings are open (they are read meanwhile), and
+   * a moment after they are it may not have been given the recorder role yet: neither moment is the same as another tab holding it.
    */
   saving(now: number): SavingState {
-    if (!this.#started) return 'starting';
+    if (!this.#started || !this.#openedAt) return 'starting';
     if (!this.persisted) return 'memory';
     if (this.storageFailed) return 'failed';
     if (this.recording) return 'here';
-    return now - this.#readyAt < 3_000 ? 'starting' : 'other';
+    return now - this.#openedAt < 3_000 ? 'starting' : 'other';
   }
 
   #fail: (error: Error) => void = () => {};
@@ -178,18 +221,35 @@ export class BrowserSource implements DataSource, VenueControl {
     }));
   }
 
-  async bootstrap(): Promise<BootstrapState> {
+  async bootstrap(options?: { prefer?: string }): Promise<BootstrapState> {
     await this.#ready;
     let boot = await this.#call({ method: 'bootstrap' });
     // Only the first call waits (later ones come from the series loader and must not stall). A venue is live before it has a price, and a
-    // blocked or slow one never does, so the page waits for the first one that has a price and opens on that market.
+    // blocked or slow one never does, so the page waits for the first one that has a price and opens on that market; a page that expects
+    // a market that is listed does not wait (every market is listed from the start, live or not).
     if (!this.#waited) {
       this.#waited = true;
-      const deadline = Date.now() + FIRST_PRICE_MS;
-      while (!boot.markInstrumentId && Date.now() < deadline) { await new Promise<void>(resolve => setTimeout(resolve, 250)); boot = await this.#call({ method: 'bootstrap' }); }
+      // No venue may be live yet, so none is said to record yet: every market without a recording starts it this minute (here and in the
+      // calls that follow, until it says so of its own), as the engine says of a live venue about to be sampled; the map frames from it.
+      const prefer = options?.prefer;
+      if (prefer && boot.markets.some(m => m.instrumentId === prefer)) this.#since = Math.floor(Date.now() / boot.columnMs) * boot.columnMs;
+      else {
+        const deadline = Date.now() + FIRST_PRICE_MS;
+        while (!boot.markInstrumentId && Date.now() < deadline) { await new Promise<void>(resolve => setTimeout(resolve, 250)); boot = await this.#call({ method: 'bootstrap' }); }
+      }
     }
-    return { ...boot, dataMode: 'browser', layers: {} };
+    let recorded = boot.recorded;
+    if (this.#since > 0 && boot.markets.some(m => m.instrumentId && !recorded[m.instrumentId])) {
+      recorded = { ...recorded };
+      for (const m of boot.markets) if (m.instrumentId && !recorded[m.instrumentId]) recorded[m.instrumentId] = { first: this.#since, last: this.#since };
+    }
+    // Read after the history (the worker answers in order): this one says where the recording begins, and the hub takes it as it returns.
+    if (this.#historyIn) this.#previewed = false;
+    return { ...boot, recorded, dataMode: 'browser', layers: {} };
   }
+
+  /** Whether the map is drawn from the newest recordings alone for now (`#previewed`). */
+  previewing(): boolean { return this.#previewed; }
 
   connect(handlers: LiveHandlers): { close(): void; tape(on: boolean): void } {
     this.#handlers = handlers;
@@ -198,17 +258,26 @@ export class BrowserSource implements DataSource, VenueControl {
       handlers.onOpen();
       if (this.#levels) handlers.onLevels(this.#levels);
       if (this.#tick) handlers.onTick(this.#tick);
+      if (this.#historyIn) handlers.onHistory?.();
     });
     return { close: () => { if (this.#handlers === handlers) this.#handlers = null; }, tape: on => { this.#tapeOn = on; } };
   }
 
   async candles(inst: string, tf: string, from: number, to: number): Promise<CandleRow[]> { return this.#call({ method: 'candles', inst, tfMs: TIMEFRAMES[tf] ?? 3_600_000, from, to }); }
+  readonly #coin: Coin;
+  readonly #priceHistory = new PriceHistoryCache(webGet);
+  priceHistory(inst: string, tf: string, from: number, to: number): Promise<PriceHistoryAnswer> {
+    const target = priceListing(this.#coin, inst), tfMs = priceTimeframeMs(tf);
+    if (!target || !tfMs) return Promise.reject(new Error('Unsupported price history'));
+    return this.#priceHistory.series(target, tfMs, from, to);
+  }
   /**
    * Read from the venues by the page itself (each answers with CORS headers but OKX, which a page cannot read), kept in memory. A cancelled
    * question is not cancelled here: the request is the series', shared with every question for it, and the cache bounds its wait.
    */
-  #longShort = new LongShortCache(webGet, true);
-  longShort(inst: string, metric: LsMetric, tf: string, from: number, to: number): Promise<LsSeries> { return this.#longShort.series(inst, metric, TIMEFRAMES[tf] ?? 3_600_000, from, to); }
+  /** Long/short readings, kept across reloads in their own database (app/browser/ls-store.ts) unless the session keeps nothing (`?persist=0`). */
+  #longShort!: LongShortCache;
+  longShort(inst: string, metric: LsMetric, tf: string, from: number, to: number, _signal?: AbortSignal, budgetMs?: number): Promise<LsSeries> { return this.#longShort.series(inst, metric, TIMEFRAMES[tf] ?? 3_600_000, from, to, budgetMs); }
   async oi(inst: string, tf: string, from: number, to: number, usd = false): Promise<OiBar[]> { return this.#call({ method: 'oi', inst, tfMs: TIMEFRAMES[tf] ?? 3_600_000, from, to, ...(usd ? { usd } : {}) }); }
   async prints(from: number, to: number, minUsd?: number): Promise<Print[]> { return this.#call({ method: 'prints', from, to, ...(minUsd !== undefined ? { minUsd } : {}) }); }
   async printSums(ids: string[], from: number, to: number, minUsd: number, stepMs: number): Promise<PrintSumsAnswer> {
@@ -217,16 +286,60 @@ export class BrowserSource implements DataSource, VenueControl {
     return answer;
   }
   async liquidations(from: number, to: number, minUsd?: number): Promise<Liquidation[]> { return this.#call({ method: 'liquidations', from, to, ...(minUsd !== undefined ? { minUsd } : {}) }); }
-  async columns(ids: string[], from: number, to: number, stepMs: number): Promise<ColumnsFrame> { return this.#call({ method: 'columns', ids, from, to, stepMs }); }
+  /**
+   * The engine's columns, and (averages at two minutes or more) the windows before its day from the long history's tiles. `early`: the map's
+   * own load, answered from the newest recordings while the rest of the day is read (`DataSource.columns`).
+   */
+  async columns(ids: string[], from: number, to: number, stepMs: number, close = false, early = false): Promise<ColumnsFrame> {
+    const frame = await this.#call({ method: 'columns', ids, from, to, stepMs, close, ...(early ? { early } : {}) });
+    // Answered from the newest recordings (the worker says so on the frame; a page that keeps none never is): the map is drawn from them.
+    if (frame.preview === true && !this.#historyIn) this.#previewed = true;
+    this.#noteSince(frame);
+    return close || !this.#archive ? frame : this.#archive.extend(frame, from, to, stepMs);
+  }
+
+  /** The columns of [from, to) again after tiles came for it (`setArchiveListener`): what the view needs is added to, not replaced. */
+  async archiveRange(ids: string[], from: number, to: number, stepMs: number, grids?: Readonly<Record<string, number>>): Promise<ColumnsFrame> {
+    const frame: ColumnsFrame = await this.#call({ method: 'columns', ids, from, to, stepMs, close: false });
+    this.#noteSince(frame);
+    return this.#archive ? this.#archive.extend(frame, from, to, stepMs, grids) : frame;
+  }
+
+  archiveView(stepMs: number, windows: readonly { from: number; to: number }[]): void { this.#archive?.view(stepMs, windows); }
+
+  #noteSince(frame: ColumnsFrame): void { for (const [id, since] of Object.entries(frame.since ?? {})) this.#heldSince.set(id, since); }
+
+  /** Where depth of the engine's own begins for `ids`: the latest of their runs' starts (+Infinity for a book it holds none of), or null before any answer said. */
+  depthSince(ids: readonly string[]): number | null { return depthSinceOf(this.#heldSince, ids); }
+
+  /** Said when tiles have come that the columns already answered could use: the range they bring, or (null) anything (the hub asks again). */
+  setArchiveListener(listener: (change: ArchiveChange) => void): void { if (this.#archive) this.#archive.onChange = listener; }
+
+  /** Where the long history's depth begins, or null when there is none (yet). */
+  archiveFirst(): number | null { return this.#archive?.first() ?? null; }
+  /** The long history's finest window (ms), or null when there is none (yet). */
+  archiveMinStep(): number | null { return this.#archive?.minStepMs() ?? null; }
+  /** Whether a view that includes now draws the long history before the page's own depth: when the service's hours carry no book minutes for the coin (ETH, SOL), nothing else fills it. */
+  archiveLive(): boolean { return !this.#hourBooks && this.#archive?.first() != null; }
   async flow(ids: string[], from: number, to: number): Promise<FlowFrame> { return this.#call({ method: 'flow', ids, from, to }); }
   async absorption(ids: string[], mins: number[], from: number, to: number, limit: number, since: number): Promise<AbsorptionAnswer> {
     const answer = parseAbsorptionAnswer(await this.#call({ method: 'absorption', ids, mins, from, to, limit, since }), ids);
     if (!answer) throw new Error('the browser engine answered the absorption question with something else');
     return answer;
   }
+  async absorptionProfile(ids: string[], thresholds: number[], from: number, to: number, rowStep: number): Promise<AbsorptionProfileAnswer> {
+    const answer = parseAbsorptionProfile(await this.#call({ method: 'absorptionProfile', ids, thresholds, from, to, step: rowStep }), ids);
+    if (!answer) throw new Error('the browser engine answered the absorption column with something else');
+    return answer;
+  }
   async profile(ids: string[], from: number, to: number, rowStep: number): Promise<ProfileAnswer> {
     const answer = parseProfile(await this.#call({ method: 'profile', ids, from, to, rowStep }), ids);
     if (!answer) throw new Error('the browser engine answered the profile question with something else');
+    return answer;
+  }
+  async oiProfile(ids: string[], from: number, to: number, rowStep: number): Promise<OiProfileAnswer> {
+    const answer = parseOiProfile(await this.#call({ method: 'oiProfile', ids, from, to, rowStep }), ids);
+    if (!answer) throw new Error('the browser engine answered the open-interest question with something else');
     return answer;
   }
   async range(ids: string[], from: number, to: number, band: { p0: number; p1: number } | null, rowStep: number): Promise<RangeAnswer> {

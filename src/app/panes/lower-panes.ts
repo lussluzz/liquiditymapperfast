@@ -1,35 +1,63 @@
-import { PALETTES, mixHex, textOn } from '../theme.ts';
+import { PALETTES, mixHex, textOn, type Palette, paletteOf } from '../theme.ts';
 import { setTip } from '../tip.ts';
 import { helpButton } from '../help.ts';
-import { TIMEFRAMES, type Hub } from '../hub.ts';
+import { TIMEFRAMES, type DepthAnswer, type Hub } from '../hub.ts';
+import { DEPTH_PRESETS, bandEditText, bandText, bandsOf, parseBands, type DepthPreset, type DepthSettings } from '../depth-settings.ts';
 import { DEFAULT_BAR_STATS, type Store, type AppState, type OiBar, type CandleRow } from '../store.ts';
-import { chainedOi, oiChangeByTime, oiDeltas, oiPartsUntil, oiSumOf, oiUsdChangeByTime, type OiPart } from '../oi-change.ts';
+import { chainedOi, heldOiAt, oiChangeByTime, oiDeltas, oiPartsUntil, oiSumOf, oiUsdChangeByTime, oiVenuesAt, type OiPart, type OiVenue } from '../oi-change.ts';
 import { anomalies, type HighlightOptions } from '../anomaly.ts';
 import { venueLabel } from '../venues.ts';
-import { activeIds, emptyScopeMessage, marketIds } from '../scope.ts';
+import { kindOf } from '../scope.ts';
+import { bookEmptyMessage, bookIds, bookMarketIds } from '../book-markets.ts';
+import { BookVenues } from './book-venues.ts';
 import { ASKS, BIDS, DepthBars, fitsBars, neededBars, pixelFlags, sideFlags } from '../depth-bars.ts';
 import type { View } from '../view.ts';
 import { clock, price as fmtPrice, usd } from '../format.ts';
-import { gutter, timeTicks, AXIS_W, type HeatPane } from './heat-pane.ts';
-import { BAR_STATS, GROUP_TITLES, PRESETS, enabledStats, rowScale, statCellLines, statDef, strength, type StatCell, type StatGroup } from './bar-stats.ts';
-import { HoverCard } from '../hovercard.ts';
+import { gutter, leftGutter, timeTicks, AXIS_W, type HeatPane } from './heat-pane.ts';
+import { BAR_STATS, GROUP_SHORT, GROUP_TITLES, HEAD_H, PRESETS, coverageOf, csvCell, DAY_MS, dayStartOf, deviation, enabledStats, liquidationBuckets, pinnedLines, pinsAfterClick, rowScale, statCellLines, statDef, strength, tableBands, viewCellLines, type StatCell, type StatDef, type StatGroup, type StatInput, type LiquidationDay, type StatTone, type TableBand, type ViewCell } from './bar-stats.ts';
+import { resolveZone } from '../traded/settings.ts';
+import { resetKeys } from '../delta/candles.ts';
+import { LIQUIDATIONS_PER_ANSWER, LIQUIDATION_RETENTION_MS } from '../../shared/liquidations.ts';
+import { BROWSER_RETENTION_MS } from '../../shared/recorder.ts';
+import { CARD_GAP, HoverCard } from '../hovercard.ts';
 import type { InfoLine } from '../infobox.ts';
-import { barAt, columnAt, depthCardLines, depthColumns, depthKey, ltCardLines, oiCardLines, oiTail, readAt, slotAt } from './pane-cards.ts';
+import { barAt, columnAt, depthCardLines, depthColumns, depthKey, liqCardLines, ltCardLines, oiCardLines, oiTail, readAt, slotAt } from './pane-cards.ts';
+import { LiqHistory, bandIndex, bandOnEdge, type LiqRow } from '../liq-history.ts';
+import { groupApplies, groupTitle, liveView, viewKey, type LiqView } from '../liq-view.ts';
+import { FREE_DAYS, freeFrom, plusOnSale } from '../plus/config.ts';
+import { plus } from '../plus/pass.ts';
+import { togglePlus } from '../plus/panel.ts';
 import type { StatOptions } from '../stat-options.ts';
 import { el } from '../dom.ts';
-import { button, checkRow, heading, note, numberRow, selectRow, sizeControl, sizeRow, sortableList, togglePanel, type Panel } from '../ui.ts';
+import { addTune } from '../pane-tune.ts';
+import { PaneTable, ratioCell, ratioFigure, sideRatio, tableInk, tableRowCap, type TableCell, type TableRoom } from './pane-table.ts';
+import { isPhone } from '../device.ts';
+import { niceTicks } from '../cvd/hero.ts';
+import { button, checkRow, heading, note, numberRow, selectRow, sizeControl, sizeRow, sortableList, switchRow, togglePanel, type Panel } from '../ui.ts';
 import { COMMON_SIZES, SIZE_FLOOR_USD, SIZE_MAX_USD, sizeText } from '../sizes.ts';
-import type { LtSeries } from '../lt.ts';
+import { imbalanceAxis, ltPartAt, shownBy, type LtParts, type LtSeries } from '../lt.ts';
 import { LT_HALF_LIVES } from '../../shared/lt-sample.ts';
 import { GestureRecognizer, bindTouch, type GestureHandlers, type Pt } from '../touch.ts';
 import { panelSwitchRow, panelSwitchOn, panelSwitchTip, setPanelSwitch } from '../sound/panel.ts';
 import { t, tn } from '../i18n.ts';
-import { scaledUsd, unscaledUsd } from '../coin.ts';
+import { currentCoin, scaledUsd, unscaledUsd } from '../coin.ts';
+import { fetchOiHistory, webGet } from '../../shared/history.ts';
+import { aggregateOi } from '../../shared/series.ts';
+import { BAR_CUT_H, BAR_CUT_PX, barScale, cutGap } from '../bar-scale.ts';
+import { OiLongHistory, oiLongBars, oiLongPeriod, oiLongSeam, type OiLongHeld, type OiLongSeam } from './oi-long.ts';
 import { DRAG_MIN_PX, selects } from '../range/selection.ts';
 import type { RangeTool } from '../range/tool.ts';
 import type { FlowBook } from '../flow-book.ts';
-import { buildOiMarketsPanel } from '../market-picker.ts';
+import { buildOiMarketsPanel, marketPicker } from '../market-picker.ts';
 import { pageNow, replaying } from '../replay/clock.ts';
+import { coinText, nlnsWhoLines, whoParts, type NlnsCandle } from '../delta/nlns.ts';
+import type { NlnsSource } from '../delta/nlns-source.ts';
+import { pixelRatio, sharpens } from '../pixel-ratio.ts';
+import { candleSplitStyles, emphasisFloor, medianRow } from '../traded/emphasis.ts';
+import type { OiPaneHeld } from '../range/oi-lines.ts';
+import type { BarsPaneHeld } from '../range/bars-lines.ts';
+import { ltHeldKey, type LtPaneHeld } from '../range/lt-lines.ts';
+import { depthHeldKey, type DepthPaneHeld } from '../range/depth-lines.ts';
 
 /**
  * Header readouts are rewritten on every pointer move by every pane. Assigning the text a node already has still re-parses it and
@@ -45,18 +73,51 @@ export abstract class TimePane {
   protected head = document.createElement('div');
   protected canvas = document.createElement('canvas');
   protected ctx: CanvasRenderingContext2D;
+  /**
+   * The width from the plot's left edge to the canvas's right edge (what the panes draw in), its height and the pixel ratio. The plot starts
+   * where the map's does, after the columns left of the map (`#left`), so time lines up with the map's; the panes draw in the plot's
+   * coordinates and leave the strip under those columns empty.
+   */
   protected w = 0; protected h = 0; protected dpr = 1;
+  #canvasW = 0;
+  /** The canvas has no width (the pane is closed, or on a phone its tab is not the one shown): nothing it would draw could be seen. */
+  #hidden = false;
+  /**
+   * Covered by a maximized pane of the map's column (layout.ts #setMax): laid out still, but out of sight, so it draws nothing and its cards
+   * (hover, pinned) are put away, as a hidden pane's are; uncovered, it draws again. Its cards are top-layer popovers: drawn, they floated over
+   * the maximized chart (review r1).
+   */
+  #covered = false;
+  cover(on: boolean): void {
+    if (on === this.#covered) return;
+    this.#covered = on;
+    if (!on) { this.invalidate(); return; }
+    this.#endPan();
+    if (this.#frame) { cancelAnimationFrame(this.#frame); this.#frame = 0; }
+    if (this.#pinned) this.#unpin();
+    this.undrawn();
+  }
+  /** Let go of a finger's pin and of the pointer: the pane's card goes at its next drawing (a pane left drawn under a maximized map, review r3). */
+  dismiss(): void { if (this.#pinned) this.#unpin(); this.pointer = null; this.invalidate(); }
+  get #left(): number { return leftGutter(this.store.state); }
   protected palette = PALETTES.light!;
   #frame = 0;
   /** What the map does with a gesture on the time axis these panes share with it (set by `useTimeGestures`). */
   #time: ReturnType<HeatPane['timeGestures']> | null = null;
+  /** What the map does with a wheel turn over a pane: it zooms the time axis they share (set by `useTimeGestures`). */
+  #wheel: HeatPane['timeWheel'] | null = null;
+  /**
+   * A mouse press with the main button that may become a drag moving the time axis the panes share with the map (Karl, 2026-11-17: a pane, even
+   * maximized, could not be moved): the pointer, where it was pressed and last moved to, and whether it has gone far enough to be a drag.
+   */
+  #pan: { id: number; x0: number; x: number; moved: boolean } | null = null;
   #pinned: Pt | null = null;
-  #source: 'depth' | 'oi' | 'lt' | 'bars' | 'delta' | 'ls';
+  #source: 'depth' | 'oi' | 'lt' | 'bars' | 'delta' | 'ls' | 'funding' | 'script';
   /** Where the pointer (or the pinned finger) is, in the page, for a popup that is a page element rather than canvas drawing. */
   protected pointer: { x: number; y: number } | null = null;
   /** The Range tool (set by the page), and a stretch of time being selected here: where the drag began, and where a finger last was. */
   #range: RangeTool | null = null;
-  #selecting: { x: number } | null = null;
+  #selecting: { x: number; id: number } | null = null;
   #touchSelect: { start: Pt; at: Pt } | null = null;
 
   constructor(host: HTMLElement, protected store: Store, protected view: View, cls: string) {
@@ -64,38 +125,97 @@ export abstract class TimePane {
     this.root.append(this.head, this.canvas); host.append(this.root);
     this.ctx = this.canvas.getContext('2d')!;
     new ResizeObserver(() => this.#resize()).observe(this.canvas);
-    const source = this.#source = cls as 'depth' | 'oi' | 'lt' | 'bars' | 'delta' | 'ls';
-    // A drag across a pane selects a stretch of time for the Range tool while it is armed, or with Ctrl (Cmd on a Mac) held.
+    // A pane that is not shown keeps its canvas of no size: drawing it would draw nothing.
+    sharpens({ resize: () => this.#resize(), paint: () => { if (!this.#covered && this.canvas.getBoundingClientRect().width > 0) this.#prepare(); } });
+    const source = this.#source = cls as 'depth' | 'oi' | 'lt' | 'bars' | 'delta' | 'ls' | 'funding' | 'script';
+    // A drag across a pane selects a stretch of time for the Range tool while it is armed, or with Ctrl (Cmd on a Mac) held. Otherwise a drag with
+    // the main button moves the time axis the panes share with the map, as a finger's does: not from a table's rows it chooses (`ownsPress`), and
+    // only once it has gone DRAG_MIN_PX, so a click (a table's row, a Bar stats candle) and a double click (maximize) stay what they were.
     this.canvas.addEventListener('pointerdown', e => {
-      if (e.pointerType === 'touch' || !this.#range) return;
-      const x = e.clientX - this.canvas.getBoundingClientRect().left;
-      if (!selects(this.#range.armed, e) || x < 0 || x > this.plotW) return;
-      this.#selecting = { x }; this.#range.begin({ t: this.#timeAt(x), p: null }); this.canvas.setPointerCapture(e.pointerId);
+      this.rangeGesture = false;
+      if (e.pointerType === 'touch') return;
+      this.#endPan();
+      const x = e.clientX - this.canvas.getBoundingClientRect().left - this.#left;
+      if (this.#range && selects(this.#range.armed, e) && x >= 0 && x <= this.plotW) {
+        this.rangeGesture = true; this.#selecting = { x, id: e.pointerId }; this.#range.begin({ t: this.#timeAt(x), p: null }, source); this.canvas.setPointerCapture(e.pointerId);
+        return;
+      }
+      this.pointer = { x: e.clientX, y: e.clientY };
+      if (e.button !== 0 || !this.#time || x < 0 || this.ownsPress(x)) return;
+      this.#pan = { id: e.pointerId, x0: x, x, moved: false };
+      this.canvas.setPointerCapture(e.pointerId);
     });
+    // A drag that moved the axis ends in no click: the table's row or the candle under where it was let go is not chosen.
+    this.canvas.addEventListener('pointerup', e => { const pan = this.#pan; if (!pan || e.pointerId !== pan.id) return; if (pan.moved) this.rangeGesture = true; this.#endPan(); });
+    // A drag the browser took away, or a capture lost, lets go of the map too: left held, the map would stop following the market.
+    // A Range selection the browser took away is cancelled the same way: left set, every hover moved it and the next release ended it.
+    const lost = (e: PointerEvent): void => {
+      if (e.pointerId === this.#pan?.id) this.#endPan();
+      if (this.#selecting && e.pointerId === this.#selecting.id) { this.#selecting = null; this.#range?.cancel(); }
+    };
+    this.canvas.addEventListener('pointercancel', lost);
+    this.canvas.addEventListener('lostpointercapture', lost);
+    // The wheel zooms the time axis the panes share with the map, as it does on the map's time strip.
+    this.canvas.addEventListener('wheel', e => {
+      if (!this.#wheel) return;
+      e.preventDefault();
+      const x = e.clientX - this.canvas.getBoundingClientRect().left - this.#left;
+      this.#wheel(Math.max(0, Math.min(this.plotW, x)), this.plotW, e);
+    }, { passive: false });
     this.canvas.addEventListener('pointerup', e => {
       const sel = this.#selecting; if (!sel || !this.#range) return;
-      const x = e.clientX - this.canvas.getBoundingClientRect().left; this.#selecting = null;
+      const x = e.clientX - this.canvas.getBoundingClientRect().left - this.#left; this.#selecting = null;
       this.#range.end({ t: this.#timeAt(x), p: null }, Math.abs(x - sel.x) < DRAG_MIN_PX);
       if (this.canvas.hasPointerCapture(e.pointerId)) this.canvas.releasePointerCapture(e.pointerId);
     });
     this.canvas.addEventListener('pointermove', e => {
       if (e.pointerType === 'touch') return;
-      const r = this.canvas.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+      const r = this.canvas.getBoundingClientRect(), x = e.clientX - r.left - this.#left, y = e.clientY - r.top;
       this.pointer = { x: e.clientX, y: e.clientY };
       if (this.#selecting) this.#range?.move({ t: this.#timeAt(x), p: null });
-      this.canvas.style.cursor = this.#range?.armed && x <= this.plotW ? 'crosshair' : '';
+      const pan = this.#pan;
+      if (pan && e.pointerId === pan.id) {
+        // The button let go without an up reaching the pane (review r1): the drag ends there, rather than panning on with a plain hover.
+        if (e.pointerType === 'mouse' && !(e.buttons & 1)) this.#endPan();
+        else {
+          if (!pan.moved && Math.abs(x - pan.x0) >= DRAG_MIN_PX) { pan.moved = true; this.#time?.down?.({ x: pan.x0, y }); this.#time?.panStart?.({ x: pan.x0, y }); }
+          if (pan.moved) { this.#time?.pan?.({ x: x - pan.x, y: 0 }, { x, y }, { x: 0, y: 0 }); pan.x = x; }
+        }
+      }
+      this.canvas.style.cursor = this.#pan?.moved ? 'grabbing' : this.#range?.armed && x <= this.plotW ? 'crosshair' : '';
       if (x < 0) { this.store.set({ hover: null }); return; }
+      // Where the pane answers the pointer itself (Bar stats' View column), the time the panes share is left alone, and only it is drawn again.
+      // A drag moving the axis passes over a table as over the plot: its rows are not lit for a release that chooses none (review r1).
+      if (!this.#pan?.moved && this.ownsPoint(x)) { if (this.store.state.hover) this.store.set({ hover: null }); this.invalidate(); return; }
       // Over the price axis the pointer reads the right edge of the plot, so a pane past its newest point keeps showing that (readAt).
       this.store.set({ hover: { t: this.view.tOf(Math.min(x, this.plotW), this.plotW), price: null, y, source } });
     });
     this.canvas.addEventListener('pointerleave', e => { if (e.pointerType !== 'touch') { this.pointer = null; this.store.set({ hover: null }); } });
-    bindTouch(this.canvas, new GestureRecognizer(this.#touchHandlers()));
+    bindTouch(this.canvas, new GestureRecognizer(this.#touchHandlers()), () => this.#left);
   }
 
-  /** Let the panes' finger gestures move the map's time axis (called once the map exists). */
-  useTimeGestures(time: ReturnType<HeatPane['timeGestures']>): void { this.#time = time; }
-  /** Let a drag across the pane select a stretch of time for the Range tool. */
-  useRange(range: RangeTool): void { this.#range = range; }
+  /** Let the panes' finger gestures, mouse drags and wheel turns move the map's time axis (called once the map exists). */
+  useTimeGestures(time: ReturnType<HeatPane['timeGestures']>, wheel: HeatPane['timeWheel']): void { this.#time = time; this.#wheel = wheel; }
+  /** Let go of a mouse drag on the axis, if one is held: the map decides whether it follows the market on (its `panEnd`). */
+  #endPan(): void {
+    const pan = this.#pan; if (!pan) return;
+    this.#pan = null;
+    if (this.canvas.hasPointerCapture(pan.id)) this.canvas.releasePointerCapture(pan.id);
+    if (pan.moved) { this.canvas.style.cursor = ''; this.#time?.panEnd?.(null); }
+  }
+  /**
+   * Let a drag across the pane select a stretch of time for the Range tool, and put the tool's button for this pane in its header, before its
+   * menu and close button (layout.ts `#mover`): a drag here sums up this pane without looking for the map's Select (Karl, 2026-11-13).
+   */
+  useRange(range: RangeTool): void {
+    this.#range = range;
+    const button = range.paneButton(this.#source), tools = this.head.querySelector(':scope > .pane-tools');
+    if (tools) tools.prepend(button); else this.head.append(button);
+  }
+  /** Tell the Range tool this pane drew again (its summary of a selection made in it is worked out again, at most once a second). */
+  protected rangeChanged(): void { this.#range?.paneChanged(this.#source); }
+  /** What the pane stands for changed before it drew again: the Range tool reads its summary after its next drawing (`RangeTool.paneLater`). */
+  protected rangeStale(): void { this.#range?.paneLater(); }
   /** The time at `x`, held inside the plot. */
   #timeAt(x: number): number { return this.view.tOf(Math.max(0, Math.min(this.plotW, x)), this.plotW); }
 
@@ -107,17 +227,17 @@ export abstract class TimePane {
     const pin = (p: Pt): void => {
       if (p.x < 0 || p.x > this.plotW) { this.#unpin(); return; }
       this.#pinned = p;
-      const box = this.canvas.getBoundingClientRect(); this.pointer = { x: box.left + p.x, y: box.top + p.y };
+      const box = this.canvas.getBoundingClientRect(); this.pointer = { x: box.left + this.#left + p.x, y: box.top + p.y };
       this.store.set({ hover: { t: this.view.tOf(p.x, this.plotW), price: null, y: p.y, source: this.#source, touch: true } });
     };
     return {
       down: p => this.#time?.down?.(p),
-      tap: p => { if (this.#pinned && Math.hypot(this.#pinned.x - p.x, this.#pinned.y - p.y) < 28) this.#unpin(); else pin(p); },
+      tap: p => { if (this.claimTap(p)) return; if (this.#pinned && Math.hypot(this.#pinned.x - p.x, this.#pinned.y - p.y) < 28) this.#unpin(); else pin(p); },
       doubleTap: p => { this.#unpin(); this.#time?.doubleTap?.(p); },
       hold: pin, holdMove: pin,
       panStart: p => {
         this.#unpin();
-        if (this.#range?.armed && p.x <= this.plotW) { this.#touchSelect = { start: p, at: p }; this.#range.begin({ t: this.#timeAt(p.x), p: null }); return; }
+        if (this.#range?.armed && p.x <= this.plotW) { this.#touchSelect = { start: p, at: p }; this.#range.begin({ t: this.#timeAt(p.x), p: null }, this.#source); return; }
         this.#time?.panStart?.(p);
       },
       pan: (d, p, v) => { if (this.#touchSelect) { this.#touchSelect.at = p; this.#range?.move({ t: this.#timeAt(p.x), p: null }); return; } this.#time?.pan?.(d, p, v); },
@@ -133,23 +253,55 @@ export abstract class TimePane {
     };
   }
   #unpin(): void {
-    this.#pinned = null;
-    if (this.store.state.hover?.touch) this.store.set({ hover: null });
+    // The pointer the pin set goes with it: left set, a table on a plate stayed over the chart after the finger had let go.
+    this.#pinned = null; this.pointer = null;
+    if (this.store.state.hover?.touch) this.store.set({ hover: null }); else this.invalidate();
   }
+  /**
+   * Pin the pointer at `p` (plot coordinates) for what the pane itself answers there (a script's tag, past the plot): no time is pinned, and
+   * the pin goes as any does, with a tap near it or the pane hidden, or by `unpinPoint` (the pane's own thing tapped again).
+   */
+  protected unpinPoint(): void { this.#unpin(); }
+  protected pinPoint(p: Pt): void {
+    const box = this.canvas.getBoundingClientRect();
+    this.#pinned = p; this.pointer = { x: box.left + this.#left + p.x, y: box.top + p.y };
+    if (this.store.state.hover) this.store.set({ hover: null }); else this.invalidate();
+  }
+  /** Whether the last press began a Range selection: the click it ends in is the selection's, not a click on the pane. */
+  protected rangeGesture = false;
+  /** Whether the pane answers the pointer at `x` (plot coordinates) itself, rather than as a time on the axis the panes share. */
+  protected ownsPoint(_x: number): boolean { return false; }
+  /** Whether a mouse press at `x` (plot coordinates) is the pane's own (a table's row it chooses), rather than the start of a drag on the time axis. */
+  protected ownsPress(_x: number): boolean { return false; }
+  /** Whether a tap at `p` (plot coordinates) is the pane's own (a row of its table), rather than one that pins the readout. */
+  protected claimTap(_p: Pt): boolean { return false; }
   /** Header element, the grip target for drag-reordering. */
   get header(): HTMLElement { return this.head; }
   get plotW(): number { return Math.max(1, this.w - gutter(this.store.state)); }
-  setPalette(name: string): void { this.palette = PALETTES[name] ?? PALETTES.light!; this.invalidate(); }
-  invalidate(): void { if (!this.#frame) this.#frame = requestAnimationFrame(() => { this.#frame = 0; this.#prepare(); }); }
+  setPalette(name: string): void { this.palette = paletteOf(name); this.invalidate(); }
+  /**
+   * Draw again at the next frame, unless the canvas has no width: a pane not on screen asks for nothing (on a phone the panes under the map
+   * sit in tabs, and the shown tab's data changes asked the hidden ones for frames several times a second, each only to find it had no
+   * room). Its canvas getting a width again (the resize) draws it.
+   */
+  invalidate(): void { if (!this.#frame && !this.#hidden && !this.#covered) this.#frame = requestAnimationFrame(() => { this.#frame = 0; this.#prepare(); }); }
   #resize(): void {
-    const r = this.canvas.getBoundingClientRect();
-    this.w = Math.max(1, Math.floor(r.width)); this.h = Math.max(1, Math.floor(r.height)); this.dpr = window.devicePixelRatio || 1;
-    this.canvas.width = Math.round(this.w * this.dpr); this.canvas.height = Math.round(this.h * this.dpr); this.invalidate();
+    // Hidden is no width (closed, or a phone tab not shown); a pane squeezed to no height still draws its header's readout and its marks.
+    const r = this.canvas.getBoundingClientRect(), hidden = r.width < 1, was = this.#hidden;
+    this.#canvasW = Math.max(1, Math.floor(r.width)); this.h = Math.max(1, Math.floor(r.height)); this.dpr = pixelRatio();
+    this.canvas.width = Math.round(this.#canvasW * this.dpr); this.canvas.height = Math.round(this.h * this.dpr);
+    this.#hidden = hidden;
+    // Hidden now: the pane draws nothing once, as it did each frame before (its table, card and marks are put away), then waits.
+    if (hidden) { this.#endPan(); if (!was) this.#prepare(); return; }
+    this.invalidate();
   }
   #prepare(): void {
-    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0); this.ctx.clearRect(0, 0, this.w, this.h);
+    const left = this.#left;
+    this.w = Math.max(1, this.#canvasW - left);
+    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0); this.ctx.clearRect(0, 0, this.#canvasW, this.h);
+    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, this.dpr * left, 0);
     this.ctx.font = '11px ui-sans-serif, system-ui, sans-serif'; this.ctx.textBaseline = 'middle';
-    if (this.view.t1 > this.view.t0 && this.w > 1) { this.cursorT = null; this.#grid(); this.draw(); this.#replayMask(); this.#rangeBand(); this.#crosshair(); } else { if (this.#pinned) this.#unpin(); this.undrawn(); }
+    if (this.view.t1 > this.view.t0 && this.w > 1) { this.cursorT = null; this.scaleAt = null; this.leftTag = false; this.#grid(); this.draw(); this.#replayMask(); this.#rangeBand(); this.#crosshair(); } else { if (this.#pinned) this.#unpin(); this.undrawn(); }
   }
   #grid(): void {
     const { ctx, palette: p, view: v } = this, pw = this.plotW;
@@ -169,13 +321,36 @@ export abstract class TimePane {
     for (const x of [x0, x1]) if (x > 0 && x < pw) { ctx.moveTo(Math.round(x) + 0.5, 0); ctx.lineTo(Math.round(x) + 0.5, this.h); }
     ctx.stroke(); ctx.restore();
   }
+  /**
+   * The time under the pointer as a vertical line in every pane, and in the pane the pointer is over (or a finger pinned) its height as a
+   * horizontal line too, as on the map, with the value at that height in a tag on the scale where the pane says it (`scaleAt`).
+   */
   #crosshair(): void {
     const hv = this.store.state.hover; if (!hv) return;
     const { ctx, palette: p } = this;
     const x = this.view.xOf(this.cursorT ?? hv.t, this.plotW);
     if (x < 0 || x > this.plotW) return;
-    ctx.strokeStyle = p.muted; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(Math.round(x) + 0.5, 0); ctx.lineTo(Math.round(x) + 0.5, this.h); ctx.stroke(); ctx.setLineDash([]);
+    ctx.strokeStyle = p.muted; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(Math.round(x) + 0.5, 0); ctx.lineTo(Math.round(x) + 0.5, this.h);
+    const here = this.crossY && hv.source === this.#source && hv.y >= 0 && hv.y <= this.h;
+    if (here) { const y = Math.round(hv.y) + 0.5; ctx.moveTo(0, y); ctx.lineTo(this.plotW, y); }
+    ctx.stroke(); ctx.setLineDash([]);
+    const text = here ? this.scaleAt?.(hv.y) ?? null : null;
+    if (!text) return;
+    ctx.save();
+    ctx.font = '600 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+    const tagH = 16, top = Math.round(Math.max(0, Math.min(this.h - tagH, hv.y - tagH / 2))), left = this.w - AXIS_W;
+    ctx.fillStyle = p.text; ctx.fillRect(left, top, AXIS_W, tagH);
+    ctx.fillStyle = p.bg; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, left + AXIS_W / 2, top + tagH / 2 + 0.5);
+    // The same value at the plot's left end, where the pane asks for it (`leftTag`): the eye need not cross the pane to the scale.
+    if (this.leftTag) { const w = Math.ceil(ctx.measureText(text).width) + 10; ctx.fillStyle = p.text; ctx.fillRect(0, top, w, tagH); ctx.fillStyle = p.bg; ctx.fillText(text, w / 2, top + tagH / 2 + 0.5); }
+    ctx.restore();
   }
+  /** The value at a height of the pane, for the crosshair's tag on the scale: set by the pane as it draws (null: no tag, the line alone). */
+  protected scaleAt: ((y: number) => string | null) | null = null;
+  /** Whether the crosshair's value tag shows at the plot's left end too: set by the pane as it draws (off unless it says so, as where its table stands over that end). */
+  protected leftTag = false;
+  /** Whether the pointer's height means anything in this pane (a table's rows take no horizontal line). */
+  protected crossY = true;
   /** Where the readout stands when it is not under the pointer (past the newest point it shows the newest): the cursor is drawn there. Set by `draw`. */
   protected cursorT: number | null = null;
   protected abstract draw(): void;
@@ -195,139 +370,593 @@ export function oiSourceText(state: Pick<AppState, 'oiParts' | 'oiInstrument' | 
   return state.oiInstrument && state.oiInstrument !== state.seriesInstrument ? t('from {venue}', { venue: `${venueLabel(state.oiInstrument)} ${state.oiInstrument.split(':').slice(1).join(':')}` }) : null;
 }
 
+/** The Depth pane's Liquidation levels series: the Depth series' shape, the rows it was built from and the row in force in each pixel column (-1: none), and what it was built for. */
+type LiqSeries = {
+  key: string; series: { t0: number; t1: number; w: number; radii: readonly number[]; answer: DepthAnswer }; rowAt: Int32Array; rows: LiqRow[];
+  /** The history bucket each band reads (-1: none), and the bands asked beyond its reach (or, from the rollups, not one of their bands). */
+  idx: number[]; omitted: number[];
+  /** The stretch of the view whose history is Plus and closed to this visitor (`LiqHistory.closedBefore`), from where the recording begins, or null. */
+  closed: { from: number; to: number } | null;
+  /** What it shows (`liq-view.ts`), how long a row stands without a later one (90 minutes; a rollup's four hours and that), whether it is the rollups. */
+  view: LiqView; holdMs: number; wide: boolean;
+  /** The take profits, a layer of their own (a dashed line), in the same shape: per column and band, below the price (`bid`) and above. */
+  takes: { bid: Float32Array; ask: Float32Array; bidCoin: Float32Array; askCoin: Float32Array; rowAt: Int32Array } | null;
+};
+/** A difference as the Depth pane writes it, with its sign (a minus sign, not a hyphen). */
+const signedText = (value: number): string => `${value >= 0 ? '+' : '−'}${usd(Math.abs(value))}`;
+/** The Depth table's figures: three significant figures (263M, 1.38B), so its columns stay narrow enough to sit beside the plot. */
+const tableFigures = new Intl.NumberFormat('en-US', { notation: 'compact', maximumSignificantDigits: 3 });
+export const tableText = (value: number): string => Number.isFinite(value) ? tableFigures.format(value) : '–';
+/** An amount in the Depth pane's units: dollars as the page writes them, coins to three significant figures (0.0125, 5.51K), never a fraction rounded to 0. */
+const amountText = (value: number, coins: boolean): string => coins ? tableText(value) : usd(value);
+export const tableSigned = (value: number): string => Number.isFinite(value) ? `${value >= 0 ? '+' : '−'}${tableFigures.format(Math.abs(value))}` : '–';
+/** Why typed bands cannot be used, in words. */
+function bandError(code: 'empty' | 'number' | 'range' | 'count' | 'repeat'): string {
+  return code === 'empty' ? t('Type at least one band.') : code === 'number' ? t('Use numbers only, for example 0.25, 0.5, 1.')
+    : code === 'range' ? t('Each band is from 0.05 to 50 %.') : code === 'count' ? t('At most six bands.') : t('Each band once.');
+}
+
+/**
+ * Depth over time in nested bands (depth-settings.ts): for each moment, the bids and the asks within each distance of the books' own price,
+ * asks up and bids down. Each band holds every one inside it, so the layers are drawn as rings, the strongest colour at the centre and the
+ * lightest outside, with the widest band's edge outlined. The table at the right reads every band at the pointer's time (else the newest), a
+ * click on a row brings that band forward (drawn with the ones inside it, at its own scale, and judged by Highlights), and the header reads it.
+ */
 export class DepthPane extends TimePane {
-  #range = 0.2;
-  #series: { t0: number; t1: number; w: number; bid: Float32Array; ask: Float32Array } | null = null;
+  #series: { t0: number; t1: number; w: number; radii: readonly number[]; answer: DepthAnswer; ids?: readonly string[]; answeredAt?: number } | null = null;
+  /** How far the liquidation history's buckets reach (a fraction of the price), once its index is read: bands past it are not drawn. */
+  #liqReach: number | null = null;
+  /** The bands last drawn for a view and the bands asked (`viewKey|bands`), for the Range summary's key. */
+  #liqDrawn: { key: string; radii: readonly number[] } | null = null;
+  /** What the pane said last instead of drawing liquidation levels (none recorded yet, out of reach), or '' (drawn, or loading); the reach then. */
+  #liqSay = ''; #liqReachSaid: number | null = null;
+  /** What the pane drew last, for its Range summary (range/depth-lines.ts): the same object while that does not change. */
+  #held: DepthPaneHeld | null = null;
+  get rangeHeld(): DepthPaneHeld | null { return this.#held; }
+  /** What a snapshot of the pane is for, now: the source, the books counted (the order book's: Venues) and the bands. */
+  rangeKey(state: AppState): string {
+    if (state.depthSource !== 'liq') return depthHeldKey('book', bookIds(state), bandsOf(state.depthBands));
+    // Liquidation levels: what they show, and the bands the pane draws: those within the history's reach once it is known, or as last drawn
+    // for this view and these bands (the rollups have bands of their own: `#liqSeries`).
+    const reach = this.#liqReach, bands = bandsOf(state.liqBands), view = viewKey(liveView(state.liqLevels)), drawn = this.#liqDrawn;
+    const radii = drawn?.key === `${view}|${bands.join(',')}` ? drawn.radii : reach === null ? bands : bands.filter(r => r <= reach * (1 + 1e-9));
+    return depthHeldKey('liq', [], radii, view);
+  }
+  /** Why the liquidation levels have nothing to sum up, or '': another coin, or every band beyond the history's reach. */
+  rangeEmpty(state: AppState, coin: string): string {
+    if (state.depthSource !== 'liq') return '';
+    if (coin !== 'BTC') return t('Liquidation levels are for BTC only for now.');
+    const reach = this.#liqReach;
+    if (reach !== null && !bandsOf(state.liqBands).some(r => r <= reach * (1 + 1e-9))) return t('Liquidation levels reach ±{pct} % at most.', { pct: reach * 100 });
+    return this.#liqSay;
+  }
+  #publish(held: DepthPaneHeld | null): void { if (held !== this.#held) { this.#held = held; this.rangeChanged(); } }
   #key = ''; #busy = false;
   /** When the last request was made, and how long the worker took to answer it (the live edge is asked again on a clock that allows for it). */
   #askedAt = 0; #tookMs = 0;
   /** The candles the highlight is judged on (`depth-bars.ts`), and what it says for each pixel column of the answer drawn (0, BIDS, ASKS), worked out when either changes, not on every frame the pointer moves. */
   #bars: DepthBars;
   #marks: { series: object; key: string; marks: Uint8Array } | null = null;
-  /** The pane is too short for a popup drawn on it, so what the pointer is over is said in a page element. */
+  /** The watched band's own columns of an answer, for Highlights judged a pixel column at a time. */
+  #watchedCols: { answer: DepthAnswer; band: number; bid: Float32Array; ask: Float32Array } | null = null;
+  /** The pane is too short for a popup drawn on it, so where the table is not drawn what the pointer is over is said in a page element. */
   #card = new HoverCard();
   #lines: InfoLine[] | null = null;
+  /** The bands' figures on the pane (pane-table.ts): a click on a row brings that band forward, or puts it back. */
+  readonly #table = new PaneTable({ canvas: this.canvas, left: () => leftGutter(this.store.state), rangeGesture: () => this.rangeGesture, invalidate: () => this.invalidate() }, row => this.#clickRow(row));
   /** The Sound box in the header (the depth sound's switch). */
   #bell = document.createElement('input');
+  readonly #preset = document.createElement('select');
+  readonly #edit = document.createElement('button');
+  readonly #scale = document.createElement('select');
+  readonly #units = document.createElement('select');
+  readonly #tableBox = document.createElement('input');
+  readonly #source = document.createElement('select');
+  #bellLabel: HTMLElement | null = null;
+  /** Whose books the bands add up (book-markets.ts), one choice with the Liquidity Tracker's. */
+  readonly #venues: BookVenues;
+  #panel: Panel | null = null;
+  /** The liquidation levels' history (liq-history.ts), read a UTC day at a time while the pane shows Liquidation levels. */
+  // The server's boundary decides what goes with a pass, sale or no sale. While Plus is not on sale the page closes nothing by itself: every
+  // day is asked for, and only the gate's own refusal closes one (and the days before it).
+  readonly #history = new LiqHistory(undefined, { freeFrom, onSale: plusOnSale, pass: now => plus().pass(now), refused: pass => plus().refused(pass) });
+  /** The Liquidation levels series last built, with the row in force in each pixel column, kept until the history, the view or the bands change. */
+  #liq: LiqSeries | null = null;
+  /**
+   * Where the history is closed to this visitor (Plus), a button on the pane says so and opens what Plus is: a page element, so that it
+   * can be pressed and read like any other. Placed by each drawing at the closed stretch's near end (`#lockAt`, a plot x, or null: none).
+   */
+  readonly #lock = el('button', { type: 'button', class: 'plus-lock', hidden: true });
+  #lockAt: number | null = null;
   constructor(host: HTMLElement, store: Store, view: View, private hub: Hub) {
     super(host, store, view, 'depth');
     this.#bars = new DepthBars((ids, from, to, stepMs) => hub.source.columns(ids, from, to, stepMs));
     this.head.innerHTML = `<strong>${t('Depth')}</strong><span class="readout"></span>`;
     this.head.querySelector('strong')!.after(helpButton('depthPane'));
-    const label = document.createElement('label'); label.className = 'ctl'; label.append(t('Range'));
-    const select = document.createElement('select');
-    for (const r of [0.01, 0.02, 0.05, 0.1, 0.2]) select.append(new Option(`${r * 100}%`, String(r)));
-    select.value = String(this.#range); select.onchange = () => { this.#range = Number(select.value); this.#key = ''; this.invalidate(); };
-    label.append(select); this.head.append(label);
+    // What the bands add up: the order book's resting orders, or the liquidation levels of Hyperliquid's BTC positions.
+    const source = el('label', { class: 'ctl', tip: t('What the bands add up: the order book\'s resting bids and asks, or the liquidation levels of Hyperliquid\'s BTC positions (longs below the price, shorts above), from HyperTracker about every 30 minutes.') }, t('Source'));
+    this.#source.append(new Option(t('Order book'), 'book'), new Option(t('Liquidation levels'), 'liq'));
+    this.#source.onchange = () => this.store.set({ depthSource: this.#source.value === 'liq' ? 'liq' : 'book' });
+    source.append(this.#source);
+    // Whose books: the venues switched on, the chart market's, or the markets chosen (shared with the Liquidity Tracker).
+    this.#venues = new BookVenues(store);
+    // The bands: a preset, or the person's own (Edit… opens them in a panel).
+    const bands = el('label', { class: 'ctl', tip: t('The distances from the price the pane adds up, each band holding the ones inside it: Near ±0.13 % to ±2 %, Balanced ±0.31 % to ±5 %, Wide ±1.25 % to ±20 %, or your own.') }, t('Bands'));
+    for (const [value, label] of [['near', t('Near ±2 %')], ['balanced', t('Balanced ±5 %')], ['wide', t('Wide ±20 %')], ['custom', t('Custom')]] as const) this.#preset.append(new Option(label, value));
+    this.#preset.onchange = () => {
+      const preset = (DEPTH_PRESETS as readonly string[]).includes(this.#preset.value) ? this.#preset.value as DepthPreset : 'balanced';
+      this.#set({ preset, focus: null });
+      if (preset === 'custom' && !this.#panel) this.#openEdit();
+    };
+    bands.append(this.#preset);
+    this.#edit.type = 'button'; this.#edit.textContent = t('Edit…'); setTip(this.#edit, t('Set your own bands.'));
+    this.#edit.onclick = () => this.#openEdit();
+    // One group, so the header's rule that puts its last control at the right edge moves the select and its button together.
+    const group = el('span', { class: 'ctl ctl-group' }, bands, this.#edit);
+    const scale = el('label', { class: 'ctl', tip: t('Linear: heights in proportion to the money. Detail: the square root of it, so a thin inner band shows; the figures stay the money.') }, t('Scale'));
+    this.#scale.append(new Option(t('Linear'), 'linear'), new Option(t('Detail'), 'detail'));
+    this.#scale.onchange = () => this.#set({ scale: this.#scale.value === 'detail' ? 'detail' : 'linear' });
+    scale.append(this.#scale);
+    const units = el('label', { class: 'ctl', tip: t('Dollars, or the coin: each price level\'s dollars over its own price.') }, t('Units'));
+    this.#units.append(new Option('USD', 'usd'), new Option(currentCoin().coin, 'coin'));
+    this.#units.onchange = () => this.#set({ units: this.#units.value === 'coin' ? 'coin' : 'usd' });
+    units.append(this.#units);
+    const table = el('label', { class: 'ctl', tip: `${t('Each band\'s bids, asks and their difference in a table on the pane, at the pointer\'s time or the newest. Click a row to bring that band forward.')} ${t('× in the table is how many times the larger side is the smaller, in its colour: 2.50× is two and a half times as much on that side; ∞, the other side has none.')}` });
+    this.#tableBox.type = 'checkbox'; this.#tableBox.onchange = () => this.#set({ table: this.#tableBox.checked });
+    table.append(this.#tableBox, t('Table'));
     // An extreme balance can sound; its band, how rare and the hours it is judged against are in the Sounds panel.
     const bell = document.createElement('label'); bell.className = 'ctl'; this.#bell.type = 'checkbox';
     this.#bell.onchange = () => setPanelSwitch(this.store, 'depthPane', this.#bell.checked);
-    bell.append(this.#bell, t('Sound')); setTip(bell, panelSwitchTip('depthPane')); this.head.append(bell);
-    this.syncSound();
+    bell.append(this.#bell, t('Sound')); setTip(bell, panelSwitchTip('depthPane'));
+    this.#bellLabel = bell;
+    // The switches last, the table's at the right end (as on every pane).
+    this.head.append(source, this.#venues.root, group, scale, units, bell, table);
+    this.syncSound(); this.#sync();
+    // On a phone the source stays in the row and the rest waits behind the key (pane-tune.ts); on a desktop the venues fold last.
+    addTune(this.head, [this.#venues.root, group, scale, units, bell, table], t('Depth'), { fold: true });
+    this.#lock.onclick = () => { togglePlus(this.#lock); };
+    this.root.append(this.#lock);
+    // A pass that comes or goes opens or closes the older days: the series is built again from what may now be read.
+    plus().subscribe(() => { this.#history.accessChanged(); this.#liq = null; this.invalidate(); this.rangeStale(); });
   }
-  refresh(): void { this.#key = ''; this.invalidate(); }
+  /** The lock at the near end of the closed stretch, under the header and inside the plot; out of sight when nothing in view is closed. */
+  #placeLock(): void {
+    const at = this.#lockAt, lock = this.#lock;
+    if (at === null) { if (!lock.hidden) lock.hidden = true; return; }
+    const text = t('Earlier history: Plus');
+    if (lock.textContent !== text) {
+      lock.textContent = text;
+      setTip(lock, t('The liquidation levels\' history is free for the last {n} days. What is older is part of Plus, which pays for the servers that record it. Press for what Plus is.', { n: FREE_DAYS }));
+    }
+    if (lock.hidden) lock.hidden = false;
+    const w = lock.offsetWidth, x = Math.max(4, Math.min(this.plotW - w - 4, at - w - 8));
+    const left = `${Math.round(leftGutter(this.store.state) + x)}px`, top = `${this.head.offsetHeight + 6}px`;
+    if (lock.style.left !== left) lock.style.left = left;
+    if (lock.style.top !== top) lock.style.top = top;
+  }
+  /** The venues or the source changed: the bands are asked again. */
+  refresh(): void { this.#sync(); this.#key = ''; this.invalidate(); this.rangeStale(); }
+  /** The settings changed (here, a layout, another tab): the header shows them; only other bands are asked for (they are part of the request's key). */
+  settingsChanged(): void { this.#sync(); this.invalidate(); this.rangeStale(); }
   /** Show the depth sound's switch as the settings have it (it is also in the Sounds panel). */
   syncSound(): void { this.#bell.checked = panelSwitchOn(this.store, 'depthPane'); }
+  /** The bands of the source shown. */
+  #settings(): DepthSettings { const state = this.store.state; return state.depthSource === 'liq' ? state.liqBands : state.depthBands; }
+  #sync(): void {
+    const liq = this.store.state.depthSource === 'liq', s = this.#settings();
+    this.#source.value = liq ? 'liq' : 'book';
+    // The second source is what the levels show, as the page's one choice says (`liq-view.ts`): its name follows it.
+    const kind = liveView(this.store.state.liqLevels).kind, option = this.#source.options[1], name = kind === 'stops' ? t('Stop levels') : kind === 'both' ? t('Liquidation and stop levels') : t('Liquidation levels');
+    if (option && option.text !== name) option.text = name;
+    // The depth sound and the venues are the order book's: they have nothing to say about liquidation levels.
+    if (this.#bellLabel) this.#bellLabel.hidden = liq;
+    this.#venues.root.hidden = liq; this.#venues.sync();
+    this.#preset.value = s.preset; this.#edit.hidden = s.preset !== 'custom';
+    this.#scale.value = s.scale; this.#units.value = s.units; this.#tableBox.checked = s.table;
+  }
+  #set(patch: Partial<DepthSettings>): void {
+    if (this.store.state.depthSource === 'liq') this.store.set({ liqBands: { ...this.store.state.liqBands, ...patch } });
+    else this.store.set({ depthBands: { ...this.store.state.depthBands, ...patch } });
+  }
+  /** The person's own bands, typed as percentages in a panel by the bands' select. */
+  #openEdit(): void {
+    const anchor = this.#edit.hidden ? this.#preset : this.#edit;
+    const build = (_tools: HTMLElement, body: HTMLElement): void => {
+      const s = this.#settings();
+      const input = el('input', { type: 'text', class: 'depth-bands-input', value: s.custom.map(bandEditText).join(', '), spellcheck: false });
+      input.setAttribute('aria-label', t('Your bands, in percent'));
+      const error = el('p', { class: 'panel-note depth-band-error' }); error.hidden = true;
+      const apply = (): void => {
+        const parsed = parseBands(input.value);
+        if ('error' in parsed) { error.textContent = bandError(parsed.error); error.hidden = false; return; }
+        const reach = this.#history.index?.edges.at(-1) ?? 25;
+        if (this.store.state.depthSource === 'liq' && parsed.bands.some(r => r * 100 > reach * (1 + 1e-9))) {
+          error.textContent = t('Liquidation levels reach ±{pct} % at most.', { pct: reach }); error.hidden = false; return;
+        }
+        error.hidden = true;
+        this.#set({ preset: 'custom', custom: parsed.bands, focus: null });
+        this.#panel?.close();
+      };
+      input.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); apply(); } };
+      input.oninput = () => { error.hidden = true; };
+      body.append(note(t('Distances from the price in percent, smallest first, up to six, from 0.05 to 50, with a point for decimals: for example 0.25, 0.5, 1, 2, 5.')), input, error, button(t('Apply'), apply, '', 'depth-bands-apply'));
+      requestAnimationFrame(() => input.focus());
+    };
+    this.#panel = togglePanel(anchor, { title: t('Your bands'), width: 320, align: 'right', onClose: () => { this.#panel = null; } }, build);
+  }
   protected draw(): void {
     this.#lines = null;
+    this.#table.clear();
+    this.#lockAt = null;
     this.#paint();
+    this.#placeLock();
     const at = this.pointer;
     if (this.#lines && at) this.#card.show(this.#lines, at.x, at.y); else this.#card.hide();
   }
-  protected override undrawn(): void { this.#lines = null; this.#card.hide(); }
+  protected override undrawn(): void { this.#lines = null; this.#table.clear(); this.#card.hide(); this.#lockAt = null; this.#placeLock(); }
+  protected override ownsPoint(x: number): boolean { return this.#table.owns(x, this.pointer); }
+  protected override ownsPress(x: number): boolean { return this.#table.takesPress(x, this.pointer); }
+  protected override claimTap(p: Pt): boolean { return this.#table.tap(p); }
+  #clickRow(row: number): void { const s = this.#settings(); this.#set({ focus: s.focus === row ? null : row }); }
+
+  /**
+   * The Liquidation levels series for the view, in the Depth series' shape, or why there is none: each pixel column holds the snapshot in force
+   * at its time, from when it was fetched until the next, at most 90 minutes (past that the snapshots stopped and the column is empty), its
+   * bands read from the snapshot's buckets. Never past now, or past the replay's moment.
+   */
+  #liqSeries(pw: number, asked: readonly number[]): string | LiqSeries {
+    let radii = asked;
+    const v = this.view, now = Date.now(), view = liveView(this.store.state.liqLevels), vk = viewKey(view);
+    this.#history.ensure(v.t0, v.t1, now, () => this.invalidate(), view);
+    const index = this.#history.index, shape = this.#history.shape(view);
+    if (!shape.wide) {
+      if (!index) return t('The liquidation levels\' history is loading…');
+      if (index.first === null) return t('No liquidation levels recorded yet.');
+    }
+    const edges = shape.edges;
+    if (!edges) return t('The liquidation levels\' history is loading…');
+    // The history's buckets end at its last edge (±25 %): a wider band would leave out what lies past it, so it is not drawn. The rollups'
+    // thirteen buckets end on the presets' bands: a band between two of their edges would read a narrower one, so it is not drawn either.
+    const reach = edges[edges.length - 1]! / 100, bucket = (r: number): number => shape.wide ? bandOnEdge(edges, r) : bandIndex(edges, r);
+    const inReach = radii.filter(r => r <= reach * (1 + 1e-9) && (!shape.wide || bucket(r) >= 0)), omitted = radii.filter(r => !inReach.includes(r));
+    this.#liqReach = reach;
+    this.#liqDrawn = { key: `${vk}|${asked.join(',')}`, radii: inReach };
+    if (!inReach.length) return shape.wide ? t('Views this wide read the 4-hour history, which has the preset bands only.') : t('Liquidation levels reach ±{pct} % at most.', { pct: reach * 100 });
+    radii = inReach;
+    const w = depthColumns(pw), k = radii.length, t0 = v.t0, t1 = v.t1, until = replaying() ? pageNow() : now;
+    // Plus: the history before the free days is closed to a visitor without a pass, from where the recording begins.
+    const closedTo = shape.wide ? null : this.#history.closedBefore(now), closedFrom = Math.max(t0, index?.first ?? t0);
+    // Only where something was recorded and is in view: a view wholly before the recording began has nothing closed in it.
+    const closedEnd = closedTo === null ? -Infinity : Math.min(closedTo, t1);
+    const closed = closedEnd > closedFrom ? { from: closedFrom, to: closedEnd } : null;
+    const key = `${this.#history.version}|${vk}|${shape.wide}|${t0}|${t1}|${w}|${radii.join(',')}|${Math.floor(until / 5_000)}|${closed ? closed.to : ''}`;
+    if (this.#liq?.key === key) return this.#liq;
+    const s = this.#history.series(t0, t1, view), idx = radii.map(bucket);
+    // Each pixel column holds the row in force at its time, from its fetch until the next, at most `holdMs`.
+    const build = (rows: LiqRow[]): { bid: Float32Array; ask: Float32Array; bidCoin: Float32Array; askCoin: Float32Array; rowAt: Int32Array } => {
+      const bid = new Float32Array(w * k), ask = new Float32Array(w * k), bidCoin = new Float32Array(w * k), askCoin = new Float32Array(w * k), rowAt = new Int32Array(w).fill(-1);
+      for (let x = 0, i = 0; x < w; x++) {
+        const time = t0 + (x + 0.5) / w * (t1 - t0);
+        if (time > until) break;
+        if (closed && time < closed.to) continue;
+        while (i + 1 < rows.length && rows[i + 1]!.fetchedAt <= time) i++;
+        const row = rows[i];
+        if (!row || row.fetchedAt > time || time - row.fetchedAt > s.holdMs) continue;
+        rowAt[x] = i;
+        for (let j = 0; j < k; j++) {
+          const b = idx[j]!; if (b < 0) continue;
+          bid[x * k + j] = row.long[b]!; ask[x * k + j] = row.short[b]!; bidCoin[x * k + j] = row.longCoin[b]!; askCoin[x * k + j] = row.shortCoin[b]!;
+        }
+      }
+      return { bid, ask, bidCoin, askCoin, rowAt };
+    };
+    const main = build(s.rows);
+    this.#liq = { key, series: { t0, t1, w, radii, answer: { k, bid: main.bid, ask: main.ask, bidCoin: main.bidCoin, askCoin: main.askCoin } }, rowAt: main.rowAt, rows: s.rows, idx, omitted, closed,
+      view, holdMs: s.holdMs, wide: s.wide, takes: s.takes ? build(s.takes) : null };
+    return this.#liq;
+  }
+
   #paint(): void {
     const { ctx, palette: p, view: v } = this, pw = this.plotW, ph = this.h;
-    const state = this.store.state;
-    const ids = activeIds(state);
-    const emptyScope = emptyScopeMessage(state);
-    if (emptyScope) { ctx.fillStyle = p.muted; ctx.textAlign = 'left'; ctx.fillText(emptyScope, 12, ph / 2); return; }
-    const key = depthKey(ids, v.t0, v.t1, pw, this.#range, this.hub.columnsVersion);
-    // What is live changes without the view moving: asked again every second and a half, or less often when an answer takes long.
-    const refresh = v.t1 > Date.now() - 2 * MINUTE && performance.now() - this.#askedAt > Math.max(1_500, 3 * this.#tookMs);
-    if ((key !== this.#key || refresh) && !this.#busy && ids.length) {
-      this.#key = key; this.#busy = true;
-      const asked = this.#askedAt = performance.now();
-      const w = depthColumns(pw);
-      const t0 = v.t0, t1 = v.t1;
-      void this.hub.depth(ids, t0, t1, w, this.#range).then(r => { this.#tookMs = performance.now() - asked; this.#series = { t0, t1, w, bid: r.bid, ask: r.ask }; this.#busy = false; this.invalidate(); }, () => { this.#busy = false; });
-    }
-    const s = this.#series;
+    const state = this.store.state, liq = state.depthSource === 'liq', settings = this.#settings(), radii = bandsOf(settings);
     const readout = this.head.querySelector('.readout');
-    if (!s) { ctx.fillStyle = p.muted; ctx.fillText(t('Depth history is collecting…'), 12, ph / 2); return; }
+    const say = (text: string): void => { ctx.fillStyle = p.muted; ctx.textAlign = 'left'; ctx.fillText(text, 12, ph / 2); setHtml(readout, ''); };
+    const coin = currentCoin().coin, coinOption = this.#units.options[1];
+    if (coinOption && coinOption.text !== coin) coinOption.text = coin;
+    let s: { t0: number; t1: number; w: number; radii: readonly number[]; answer: DepthAnswer } | null;
+    let liqHeld: LiqSeries | null = null;
+    if (liq) {
+      if (coin !== 'BTC') { say(t('Liquidation levels are for BTC only for now.')); return; }
+      const built = this.#liqSeries(pw, radii);
+      // A message that is not "loading" is the summary's too (nothing recorded yet), until the series draws; a new one, or the reach becoming
+      // known, wakes the summary (this paint publishes nothing).
+      const said = typeof built === 'string' && built !== t('The liquidation levels\' history is loading…') ? built : '';
+      if (said !== this.#liqSay || this.#liqReach !== this.#liqReachSaid) { this.#liqSay = said; this.#liqReachSaid = this.#liqReach; this.rangeStale(); }
+      if (typeof built === 'string') { say(built); return; }
+      liqHeld = built; s = built.series;
+    } else {
+      this.#venues.follow();
+      const ids = bookIds(state);
+      const emptyScope = bookEmptyMessage(state);
+      if (emptyScope) { say(emptyScope); return; }
+      const key = depthKey(ids, v.t0, v.t1, pw, radii.join(','), this.hub.columnsVersion);
+      // What is live changes without the view moving: asked again every second and a half, or less often when an answer takes long.
+      const refresh = v.t1 > Date.now() - 2 * MINUTE && performance.now() - this.#askedAt > Math.max(1_500, 3 * this.#tookMs);
+      if ((key !== this.#key || refresh) && !this.#busy && ids.length) {
+        this.#key = key; this.#busy = true;
+        const asked = this.#askedAt = performance.now();
+        const w = depthColumns(pw), t0 = v.t0, t1 = v.t1, asking = radii;
+        const venues = [...ids];
+        void this.hub.depth(ids, t0, t1, w, asking).then(answer => { this.#tookMs = performance.now() - asked; this.#series = { t0, t1, w, radii: asking, answer, ids: venues, answeredAt: Date.now() }; this.#busy = false; this.invalidate(); }, () => { this.#busy = false; });
+      }
+      s = this.#series;
+      if (!s) { say(t('Depth history is collecting…')); return; }
+    }
+    // Until the answer for new bands arrives, the one there is is drawn with its own bands.
+    const k = s.answer.k, coins = settings.units === 'coin';
+    if (!(k > 0)) return;
+    const bid = coins ? s.answer.bidCoin : s.answer.bid, ask = coins ? s.answer.askCoin : s.answer.ask;
+    const top = settings.focus !== null && settings.focus < k ? settings.focus : k - 1, focused = top < k - 1 || settings.focus !== null;
+    const at = (x: number, j: number): number => x * k + j;
+    // The snapshot of what is drawn: a new one for a new answer (or liquidation series), units or watched band.
+    {
+      const was = this.#held, rows = liqHeld ? liqHeld.rows : null;
+      // Liquidation levels: a rebuild for a view that moved (following live, every frame) says the same until its snapshots, bands or whole minutes
+      // of its span change.
+      const sameLiq = (): boolean => !!was && !!rows && !!was.rows && was.source === 'liq' && was.key === depthHeldKey('liq', [], s.radii, liqHeld ? viewKey(liqHeld.view) : '') && was.rows.length === rows.length && rows.every((r, i) => r === was.rows![i])
+        && was.radii.join(',') === s.radii.join(',') && Math.floor(was.t0 / MINUTE) === Math.floor(s.t0 / MINUTE) && Math.floor(was.t1 / MINUTE) === Math.floor(s.t1 / MINUTE)
+        && was.t1 >= pageNow();
+      if (!was || (was.bid !== s.answer.bid && !sameLiq()) || was.coins !== coins || was.focus !== top || was.coin !== coin) {
+        const ids = liqHeld ? [] : (this.#series?.ids ?? []);
+        this.#publish({ key: depthHeldKey(liqHeld ? 'liq' : 'book', ids, s.radii, liqHeld ? viewKey(liqHeld.view) : ''), source: liqHeld ? 'liq' : 'book', ids, t0: s.t0, t1: s.t1, w: s.w, radii: s.radii,
+          bid: s.answer.bid, ask: s.answer.ask, bidCoin: s.answer.bidCoin, askCoin: s.answer.askCoin, present: liqHeld ? null : s.answer.present ?? null,
+          centred: liqHeld ? null : s.answer.centred ?? null, stepMs: liqHeld ? 0 : s.answer.stepMs ?? MINUTE, answeredAt: liqHeld ? Infinity : this.#series?.answeredAt ?? 0,
+          rows, buckets: liqHeld ? liqHeld.idx : null, omitted: liqHeld ? liqHeld.omitted : [], coins, coin, focus: top, ...(liqHeld?.closed ? { closedFrom: liqHeld.closed.from, closedTo: liqHeld.closed.to } : {}),
+          ...(liqHeld ? { view: liqHeld.view, holdMs: liqHeld.holdMs, wide: liqHeld.wide } : {}) });
+      }
+    }
+    // A column holds something where the book had depth, or (liquidation levels) where a snapshot is in force, money in its bands or not.
+    const has = (x: number): boolean => x >= 0 && x < s.w && (liqHeld ? liqHeld.rowAt[x]! >= 0 : bid[at(x, k - 1)]! > 0 || ask[at(x, k - 1)]! > 0);
     // Replay: only the columns up to its moment speak (the rest is covered).
     const cutW = replaying() ? Math.max(0, Math.min(s.w, Math.floor((pageNow() - s.t0) / (s.t1 - s.t0) * s.w))) : s.w;
-    let max = 1, lastB = 0, lastA = 0, lastX = -1;
-    for (let x = 0; x < cutW; x++) { max = Math.max(max, s.bid[x]!, s.ask[x]!); if (s.bid[x]! > 0 || s.ask[x]! > 0) { lastB = s.bid[x]!; lastA = s.ask[x]!; lastX = x; } }
-    const lastTotal = lastB + lastA, lastImbalance = lastTotal > 0 ? (lastB - lastA) / lastTotal : 0;
-    const dominant = Math.abs(lastImbalance) < 0.005 ? '' : ` <b class="${lastImbalance > 0 ? 'bid' : 'ask'}">${lastImbalance > 0 ? t('bids') : t('asks')} +${(Math.abs(lastImbalance) * 100).toFixed(1)}%</b>`;
-    setHtml(readout, `A <b class="ask">${usd(lastA)}</b> B <b class="bid">${usd(lastB)}</b> Δ <b>${usd(lastB - lastA)}</b>${dominant}`);
+    // The take profits (a dashed line each side, never added to the levels: they sit on the other side of the price), on the same scale.
+    const takes = liqHeld?.takes ?? null, takeBid = takes ? (coins ? takes.bidCoin : takes.bid) : null, takeAsk = takes ? (coins ? takes.askCoin : takes.ask) : null;
+    let max = 0, lastX = -1;
+    for (let x = 0; x < cutW; x++) { max = Math.max(max, bid[at(x, top)]!, ask[at(x, top)]!, takeBid?.[at(x, top)] ?? 0, takeAsk?.[at(x, top)] ?? 0); if (has(x)) lastX = x; }
+    if (!(max > 0)) max = 1;
+    const colT = (x: number): number => s.t0 + x / s.w * (s.t1 - s.t0);
+    const unit = coins ? ` ${coin}` : '';
+    const rowOf = (x: number): LiqRow | null => { const i = liqHeld && x >= 0 ? liqHeld.rowAt[x]! : -1; return liqHeld && i >= 0 ? liqHeld.rows[i] ?? null : null; };
+    // Plus: the stretch of the view whose history is closed to this visitor; the lock stands at its near end.
+    const closed = liqHeld?.closed ?? null, closedX = closed ? Math.min(pw, v.xOf(closed.to, pw)) : 0;
+    if (liq && lastX < 0) {
+      if (closed) { say(t('This stretch of the liquidation levels\' history is part of Plus.')); this.#lockAt = closedX; return; }
+      const kind = liqHeld?.view.kind;
+      say(kind === 'stops' ? t('No stop levels recorded for this stretch of time.') : kind === 'both' ? t('No snapshot with both liquidations and stops in this stretch of time.')
+        : t('No liquidation levels recorded for this stretch of time.'));
+      return;
+    }
+    // The header reads the watched band at the newest column (Liquidation levels: longs and shorts, and when those positions stood).
+    if (liq) {
+      const b = bid[at(lastX, top)]!, a = ask[at(lastX, top)]!, row = rowOf(lastX), view = liqHeld!.view, r = sideRatio(b, a);
+      // Whose levels (the Source names which), and the take profits beside them: the sells that close longs above, the buys that close shorts below.
+      const whose = groupApplies(view.kind) && view.group !== 'all' ? `${groupTitle(view.group)} · ` : '';
+      const larger = r?.lead ? ` <b class="${r.lead > 0 ? 'bid' : 'ask'}">${r.lead > 0 ? t('longs') : t('shorts')} ${ratioFigure(r.ratio)}</b>` : '';
+      const tp = takeBid && takeAsk && takes!.rowAt[lastX]! >= 0 ? ` · ${t('take profits')} <b class="ask">▲${amountText(takeAsk[at(lastX, top)]!, coins)}</b> <b class="bid">▼${amountText(takeBid[at(lastX, top)]!, coins)}</b>` : '';
+      setHtml(readout, `${whose}±${bandText(s.radii[top]!)}% L <b class="bid">${amountText(b, coins)}</b> S <b class="ask">${amountText(a, coins)}</b> Δ <b>${coins ? tableSigned(b - a) : signedText(b - a)}</b>${unit}${larger}${tp}${row ? ` · ${t('positions as of {time}', { time: clock(row.asOf) })}` : ''}`);
+    } else if (lastX >= 0) {
+      const b = bid[at(lastX, top)]!, a = ask[at(lastX, top)]!, total = b + a, lean = total > 0 ? (b - a) / total : 0, r = sideRatio(b, a);
+      const dominant = Math.abs(lean) < 0.005 ? '' : ` <b class="${lean > 0 ? 'bid' : 'ask'}">${lean > 0 ? t('bids') : t('asks')} +${(Math.abs(lean) * 100).toFixed(1)}%${r ? ` · ${ratioFigure(r.ratio)}` : ''}</b>`;
+      setHtml(readout, `±${bandText(s.radii[top]!)}% B <b class="bid">${amountText(b, coins)}</b> A <b class="ask">${amountText(a, coins)}</b> Δ <b>${coins ? tableSigned(b - a) : signedText(b - a)}</b>${unit}${dominant}`);
+    } else setHtml(readout, '');
+    // The column the table reads: the one under the pointer, past the newest the newest; with no pointer the newest.
+    let readX = lastX, readTime = lastX >= 0 ? colT(lastX) : NaN, pointed = false;
     const hv = state.hover;
     if (hv && this.pointer) {
-      const colT = (x: number): number => s.t0 + x / s.w * (s.t1 - s.t0), column = columnAt(s.t0, s.t1, s.w, hv.t), under = column < cutW ? column : -1;
-      const at = readAt(under >= 0 && (s.bid[under]! > 0 || s.ask[under]! > 0) ? under : -1, hv.t, lastX, lastX >= 0 ? colT(lastX) : undefined);
-      if (at >= 0 && at !== under) this.cursorT = colT(at + 0.5);
-      if (at >= 0 && (s.bid[at]! > 0 || s.ask[at]! > 0)) {
-        const here = s.bid[at]! + s.ask[at]!;
-        let rank = 1, of = 0;
-        for (let x = 0; x < cutW; x++) { const total = s.bid[x]! + s.ask[x]!; if (total > 0) { of++; if (total > here) rank++; } }
-        this.#lines = depthCardLines({ time: s.t0 + at / s.w * (s.t1 - s.t0), bid: s.bid[at]!, ask: s.ask[at]!, range: this.#range, rank, of });
+      pointed = true;
+      const column = columnAt(s.t0, s.t1, s.w, hv.t), under = column < cutW ? column : -1;
+      const found = readAt(has(under) ? under : -1, hv.t, lastX, lastX >= 0 ? colT(lastX) : undefined);
+      if (found >= 0 && found !== under) this.cursorT = colT(found + 0.5);
+      readX = found >= 0 && has(found) ? found : -1;
+      readTime = readX >= 0 ? colT(readX) : hv.t;
+    }
+    const mid = Math.round(ph / 2), half = ph / 2 - 6, detail = settings.scale === 'detail';
+    const yOf = (value: number): number => value > 0 ? (detail ? Math.sqrt(value / max) : value / max) * half : 0;
+    this.scaleAt = y => { const f = Math.abs(y - mid) / half; return amountText((detail ? f * f : f) * max, coins); };
+    const xs = new Float64Array(s.w + 1);
+    for (let x = 0; x <= s.w; x++) xs[x] = v.xOf(colT(x), pw);
+    // The rings, the widest first: its colour the lightest, the band at the centre the side's own colour; each is opaque, so no layer shows through another.
+    const shade = (side: string, j: number): string => mixHex(p.bg, side, top === 0 ? 1 : 0.3 + 0.7 * (1 - j / top));
+    for (let j = top; j >= 0; j--) {
+      ctx.fillStyle = shade(p.ask, j);
+      for (let x = 0; x < s.w; x++) { const h = yOf(ask[at(x, j)]!); if (h > 0) ctx.fillRect(xs[x]!, mid - h, xs[x + 1]! - xs[x]! + 0.6, h); }
+      ctx.fillStyle = shade(p.bid, j);
+      for (let x = 0; x < s.w; x++) { const h = yOf(bid[at(x, j)]!); if (h > 0) ctx.fillRect(xs[x]!, mid, xs[x + 1]! - xs[x]! + 0.6, h); }
+    }
+    // The widest band's edge, in a stronger ink than its fill: darker on a light theme, lighter on a dark one.
+    const edge = (side: string): string => mixHex(side, p.text, 0.35);
+    ctx.lineWidth = 1.25; ctx.lineJoin = 'round';
+    for (const [values, sign, colour] of [[ask, -1, edge(p.ask)], [bid, 1, edge(p.bid)]] as const) {
+      ctx.strokeStyle = colour; ctx.beginPath();
+      let open = false;
+      for (let x = 0; x < s.w; x++) {
+        const h = yOf(values[at(x, top)]!);
+        if (!(h > 0)) { open = false; continue; }
+        const y = mid + sign * h;
+        if (!open) { ctx.moveTo(xs[x]!, y); open = true; } else ctx.lineTo(xs[x]!, y);
+        ctx.lineTo(xs[x + 1]!, y);
+      }
+      ctx.stroke();
+    }
+    ctx.lineWidth = 1;
+    // The take profits of the watched band: a dashed line in the text's ink each side, so they read apart from the levels' rings.
+    if (takes && takeBid && takeAsk) {
+      ctx.save(); ctx.strokeStyle = p.text; ctx.globalAlpha = 0.8; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+      for (const [values, sign] of [[takeAsk, -1], [takeBid, 1]] as const) {
+        ctx.beginPath();
+        let open = false;
+        for (let x = 0; x < s.w; x++) {
+          const h = takes.rowAt[x]! >= 0 ? yOf(values[at(x, top)]!) : 0;
+          if (!(h > 0)) { open = false; continue; }
+          const y = mid + sign * h;
+          if (!open) { ctx.moveTo(xs[x]!, y); open = true; } else ctx.lineTo(xs[x]!, y);
+          ctx.lineTo(xs[x + 1]!, y);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    // Highlights: where the watched band was unusually heavy on one side, that side's edge is drawn thick across the column.
+    if (state.highlight.on && !liq) {
+      const marks = this.#highlight(s, state, top);
+      for (let x = 0; x < s.w; x++) {
+        const mark = marks[x] ?? 0; if (!mark) continue;
+        const w = xs[x + 1]! - xs[x]! + 0.6;
+        if (mark === ASKS) { const h = yOf(ask[at(x, top)]!); ctx.fillStyle = edge(p.ask); ctx.fillRect(xs[x]!, mid - h - 1, w, 3); }
+        if (mark === BIDS) { const h = yOf(bid[at(x, top)]!); ctx.fillStyle = edge(p.bid); ctx.fillRect(xs[x]!, mid + h - 2, w, 3); }
       }
     }
-    const mid = ph / 2, half = ph / 2 - 6, cue = state.highlight.on;
-    const xOf = (t: number) => v.xOf(t, pw);
-    const marks = cue ? this.#highlight(s, state) : null;
-    for (let x = 0; x < s.w; x++) {
-      const t = s.t0 + x / s.w * (s.t1 - s.t0), t2 = s.t0 + (x + 1) / s.w * (s.t1 - s.t0);
-      const x0 = xOf(t), x1 = xOf(t2);
-      const b = s.bid[x]!, a = s.ask[x]!;
-      // The side with more liquidity is drawn brighter and the other dimmer, in proportion to the imbalance (no flip, so it does not flicker).
-      // Where Highlights flags the side that was unusually heavy, that side goes to full strength with an edge, and the other side stays as
-      // it was: dimming it too made a highlight look like liquidity that went missing.
-      const total = b + a, imbalance = total > 0 ? (b - a) / total : 0, lean = Math.min(1, Math.abs(imbalance) / 0.3) * 0.4, mark = marks?.[x] ?? 0;
-      const bidAlpha = !cue ? 0.55 : mark === BIDS ? 0.95 : 0.5 + (imbalance > 0 ? 0.45 : -0.28) * lean;
-      const askAlpha = !cue ? 0.55 : mark === ASKS ? 0.95 : 0.5 + (imbalance < 0 ? 0.45 : -0.28) * lean;
-      // Asks above the line and bids below it, as they sit on the chart and in the order book.
-      if (a > 0) {
-        const height = a / max * half;
-        ctx.fillStyle = p.ask; ctx.globalAlpha = askAlpha; ctx.fillRect(x0, mid - height, x1 - x0 + 0.6, height);
-        if (mark === ASKS) { ctx.globalAlpha = 1; ctx.fillRect(x0, mid - height, x1 - x0 + 0.6, 1.5); }
-      }
-      if (b > 0) {
-        const height = b / max * half;
-        ctx.fillStyle = p.bid; ctx.globalAlpha = bidAlpha; ctx.fillRect(x0, mid, x1 - x0 + 0.6, height);
-        if (mark === BIDS) { ctx.globalAlpha = 1; ctx.fillRect(x0, mid + height - 1.5, x1 - x0 + 0.6, 1.5); }
+    // The closed stretch (Plus) is hatched, faintly, so that it does not read as a time with nothing recorded, and ends on a dashed line.
+    if (closed) {
+      const from = Math.max(0, v.xOf(closed.from, pw));
+      if (closedX > from + 1) {
+        ctx.save(); ctx.beginPath(); ctx.rect(from, 0, closedX - from, ph); ctx.clip();
+        ctx.strokeStyle = p.line; ctx.beginPath();
+        for (let x = from - ph; x < closedX; x += 12) { ctx.moveTo(x, ph); ctx.lineTo(x + ph, 0); }
+        ctx.stroke(); ctx.restore();
+        const edgeX = Math.round(closedX) + 0.5;
+        ctx.strokeStyle = p.muted; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(edgeX, 0); ctx.lineTo(edgeX, ph); ctx.stroke(); ctx.setLineDash([]);
+        this.#lockAt = closedX;
       }
     }
-    ctx.globalAlpha = 1; ctx.strokeStyle = p.line; ctx.beginPath(); ctx.moveTo(0, mid + 0.5); ctx.lineTo(pw, mid + 0.5); ctx.stroke();
-    ctx.fillStyle = p.muted; ctx.textAlign = 'left'; ctx.fillText(usd(max), this.w - AXIS_W + 6, 10); ctx.fillText(usd(max), this.w - AXIS_W + 6, ph - 10);
-    ctx.fillText('0', this.w - AXIS_W + 6, mid);
+    ctx.strokeStyle = p.line; ctx.beginPath(); ctx.moveTo(0, mid + 0.5); ctx.lineTo(pw, mid + 0.5); ctx.stroke();
+    // The scale: the top, half the height (a quarter of the top on Detail, which is the square root) and zero, the same up and down.
+    const axisX = this.w - AXIS_W + 6, halfValue = detail ? max / 4 : max / 2;
+    ctx.fillStyle = p.muted; ctx.textAlign = 'left';
+    ctx.fillText(amountText(max, coins), axisX, mid - half); ctx.fillText(amountText(max, coins), axisX, mid + half);
+    if (half > 40) { ctx.fillText(amountText(halfValue, coins), axisX, mid - half / 2); ctx.fillText(amountText(halfValue, coins), axisX, mid + half / 2); }
+    ctx.fillText('0', axisX, mid);
+    const rows = Array.from({ length: k }, (_, j) => ({ r: s.radii[j]!, bid: readX >= 0 ? bid[at(readX, j)]! : NaN, ask: readX >= 0 ? ask[at(readX, j)]! : NaN }));
+    const readRow = liq ? rowOf(readX) : null;
+    const foot = liq ? (readRow ? t('positions as of {time}', { time: clock(readRow.asOf, true) }) : '') : Number.isFinite(readTime) ? (pointed ? clock(readTime, true) : `${t('newest')} ${clock(readTime)}`) : '';
+    const drawn = settings.table && this.#drawTable(rows, this.pointer !== null, focused ? top : -1, foot, unit, liq ? [t('Longs'), t('Shorts')] : [t('Bid'), t('Ask')]);
+    if (!drawn && pointed && readX >= 0 && liq) {
+      const tk = takeBid && takeAsk && takes!.rowAt[readX]! >= 0 ? { bid: takeBid[at(readX, top)]!, ask: takeAsk[at(readX, top)]! } : null;
+      if (readRow) this.#lines = liqCardLines({ asOf: readRow.asOf, bands: rows, watched: top, units: settings.units, coin, view: liqHeld!.view, takes: tk });
+    }
+    else if (!drawn && pointed && readX >= 0) {
+      const here = bid[at(readX, top)]! + ask[at(readX, top)]!;
+      let rank = 1, of = 0;
+      for (let x = 0; x < cutW; x++) { const total = bid[at(x, top)]! + ask[at(x, top)]!; if (total > 0) { of++; if (total > here) rank++; } }
+      this.#lines = depthCardLines({ time: readTime, bands: rows, watched: top, units: settings.units, coin, rank, of });
+    }
   }
 
   /**
-   * Which pixel columns of the answer `s` stand out, and on which side (0, BIDS, ASKS): the page's one rule (Highlights: how many
-   * deviations over how many candles before), judged a candle at a time over the recording merged to each candle (`depth-bars.ts`), so
+   * The bands' figures (pane-table.ts): a row a band (bids, asks, bids less asks), the band brought forward lit, the column titles over them and the time read
+   * under them. The header reads the watched band; where even a row a band does not fit, the table is not drawn and the card says it instead. Returns whether it was drawn
+   * (a plate is drawn whole or not at all, so one that cannot hold the × column leaves the card, which says the watched band's ratio).
+   */
+  #drawTable(rows: readonly { r: number; bid: number; ask: number }[], pointing: boolean, focus: number, time: string, unit: string, sides: readonly [string, string]): boolean {
+    const { ctx, palette: p } = this;
+    const heads = ['', sides[0], sides[1], 'Δ', '×'];
+    return this.#table.draw(ctx, p, { w: this.w, h: this.h, plotW: this.plotW, axisW: AXIS_W, pointing }, {
+      heads, minCols: 3, focus, foot: `${time}${unit}`, rows: depthTableRows(rows, p),
+    }) !== null;
+  }
+
+  /** The watched band's columns of an answer, as two plain series (Highlights judged a pixel column at a time). */
+  #watched(answer: DepthAnswer, band: number, w: number): { bid: Float32Array; ask: Float32Array } {
+    const held = this.#watchedCols;
+    if (held && held.answer === answer && held.band === band) return held;
+    const bid = new Float32Array(w), ask = new Float32Array(w);
+    for (let x = 0; x < w; x++) { bid[x] = answer.bid[x * answer.k + band]!; ask[x] = answer.ask[x * answer.k + band]!; }
+    this.#watchedCols = { answer, band, bid, ask };
+    return this.#watchedCols;
+  }
+
+  /**
+   * Which pixel columns of the answer `s` stand out in the watched band, and on which side (0, BIDS, ASKS): the page's one rule (Highlights: how
+   * many deviations over how many candles before), judged a candle at a time over the recording merged to each candle (`depth-bars.ts`), so
    * zooming and panning do not change it. A view of more candles than that can carry (a fine timeframe zoomed far out) is judged a pixel
    * column at a time, as before.
    */
-  #highlight(s: { t0: number; t1: number; w: number; bid: Float32Array; ask: Float32Array }, state: AppState): Uint8Array {
-    const tf = TIMEFRAMES[state.timeframe] ?? 3_600_000, h = state.highlight;
+  #highlight(s: { t0: number; t1: number; w: number; radii: readonly number[]; answer: DepthAnswer }, state: AppState, band: number): Uint8Array {
+    const tf = TIMEFRAMES[state.timeframe] ?? 3_600_000, h = state.highlight, radius = s.radii[band]!;
     // Up to the replay's moment, or live to the end of the forming candle (the real clock: what is recorded).
     const need = neededBars(s.t0, s.t1, tf, h.length, replaying() ? pageNow() : (Math.floor(Date.now() / tf) + 1) * tf);
     if (fitsBars(need, tf)) {
-      this.#bars.ensure(marketIds(state), this.#range, tf, need, Date.now(), () => this.invalidate());
-      const key = `bars|${this.#bars.version}|${need.from}|${need.to}|${tf}|${h.length}|${h.mult}`;
+      this.#bars.ensure(bookMarketIds(state), radius, tf, need, Date.now(), () => this.invalidate());
+      const key = `bars|${this.#bars.version}|${need.from}|${need.to}|${tf}|${h.length}|${h.mult}|${radius}`;
       if (this.#marks?.series !== s || this.#marks.key !== key) this.#marks = { series: s, key, marks: pixelFlags(this.#bars.flags(need, tf, h), need.from, tf, s.t0, s.t1, s.w) };
     } else {
-      const columnsPerBar = s.w * tf / Math.max(1, s.t1 - s.t0), key = `pixels|${columnsPerBar}|${h.length}|${h.mult}`;
-      if (this.#marks?.series !== s || this.#marks.key !== key) this.#marks = { series: s, key, marks: sideFlags(s.bid, s.ask, h, columnsPerBar) };
+      const columnsPerBar = s.w * tf / Math.max(1, s.t1 - s.t0), key = `pixels|${columnsPerBar}|${h.length}|${h.mult}|${band}`;
+      if (this.#marks?.series !== s || this.#marks.key !== key) { const cols = this.#watched(s.answer, band, s.w); this.#marks = { series: s, key, marks: sideFlags(cols.bid, cols.ask, h, columnsPerBar) }; }
     }
     return this.#marks.marks;
   }
 }
 
 /**
+ * Which markets each bar's change is made of (venues added together), as `sumOi` counts them (read at both ends of the bar, a reading held
+ * as it holds there): the Range summary compares a stretch only with windows made of the same markets, not merely as many.
+ */
+export function oiCohorts(oi: readonly OiBar[], parts: readonly OiPart[], tf: number): string[] {
+  const carry = Math.max(2 * tf, 10 * 60_000), sorted = parts.map(part => ({ id: part.id, bars: [...part.bars].sort((a, b) => a[0] - b[0]) })).sort((a, b) => a.id < b.id ? -1 : 1);
+  return oi.map(bar => sorted.filter(part => heldOiAt(part.bars, bar[0], carry) && heldOiAt(part.bars, bar[0] - tf, carry)).map(part => part.id).join(','));
+}
+
+/** What the OI pane's open interest is of: the coin, the timeframe and whose (the Range summary's snapshot must be of the same). */
+export const oiHeldKey = (state: Pick<AppState, 'marketId' | 'timeframe' | 'oiMarkets' | 'oiParts' | 'oiInstrument'>): string =>
+  `${state.marketId}|${state.timeframe}|${state.oiMarkets}|${state.oiParts.length > 1 ? state.oiParts.map(part => part.id).join(',') : state.oiInstrument}`;
+
+/**
+ * What the Bar stats pane's Range summary is worked out for (range/bars-lines.ts): the chart and candle markets, the timeframe, the markets
+ * the footprint counts, the OI pane's markets, the statistics chosen in their order and the options their arithmetic uses (not how the cells
+ * look, nor where the running sums start: the summary adds up each candle's own increment).
+ */
+export const barStatsHeldKey = (state: Pick<AppState, 'marketId' | 'seriesInstrument' | 'timeframe' | 'barStats' | 'barStatOptions' | 'oiMarkets' | 'oiParts' | 'oiInstrument'>, markets: readonly string[]): string => {
+  const o = state.barStatOptions;
+  return [state.marketId, state.seriesInstrument, state.timeframe, markets.join(','), state.oiMarkets, state.oiParts.length > 1 ? state.oiParts.map(part => part.id).join(',') : state.oiInstrument,
+    enabledStats(state.barStats).map(def => def.id).join(','), o.imbRatio, o.imbMinUsd, o.stackedN, o.imbZeros, o.retailUsd, o.whaleUsd, o.oiUnits].join('|');
+};
+
+/** The chart market's coin ("BTC"), for amounts of it. */
+const coinOf = (state: Pick<AppState, 'markets' | 'marketId'>): string => state.markets.find(m => (m.instrumentId ?? m.id) === state.marketId)?.base ?? '';
+
+/**
+ * The OI pane's readout of who made a change (NL/NS): its parts, the side of the change first (what opened on a rise, what closed on a fall),
+ * so that with what went to no side they add up to the change.
+ */
+function whoText(c: NlnsCandle | undefined, d: number): string {
+  if (!c || d === 0) return '';
+  const opened = [[t('New longs'), c.longOpened, 'bid'], [t('New shorts'), c.shortOpened, 'ask']] as const, closed = [[t('Shorts closed'), -c.shortClosed, 'bid'], [t('Longs closed'), -c.longClosed, 'ask']] as const;
+  return [...(d > 0 ? [...opened, ...closed] : [...closed, ...opened])].filter(([, x]) => x !== 0).map(([label, x, tone]) => ` ${label} <b class="${tone}">${coinText(x, '')}</b>`).join('');
+}
+
+/**
+ * The Depth pane's table (both sources): a band a row, its bids and asks (longs and shorts), bids less asks, and how many times the larger side is
+ * the smaller in that side's colour (pane-table.ts `ratioCell`). A band not read has dashes.
+ */
+export function depthTableRows(rows: readonly { r: number; bid: number; ask: number }[], p: Pick<Palette, 'bid' | 'ask' | 'text' | 'muted'>): TableCell[][] {
+  return rows.map(row => [{ text: `±${bandText(row.r)}%` }, { text: tableText(row.bid), color: tableInk(p.bid, p) }, { text: tableText(row.ask), color: tableInk(p.ask, p) },
+    { text: Number.isFinite(row.bid) && Number.isFinite(row.ask) ? tableSigned(row.bid - row.ask) : '–' }, ratioCell(row.bid, row.ask, p)]);
+}
+
+/** The OI pane's table: a venue a row, its open interest in coins, its change over the candle read and its share of those read then. */
+export function oiTableRows(venues: readonly OiVenue[], p: Pick<Palette, 'bid' | 'ask' | 'text' | 'muted'>): TableCell[][] {
+  return venues.map(v => [{ text: venueLabel(v.id) }, { text: tableText(v.oi) }, { text: v.change === null ? '–' : tableSigned(v.change), color: v.change ? tableInk(v.change > 0 ? p.bid : p.ask, p) : undefined }, { text: `${Math.round(v.share * 100)}%`, color: p.muted }]);
+}
+
+/** The OI change bars' alpha with Highlights off (on: 1 for a bar that stands out, 0.38 for the rest), and the faintest an NL/NS bar's weaker side is drawn. */
+const OI_BAR_ALPHA = 0.75, OI_WEAK_ALPHA = 0.14;
+
+/**
  * Open interest is a level, so it is drawn as one: a step line that holds each sample until the next, a dimmer continuation to the
- * newest candle (no sample has arrived since), and below it the change between samples, with unusually large changes at full weight.
+ * newest candle (no sample has arrived since), and below it the change between samples, with unusually large changes at full weight. Each
+ * change bar is split by who made it (NL/NS, delta/nlns.ts, worked out minute by minute where the minute readings reach): a rise by the new
+ * longs and new shorts it holds, a fall by the longs and shorts closed, each part's share of the bar its share of what opened (or closed);
+ * or, set to Net, coloured by whether open interest rose or fell.
  */
 export class OiPane extends TimePane {
   #cache: { oi: readonly OiBar[]; parts: readonly OiPart[]; key: string; delta: Float64Array; flag: Uint8Array; sigma: Float64Array } | null = null;
@@ -335,8 +964,13 @@ export class OiPane extends TimePane {
   #lines: InfoLine[] | null = null;
   readonly #venues = document.createElement('select');
   readonly #choose = document.createElement('button');
+  readonly #bars = document.createElement('select');
+  readonly #tableBox = document.createElement('input');
+  /** Each venue's reading on the pane while venues are added together (pane-table.ts): the chart shows their sum, the table who holds it and who moved it. */
+  readonly #table = new PaneTable({ canvas: this.canvas, left: () => leftGutter(this.store.state), rangeGesture: () => this.rangeGesture, invalidate: () => this.invalidate() });
   #panel: Panel | null = null;
-  constructor(host: HTMLElement, store: Store, view: View, flow: FlowBook) {
+  /** `nlns`: the NL/NS model the Delta and Funding panes read too (delta/nlns-source.ts). */
+  constructor(host: HTMLElement, store: Store, view: View, flow: FlowBook, private readonly nlns: NlnsSource) {
     super(host, store, view, 'oi');
     this.head.innerHTML = `<strong>${t('Open Interest')}</strong><span class="readout"></span>`;
     this.head.querySelector('strong')!.after(helpButton('oiPane'));
@@ -350,9 +984,45 @@ export class OiPane extends TimePane {
     this.#choose.hidden = store.state.oiMarkets !== 'custom';
     const build = (_tools: HTMLElement, body: HTMLElement): void => buildOiMarketsPanel(store, flow, body, () => this.#panel?.render(build));
     this.#choose.onclick = () => { this.#panel = togglePanel(this.#choose, { title: t('Open interest markets'), width: 380, align: 'right', onClose: () => { this.#panel = null; } }, build); };
+    // What the change bars say: who opened and closed (NL/NS), or only whether open interest rose or fell.
+    const bars = document.createElement('label'); bars.className = 'ctl'; bars.append(t('Bars'));
+    setTip(bars, t('Split each change bar by who opened and who closed (NL/NS, worked out minute by minute where the minute readings reach), or colour it by whether open interest rose or fell.'));
+    this.#bars.append(new Option('NL/NS', 'who'), new Option(t('Net'), 'net'));
+    this.#bars.value = store.state.oiChange;
+    this.#bars.onchange = () => store.set({ oiChange: this.#bars.value === 'net' ? 'net' : 'who' });
+    bars.append(this.#bars);
     // One group, so the header's rule that puts its last control at the right edge moves the select and its button together.
     const group = document.createElement('span'); group.className = 'ctl ctl-group';
-    wrap.append(this.#venues); group.append(wrap, this.#choose); this.head.append(group);
+    const table = el('label', { class: 'ctl', tip: t('Each venue\'s open interest, its change over the candle and its share in a table on the pane, at the pointer\'s time or the newest.') });
+    this.#tableBox.type = 'checkbox'; this.#tableBox.checked = store.state.oiTable; this.#tableBox.onchange = () => store.set({ oiTable: this.#tableBox.checked });
+    table.append(this.#tableBox, t('Table'));
+    wrap.append(this.#venues); group.append(bars, wrap, this.#choose, table); this.head.append(group);
+    // On a phone the venues stay in the row; the bars' choice and the table wait behind the key (pane-tune.ts).
+    addTune(this.head, [bars, table], t('Open Interest'), { fold: true });
+  }
+
+  /** Reflect the settings in the header's controls and draw again. */
+  settingsChanged(): void { if (this.#bars.value !== this.store.state.oiChange) this.#bars.value = this.store.state.oiChange; this.#tableBox.checked = this.store.state.oiTable; this.invalidate(); }
+
+  /** The NL/NS candles by start, kept while the model is the same one (it is worked out at most once a second; the pane paints more often). */
+  #who: { model: readonly NlnsCandle[]; byStart: Map<number, NlnsCandle> } | null = null;
+  #whoByStart(model: readonly NlnsCandle[]): Map<number, NlnsCandle> {
+    if (this.#who?.model !== model) this.#who = { model, byStart: new Map(model.map(c => [c.t, c] as const)) };
+    return this.#who.byStart;
+  }
+  /**
+   * The median of what opened (on a rise) or closed (on a fall) in the change bars in view, the scale the bars' lean is judged on, kept while
+   * the model and the bars in view are the same: a pointer move draws the pane again and must not sort them again.
+   */
+  #lean: { who: ReadonlyMap<number, NlnsCandle>; delta: Float64Array; from: number; to: number; median: number } | null = null;
+  #leanMedian(who: ReadonlyMap<number, NlnsCandle>, oi: readonly OiBar[], delta: Float64Array, visible: readonly number[]): number {
+    const from = visible[0] ?? -1, to = visible[visible.length - 1] ?? -1, held = this.#lean;
+    if (held && held.who === who && held.delta === delta && held.from === from && held.to === to) return held.median;
+    const sizes: number[] = [];
+    for (const i of visible) { const d = i > 0 ? delta[i]! : 0, c = d !== 0 ? who.get(oi[i]![0]) : undefined; if (!c) continue; const q = whoParts(c, d > 0); sizes.push(q.buy + q.sell + q.none); }
+    const median = medianRow(sizes);
+    this.#lean = { who, delta, from, to, median };
+    return median;
   }
   /** Each bar's change (oi-change.ts: venues added together count their own changes) and the ones that stand out. */
   #analysis(oi: readonly OiBar[], highlight: HighlightOptions, parts: readonly OiPart[], tfMs: number) {
@@ -366,11 +1036,37 @@ export class OiPane extends TimePane {
   }
   protected draw(): void {
     this.#lines = null;
+    this.#table.clear();
+    const held = this.#held;
     this.#paint();
     const at = this.pointer;
     if (this.#lines && at) this.#card.show(this.#lines, at.x, at.y); else this.#card.hide();
+    // The Range summary is worked out again only for new data (a pointer move draws the pane with the same snapshot).
+    if (this.#held !== held) this.rangeChanged();
   }
-  protected override undrawn(): void { this.#lines = null; this.#card.hide(); }
+  protected override undrawn(): void { this.#lines = null; this.#table.clear(); this.#card.hide(); }
+  protected override ownsPoint(x: number): boolean { return this.#table.owns(x, this.pointer); }
+  /** What the pane drew last, for the Range summary of a selection made in it (range/oi-lines.ts); null before it drew any bar. */
+  get rangeHeld(): OiPaneHeld | null { return this.#held; }
+  #held: OiPaneHeld | null = null;
+  /**
+   * Keep what this drawing is made of: the same series, venues, cut and model the bars are drawn from. The same object while none of it
+   * changed (a pointer move draws the pane again), so the summary is worked out again only for new data.
+   */
+  #keep(state: AppState, oi: readonly OiBar[], parts: readonly OiPart[], tf: number, flag: Uint8Array | null, seam: number | null, who: ReadonlyMap<number, NlnsCandle> | null): void {
+    const key = oiHeldKey(state), replayAt = replaying() ? Math.floor(pageNow() / tf) * tf : null, held = this.#held;
+    const whoOn = state.oiChange === 'who';
+    if (held && held.key === key && held.oi === oi && held.parts === (parts.length > 1 ? parts : held.parts) && held.who === who && held.whoOn === whoOn && held.flag === flag && held.candles === state.candles && held.seam === seam && held.replayAt === replayAt && held.tfMs === tf && held.usdAt === (parts.length > 1 ? 0 : state.oiPrice)) return;
+    const aggregated = parts.length > 1, inst = state.oiInstrument, chart = state.seriesInstrument || state.marketId;
+    const own = aggregated ? state.seriesInstrument === state.marketId : inst === chart;
+    const name = (id: string): string => `${venueLabel(id)} ${id.split(':').slice(1).join(':')}`;
+    const sum = aggregated ? oiSumOf(parts, tf) : null;
+    this.#held = {
+      key, oi, tfMs: tf, tf: state.timeframe, venues: sum ? sum.venues : null, counted: sum ? oi.map(bar => sum.counted.get(bar[0]) ?? 0) : null, cohorts: aggregated ? oiCohorts(oi, parts, tf) : null, parts: aggregated ? parts : [], who, whoOn, flag,
+      candles: state.candles, ownPrice: own, priceMarket: chart ? name(chart) : '', coin: coinOf(state),
+      market: aggregated ? null : inst ? name(inst) : null, ids: aggregated ? parts.map(part => part.id) : inst ? [inst] : [], usdAt: aggregated ? 0 : state.oiPrice, seam, replayAt,
+    };
+  }
   /** Replay: the bars that ended by its moment, kept until the next candle (the analysis is cached on the array); live, all of them. */
   #oiCut: { src: readonly OiBar[]; slot: number; out: OiBar[] } | null = null;
   #oiAt(bars: OiBar[], tf: number): OiBar[] {
@@ -380,6 +1076,34 @@ export class OiPane extends TimePane {
     const out = bars.filter(b => b[0] + tf <= slot * tf);
     this.#oiCut = { src: bars, slot, out };
     return out;
+  }
+  /** Bybit's history further back than the readings held (oi-long.ts), read by the pane straight from Bybit: the server's store holds days of it. */
+  readonly #long = new OiLongHistory((id, period, from, to) => {
+    const listing = currentCoin().markets.bybit;
+    if (!listing || `bybit:${listing.symbol}` !== id) return Promise.resolve([]);
+    // Readings, each the close of the period that ends at it (`fetchOiHistory`): bars of the period they were read at.
+    return fetchOiHistory(id, period, from, to, webGet, listing).then(rows => aggregateOi(rows, period));
+  }, () => this.invalidate());
+  #seam: { parts: readonly OiPart[]; oi: readonly OiBar[]; id: string; seam: OiLongSeam | null } | null = null;
+  #scaled: { held: OiLongHeld; t: number; k: number; bars: OiBar[] } | null = null;
+  /**
+   * The long view, for venues added together that count Bybit's perpetual and a view that starts before the readings held: the seam, Bybit's
+   * readings before it put at its scale, and their period (the chart's while none are held yet). Null otherwise, and in a replay, which shows
+   * what was known at its moment. Not for a view inside the readings held: where only Bybit's go back (a coin with no Binance perpetual, or
+   * Binance's history not read), the seam is near the newest bar, and the estimate took the place of the readings in every view (review,
+   * 2026-10-30).
+   */
+  #extension(parts: readonly OiPart[], oi: readonly OiBar[], tf: number): { seam: OiLongSeam; period: number; bars: readonly OiBar[] } | null {
+    const listing = currentCoin().markets.bybit;
+    if (replaying() || parts.length < 2 || !listing || listing.inverse) return null;
+    const id = `bybit:${listing.symbol}`;
+    if (this.#seam?.parts !== parts || this.#seam.oi !== oi || this.#seam.id !== id) this.#seam = { parts, oi, id, seam: oiLongSeam(parts, id, oi) };
+    const seam = this.#seam.seam, v = this.view;
+    if (!seam || v.t0 >= oi[0]![0]) return null;
+    const held = this.#long.rows(id, oiLongPeriod(tf, v.t1 - v.t0, this.plotW), v, seam.t);
+    if (!held) return { seam, period: tf, bars: [] };
+    if (this.#scaled?.held !== held || this.#scaled.t !== seam.t || this.#scaled.k !== seam.k) this.#scaled = { held, t: seam.t, k: seam.k, bars: oiLongBars(held.bars, held.period, seam) };
+    return { seam, period: held.period, bars: this.#scaled.bars };
   }
   #paint(): void {
     const { ctx, palette: p, view: v } = this, pw = this.plotW, ph = this.h, state: AppState = this.store.state;
@@ -393,19 +1117,33 @@ export class OiPane extends TimePane {
     const oi = parts.length > 1 ? chainedOi(oiSumOf(parts, tf)) : this.#oiAt(state.oi, tf), highlight = state.highlight;
     const readout = this.head.querySelector('.readout');
     const say = (html: string): void => setHtml(readout, html);
-    if (!oi.length) { ctx.fillStyle = p.muted; ctx.textAlign = 'left'; ctx.fillText(t('No open-interest history for this market yet.'), 12, ph / 2); say(''); return; }
+    if (!oi.length) { this.#held = null; ctx.fillStyle = p.muted; ctx.textAlign = 'left'; ctx.fillText(state.oiReading ? t('Reading open interest…') : t('No open-interest history for this market yet.'), 12, ph / 2); say(''); return; }
     const analysis = this.#analysis(oi, highlight, parts, tf);
-    const visible: number[] = [];
-    for (let i = 0; i < oi.length; i++) if (oi[i]![0] + tf >= v.t0 && oi[i]![0] <= v.t1) visible.push(i);
-    if (!visible.length) { ctx.fillStyle = p.muted; ctx.textAlign = 'left'; ctx.fillText(t('No open-interest samples in view.'), 12, ph / 2); say(''); return; }
+    // Further back than the readings held, Bybit's history goes on from the seam (oi-long.ts): the bars before it, Bybit's readings alone, give
+    // way to it. It is drawn as the level only, dashed: an estimate, and its readings a day or four hours apart beside the candles' changes.
+    // (While its readings are read, the bars before the seam stay drawn.)
+    const ext = this.#extension(parts, oi, tf), early = ext?.bars ?? [], seamI = early.length ? ext!.seam.index : 0, ep = ext?.period ?? tf;
+    const visible: number[] = [], shownEarly: number[] = [];
+    for (let i = seamI; i < oi.length; i++) if (oi[i]![0] + tf >= v.t0 && oi[i]![0] <= v.t1) visible.push(i);
+    for (let j = 0; j < early.length; j++) if (early[j]![0] + ep >= v.t0 && early[j]![0] <= v.t1) shownEarly.push(j);
+    // A view starting between the last reading's period and the seam: the last reading's level is what the line holds there.
+    if (!shownEarly.length && early.length && early[early.length - 1]![0] < v.t0 && v.t0 < oi[seamI]![0]) shownEarly.push(early.length - 1);
+    const seam = early.length ? oi[seamI]![0] : null;
+    if (!visible.length && !shownEarly.length) { this.#keep(state, oi, parts, tf, highlight.on ? analysis.flag : null, seam, null); ctx.fillStyle = p.muted; ctx.textAlign = 'left'; ctx.fillText(ext && this.#long.loading ? t('Reading Bybit\'s open-interest history…') : t('No open-interest samples in view.'), 12, ph / 2); say(''); return; }
     // Geometry: the level on top, the change below (when the pane is tall enough to hold both).
     const split = ph >= 84, lineBottom = split ? Math.round(ph * 0.6) : ph - 6, bandTop = lineBottom + 12, bandBottom = ph - 5, mid = (bandTop + bandBottom) / 2, half = (bandBottom - bandTop) / 2;
-    let lo = Infinity, hi = -Infinity, maxDelta = 0;
-    for (const i of visible) { const b = oi[i]!; lo = Math.min(lo, b[3], b[4]); hi = Math.max(hi, b[2], b[4]); maxDelta = Math.max(maxDelta, Math.abs(analysis.delta[i]!)); }
+    let lo = Infinity, hi = -Infinity;
+    for (const i of visible) { const b = oi[i]!; lo = Math.min(lo, b[3], b[4]); hi = Math.max(hi, b[2], b[4]); }
+    for (const j of shownEarly) { const b = early[j]!; lo = Math.min(lo, b[3], b[4]); hi = Math.max(hi, b[2], b[4]); }
+    // The change bars against `barScale` (bar-scale.ts): the few changes far larger than the rest are cut at the band's edge and marked,
+    // rather than drawing every other bar as a sliver.
+    const scaleDelta = barScale(visible.map(i => Math.abs(analysis.delta[i]!)));
     const pad = Math.max((hi - lo) * 0.18, hi * 0.0004), min = lo - pad, max = hi + pad;
     const y = (value: number) => 6 + (1 - (value - min) / (max - min)) * (lineBottom - 6);
-    const xc = (i: number) => v.xOf(oi[i]![0] + tf / 2, pw);
-    const first = Math.max(0, visible[0]! - 1), last = visible[visible.length - 1]!;
+    this.scaleAt = at => at <= lineBottom ? amount(min + (1 - (at - 6) / (lineBottom - 6)) * (max - min))
+      : split && at >= bandTop && at <= bandBottom && scaleDelta > 0 ? `${at <= mid ? '+' : '−'}${amount(Math.abs(mid - at) / half * scaleDelta)}` : null;
+    const xc = (i: number) => v.xOf(oi[i]![0] + tf / 2, pw), xe = (j: number) => v.xOf(early[j]![0] + ep / 2, pw);
+    const first = visible.length ? Math.max(seamI, visible[0]! - 1) : -1, last = visible.length ? visible[visible.length - 1]! : -1;
     const lastBar = oi[oi.length - 1]!, newestCandle = state.candles[state.candles.length - 1];
     const reachT = Math.min(v.t1, Math.max(lastBar[0] + tf, newestCandle ? newestCandle[0] + tf : 0));
     const xEnd = Math.min(pw, v.xOf(reachT, pw)), xSampled = Math.min(pw, xc(oi.length - 1));
@@ -413,55 +1151,124 @@ export class OiPane extends TimePane {
       ctx.beginPath(); ctx.moveTo(xc(from), y(oi[from]![4]));
       for (let i = from + 1; i <= to; i++) { ctx.lineTo(xc(i), y(oi[i - 1]![4])); ctx.lineTo(xc(i), y(oi[i]![4])); }
     };
+    // Who made each change (NL/NS), by candle start, while the bars are split by who: the view's candles from its left edge (the pane shows no
+    // running sums, so the Delta pane's restart is not needed here).
+    const who = state.oiChange === 'who' ? this.#whoByStart(this.nlns.forView(state, v.t0, v.t1, pageNow(), 'none')) : null;
+    this.#keep(state, oi, parts, tf, highlight.on ? analysis.flag : null, seam, who);
     // Change histogram.
     if (split) {
       const emphasise = highlight.on;
+      // Who made the change, by side: the buyers' part or the sellers' drawn stronger the more it outweighed the other, as the volume bars draw
+      // their bigger side (traded/emphasis.ts), always: the two sides are stacked in one bar, so which made it does not show by length. The scale
+      // is the parts' own, in coins: τ from the median of what opened (a rise) or closed (a fall) in the bars in view, and a floor of the
+      // profiles' $25k (scaled to the coin) at the chart's price; without a price, the bars are drawn even.
+      const mark = state.mark.price > 0 ? state.mark.price : state.candles[state.candles.length - 1]?.[4] ?? 0;
+      const lean = who && mark > 0 ? { median: this.#leanMedian(who, oi, analysis.delta, visible), floor: emphasisFloor() / mark } : null;
       ctx.globalAlpha = 0.5; ctx.strokeStyle = p.line; ctx.beginPath(); ctx.moveTo(0, Math.round(mid) + 0.5); ctx.lineTo(pw, Math.round(mid) + 0.5); ctx.stroke(); ctx.globalAlpha = 1;
       for (const i of visible) {
         if (i === 0) continue;
         const d = analysis.delta[i]!; if (d === 0) continue;
-        const x0 = v.xOf(oi[i - 1]![0] + tf, pw), x1 = v.xOf(oi[i]![0] + tf, pw), h = Math.abs(d) / (maxDelta || 1) * half;
-        ctx.globalAlpha = !emphasise ? 0.75 : analysis.flag[i] ? 1 : 0.38; ctx.fillStyle = d > 0 ? p.bid : p.ask;
-        ctx.fillRect(x0 + 0.5, d > 0 ? mid - h : mid, Math.max(1, x1 - x0 - 1), Math.max(1, h));
+        const cut = Math.abs(d) > scaleDelta;
+        const x0 = v.xOf(oi[i - 1]![0] + tf, pw), x1 = v.xOf(oi[i]![0] + tf, pw), h = Math.max(1, Math.min(1, Math.abs(d) / (scaleDelta || 1)) * half), w = Math.max(1, x1 - x0 - 1);
+        const alpha = !emphasise ? OI_BAR_ALPHA : analysis.flag[i] ? 1 : 0.38;
+        let cap = d > 0 ? p.bid : p.ask;
+        if (who) {
+          // Outward from the zero line: the buyers' part, the sellers', then what went to no side, each its share of what opened (a rise) or
+          // closed (a fall). A fall's parts are lighter, outlined where the bar is wide enough: closed, as the Delta pane's Four parts draws them.
+          const c = who.get(oi[i]![0]), parts = c ? whoParts(c, d > 0) : null, total = parts ? parts.buy + parts.sell + parts.none : 0;
+          // Each side's alpha as the volume strip sets it: worked out on the plain bar's weight (a fall's lighter: 0.55 of it, its stronger side at
+          // most 0.8), then scaled by the bar's Highlights weight, so a bar that does not stand out stays fainter than one that does, its stronger
+          // side too; the weaker side never fainter than OI_WEAK_ALPHA (or the bar).
+          const plain = d > 0 ? OI_BAR_ALPHA : OI_BAR_ALPHA * 0.55, k = alpha / OI_BAR_ALPHA, fill = plain * k;
+          const weighed = (a: number): number => Math.max(Math.min(fill, OI_WEAK_ALPHA), Math.min(1, a * k));
+          const [buyStyle, sellStyle] = parts && lean ? candleSplitStyles(parts.buy, parts.sell, parts.none, lean.median, lean.floor, p, plain, d > 0 ? 1 : 0.8 * OI_BAR_ALPHA)
+            : [{ color: p.candleUp, alpha: plain }, { color: p.candleDown, alpha: plain }];
+          const segments: [number, string, number][] = parts && total > 0 ? [[parts.buy, buyStyle.color, weighed(buyStyle.alpha)], [parts.sell, sellStyle.color, weighed(sellStyle.alpha)], [parts.none, p.muted, fill]] : [[1, p.muted, fill]];
+          const sum = total > 0 ? total : 1;
+          let at = 0;
+          for (const [size, color, a] of segments) {
+            if (!(size > 0)) continue;
+            const len = size / sum * h, y0 = d > 0 ? mid - at - len : mid + at;
+            ctx.globalAlpha = a; ctx.fillStyle = color; ctx.fillRect(x0 + 0.5, y0, w, len);
+            // A fall's outline: at the bar's weight, or the side's own where it is the weaker (an outline at full weight undid the dimming).
+            if (d < 0 && w >= 6 && len >= 3) { ctx.globalAlpha = Math.min(alpha, a / 0.55); ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.strokeRect(Math.round(x0) + 1, Math.round(y0) + 0.5, Math.max(1, Math.round(w) - 1), Math.max(1, Math.round(len) - 1)); }
+            at += len;
+          }
+          if (parts && total > 0) cap = parts.buy >= parts.sell && parts.buy >= parts.none ? p.candleUp : parts.sell >= parts.none ? p.candleDown : p.muted;
+        } else {
+          ctx.globalAlpha = alpha; ctx.fillStyle = cap;
+          ctx.fillRect(x0 + 0.5, d > 0 ? mid - h : mid, w, h);
+        }
+        // A bar past the scale is cut at the band's edge: a gap across it near its end says it goes on (the popup gives its size).
+        if (cut) cutGap(ctx, x0 + 0.5, d > 0 ? mid - h + BAR_CUT_PX : mid + h - BAR_CUT_PX - BAR_CUT_H, w);
         if (emphasise && analysis.flag[i]) { // a small cap outside the bar says "this one stands out"
-          ctx.fillRect(x0 + 0.5, d > 0 ? mid - h - 2.5 : mid + h + 0.5, Math.max(1, x1 - x0 - 1), 2);
+          ctx.globalAlpha = alpha; ctx.fillStyle = cap;
+          ctx.fillRect(x0 + 0.5, d > 0 ? mid - h - 2.5 : mid + h + 0.5, w, 2);
         }
       }
       ctx.globalAlpha = 1;
     }
     // Level: soft area, step line, dashed continuation, sample dots.
     ctx.save(); ctx.beginPath(); ctx.rect(0, 0, pw, ph); ctx.clip();
-    // The line holds the last sample on screen. It ends at the newest sample's centre only when that sample is the one on screen; looking at
-    // the past it carries its level to the edge of the view, and the newest value (which is somewhere to the right) is not joined to it.
-    const tail = oiTail(oi.length, last, xSampled, pw), endY = y(oi[last]![4]);
-    line(first, last); ctx.lineTo(tail.x, endY); ctx.lineTo(tail.x, lineBottom); ctx.lineTo(xc(first), lineBottom); ctx.closePath();
-    ctx.globalAlpha = 0.09; ctx.fillStyle = p.accent; ctx.fill(); ctx.globalAlpha = 1;
-    ctx.lineWidth = 1.6; ctx.strokeStyle = p.accent;
+    ctx.lineWidth = 1.6; ctx.strokeStyle = p.accent; ctx.fillStyle = p.accent;
+    if (shownEarly.length) {
+      // Bybit's history: a step line through its readings, the last stepping to the line's level where the line starts (Bybit's reading
+      // there times k is that level), faint and dashed as the stretches with fewer venues are. Readings under 6 px apart (a day apart over
+      // a year) are joined straight: steps that narrow broke the dashes into specks.
+      const j0 = Math.max(0, shownEarly[0]! - 1), j1 = Math.min(early.length - 1, shownEarly[shownEarly.length - 1]! + 1), joins = j1 === early.length - 1;
+      const endX = joins ? xc(seamI) : xe(j1), stepped = pw * ep / Math.max(1, v.t1 - v.t0) >= 6;
+      const trace = (): void => {
+        ctx.beginPath(); ctx.moveTo(xe(j0), y(early[j0]![4]));
+        for (let j = j0 + 1; j <= j1; j++) { if (stepped) ctx.lineTo(xe(j), y(early[j - 1]![4])); ctx.lineTo(xe(j), y(early[j]![4])); }
+        if (joins) { if (stepped) ctx.lineTo(endX, y(early[j1]![4])); ctx.lineTo(endX, y(oi[seamI]![4])); }
+      };
+      trace(); ctx.lineTo(endX, lineBottom); ctx.lineTo(xe(j0), lineBottom); ctx.closePath();
+      ctx.globalAlpha = 0.05; ctx.fill();
+      trace(); ctx.globalAlpha = 0.45; ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+    }
     // Venues added together: where fewer of them have a reading than elsewhere in view (a recording gap), the sum is drawn dashed and faint,
     // so a gap does not read as positions opened or closed.
     const venues = parts.length > 1 ? oiSumOf(parts, tf).venues : null, most = venues ? Math.max(...visible.map(i => venues[i] ?? 0)) : 0;
-    if (venues && visible.some(i => (venues[i] ?? 0) < most)) {
-      const full = (i: number): boolean => (venues[i] ?? 0) >= most;
-      for (let i = first; i <= last; i++) {
-        const x0 = i === first ? xc(i) : xc(i), y0 = y(oi[Math.max(first, i - 1)]![4]);
-        ctx.setLineDash(full(i) ? [] : [3, 3]); ctx.globalAlpha = full(i) ? 1 : 0.45; ctx.beginPath();
-        if (i === first) { ctx.moveTo(x0, y(oi[i]![4])); } else { ctx.moveTo(x0, y0); ctx.lineTo(x0, y(oi[i]![4])); }
-        ctx.lineTo(i === last ? tail.x : xc(i + 1), y(oi[i]![4])); ctx.stroke();
-      }
-      ctx.setLineDash([]); ctx.globalAlpha = 1;
-    } else { line(first, last); ctx.lineTo(tail.x, endY); ctx.stroke(); }
-    if (tail.live && xEnd > xSampled + 2) { ctx.globalAlpha = 0.55; ctx.setLineDash([4, 4]); ctx.beginPath(); ctx.moveTo(xSampled, y(lastBar[4])); ctx.lineTo(xEnd, y(lastBar[4])); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1; }
-    ctx.lineWidth = 1;
-    const spacing = visible.length > 1 ? (xc(visible[visible.length - 1]!) - xc(visible[0]!)) / (visible.length - 1) : 99;
-    if (spacing >= 9) { ctx.fillStyle = p.accent; for (const i of visible) { ctx.beginPath(); ctx.arc(xc(i), y(oi[i]![4]), 2.4, 0, Math.PI * 2); ctx.fill(); } }
+    if (visible.length) {
+      // The line holds the last sample on screen. It ends at the newest sample's centre only when that sample is the one on screen; looking at
+      // the past it carries its level to the edge of the view, and the newest value (which is somewhere to the right) is not joined to it.
+      const tail = oiTail(oi.length, last, xSampled, pw), endY = y(oi[last]![4]);
+      line(first, last); ctx.lineTo(tail.x, endY); ctx.lineTo(tail.x, lineBottom); ctx.lineTo(xc(first), lineBottom); ctx.closePath();
+      ctx.globalAlpha = 0.09; ctx.fill(); ctx.globalAlpha = 1;
+      if (venues && visible.some(i => (venues[i] ?? 0) < most)) {
+        const full = (i: number): boolean => (venues[i] ?? 0) >= most;
+        for (let i = first; i <= last; i++) {
+          const x0 = i === first ? xc(i) : xc(i), y0 = y(oi[Math.max(first, i - 1)]![4]);
+          ctx.setLineDash(full(i) ? [] : [3, 3]); ctx.globalAlpha = full(i) ? 1 : 0.45; ctx.beginPath();
+          if (i === first) { ctx.moveTo(x0, y(oi[i]![4])); } else { ctx.moveTo(x0, y0); ctx.lineTo(x0, y(oi[i]![4])); }
+          ctx.lineTo(i === last ? tail.x : xc(i + 1), y(oi[i]![4])); ctx.stroke();
+        }
+        ctx.setLineDash([]); ctx.globalAlpha = 1;
+      } else { line(first, last); ctx.lineTo(tail.x, endY); ctx.stroke(); }
+      if (tail.live && xEnd > xSampled + 2) { ctx.globalAlpha = 0.55; ctx.setLineDash([4, 4]); ctx.beginPath(); ctx.moveTo(xSampled, y(lastBar[4])); ctx.lineTo(xEnd, y(lastBar[4])); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1; }
+      ctx.lineWidth = 1;
+      const spacing = visible.length > 1 ? (xc(visible[visible.length - 1]!) - xc(visible[0]!)) / (visible.length - 1) : 99;
+      if (spacing >= 9) { ctx.fillStyle = p.accent; for (const i of visible) { ctx.beginPath(); ctx.arc(xc(i), y(oi[i]![4]), 2.4, 0, Math.PI * 2); ctx.fill(); } }
+    }
     ctx.restore();
     ctx.fillStyle = p.muted; ctx.textAlign = 'left';
     // A coin counted in billions (PEPE) would not fit the axis written out in full.
     const amount = (v: number): string => Math.abs(v) >= 1e6 ? usd(v) : fmtPrice(v, 1);
     ctx.fillText(amount(max), this.w - AXIS_W + 6, 10); ctx.fillText(amount(min), this.w - AXIS_W + 6, lineBottom - 4);
-    if (split) { ctx.fillText(`±${amount(maxDelta)}`, this.w - AXIS_W + 6, mid); }
+    if (split && visible.length) { ctx.fillText(`±${amount(scaleDelta)}`, this.w - AXIS_W + 6, mid); }
     // Readout: the hovered sample, else the newest, with where the data comes from and how old it is.
     const hover = state.hover;
+    // Over Bybit's history: its reading there, marked as the estimate it is.
+    if (hover && early.length && hover.t < oi[seamI]![0]) {
+      let j = 0;
+      while (j + 1 < early.length && early[j + 1]![0] <= hover.t) j++;
+      const there = early[j]!, change = j > 0 ? there[4] - early[j - 1]![4] : null, sign = change === null ? '' : change > 0 ? '+' : change < 0 ? '−' : '';
+      const name = Object.entries(TIMEFRAMES).find(([, ms]) => ms === ep)?.[0] ?? '';
+      const from = t('from Bybit\'s {period} history ×{k}, scaled to meet the line', { period: name, k: ext!.seam.k.toFixed(2) });
+      if (this.pointer) this.#lines = oiCardLines({ time: there[0], level: there[4], change, before: null, rank: null, of: 0, sigma: null, source: from, staleMin: null, estimate: true });
+      say(`${t('base')} <b>≈ ${fmtPrice(there[4], 1)}</b>${change === null ? '' : ` Δ <b class="${change > 0 ? 'bid' : change < 0 ? 'ask' : ''}">≈ ${sign}${fmtPrice(Math.abs(change), 1)}</b>`} <span class="muted">${from}</span>`);
+      return;
+    }
     let shown = oi.length - 1;
     if (hover) { shown = -1; for (let i = 0; i < oi.length; i++) if (oi[i]![0] <= hover.t) shown = i; else break; if (shown < 0) shown = 0; }
     const bar = oi[shown]!, d = shown > 0 ? analysis.delta[shown]! : 0, flagged = highlight.on && analysis.flag[shown] === 1;
@@ -480,87 +1287,169 @@ export class OiPane extends TimePane {
         source: oiSourceText(state, venues?.[over]),
         staleMin: over === oi.length - 1 && stale ? Math.round(age / 60_000) : null,
       });
+      // Who made the change, before the card's closing words.
+      const c = who?.get(there[0]);
+      if (c && this.#lines.length) this.#lines.splice(this.#lines.length - 1, 0, ...nlnsWhoLines(c, coinOf(state)));
     }
-    say(`${t('base')} <b>${fmtPrice(bar[4], 1)}</b> Δ <b class="${d > 0 ? 'bid' : d < 0 ? 'ask' : ''}">${sign}${fmtPrice(Math.abs(d), 1)}</b>${sigma}${source}${stale ? ` <span class="ask">${t('last sample {n} min ago', { n: Math.round(age / 60_000) })}</span>` : ''}`);
+    // Who holds it and who moved it, at the bar read. A table drawn (beside the plot or on a plate) takes the popup's place, as on every pane with one;
+    // the header still reads the bar, and with Table off the popup says the rest (its rank, who made the change).
+    const venuesThen = state.oiTable && parts.length > 1 ? oiVenuesAt(parts, tf, bar[0]) : [];
+    if (venuesThen.length) {
+      const room: TableRoom = { w: this.w, h: ph, plotW: pw, axisW: AXIS_W, pointing: this.pointer !== null }, foot = `${hover ? clock(bar[0], true) : `${t('newest')} ${clock(bar[0])}`} ${coinOf(state)}`;
+      if (this.#table.draw(ctx, p, room, { heads: ['', 'OI', 'Δ', t('Share')], minCols: 2, focus: -1, foot, rows: oiTableRows(venuesThen, p) })) this.#lines = null;
+    }
+    say(`${t('base')} <b>${fmtPrice(bar[4], 1)}</b> Δ <b class="${d > 0 ? 'bid' : d < 0 ? 'ask' : ''}">${sign}${fmtPrice(Math.abs(d), 1)}</b>${whoText(who?.get(bar[0]), d)}${sigma}${source}${stale ? ` <span class="ask">${t('last sample {n} min ago', { n: Math.round(age / 60_000) })}</span>` : ''}`);
   }
 }
 
 /** The Liquidity Tracker's size filters' menus (any size can be typed; the menus' "any" and "no cap" are 0). */
 const MIN_SIZES = [10_000, 50_000, 100_000, 250_000, 500_000, 1_000_000];
 const MAX_SIZES = [100_000, 250_000, 500_000, 1_000_000, 5_000_000];
+/** The half-lives a phone has a chip for (the others are in the sheet's menu); 10 bp is the default (Karl, 2026-11-03). */
+const LT_CHIPS: readonly number[] = [10, 25, 50, 100, 250];
 const MINUTE = 60_000;
 
-/** Liquidity Tracker row: distance-weighted bid and ask liquidity of the aggregated enabled venues over time (see lt.ts). */
+/** Liquidity Tracker row: distance-weighted bid and ask liquidity of the books counted (Venues: book-markets.ts) added up, over time (see lt.ts). */
 export class LtPane extends TimePane {
-  #series: (LtSeries & { stepMs: number }) | null = null;
+  /** The series drawn, with the markets it was asked for (its parts are theirs, in that order). */
+  /** The last answer, its windows' length, and what it was asked for (the venues and settings then, not the controls' later values). */
+  #series: (LtSeries & { stepMs: number; ids: readonly string[]; asked: { halfLifeBp: number; minUsd: number; maxUsd: number; average: boolean }; answeredAt: number }) | null = null;
+  /** What the pane drew last, for its Range summary (range/lt-lines.ts): the same object while that does not change. */
+  #held: LtPaneHeld | null = null;
+  get rangeHeld(): LtPaneHeld | null { return this.#held; }
+  /** What a snapshot of the pane is for, now: the books counted (Venues), the half-life, the size filters and the mode. */
+  rangeKey(state: AppState): string { return ltHeldKey(bookIds(state), state.lt); }
+  #publish(held: LtPaneHeld | null): void { if (held !== this.#held) { this.#held = held; this.rangeChanged(); } }
   #key = ''; #busy = false; #lastAt = 0;
   #sync: (() => void)[] = [];
   #card = new HoverCard();
   #lines: InfoLine[] | null = null;
+  readonly #tableBox = document.createElement('input');
+  /** Whose books the lines add up (book-markets.ts), one choice with the Depth pane's. */
+  readonly #venues: BookVenues;
+  /** Each market's figures at the window read, on the pane (pane-table.ts): who holds the liquidity the lines add up, and which way each leans. */
+  readonly #table = new PaneTable({ canvas: this.canvas, left: () => leftGutter(this.store.state), rangeGesture: () => this.rangeGesture, invalidate: () => this.invalidate() });
+  /** The markets in the table's order (`ltRank`: the most liquidity on average over the windows each holds first), worked out once per series. */
+  #rank: { series: object; n: number; order: number[] } | null = null;
   constructor(host: HTMLElement, store: Store, view: View, private hub: Hub) {
     super(host, store, view, 'lt');
+    this.hub.onLtLane = () => this.invalidate();
     this.head.innerHTML = `<strong>${t('Liquidity Tracker')}</strong><span class="readout"></span>`;
     this.head.querySelector('strong')!.after(helpButton('ltPane'));
-    setTip(this.head.querySelector('strong')!, t("Weighted USD liquidity near the touch: each enabled venue measured from its own best bid and best ask, then added up. A level weighs 1 at the touch and halves every half-life. The size filter applies to a venue's aggregated size at one price bin, not to individual orders."));
+    setTip(this.head.querySelector('strong')!, t("Weighted USD liquidity near the touch: each venue counted (Venues) measured from its own best bid and best ask, then added up. A level weighs 1 at the touch and halves every half-life. The size filter applies to a venue's aggregated size at one price bin, not to individual orders."));
     const lt = () => this.store.state.lt;
     const patch = (change: Partial<AppState['lt']>) => this.store.set({ lt: { ...lt(), ...change } });
-    const select = (label: string, title: string, options: [string, string][], get: () => string, set: (value: string) => void) => {
+    // One group, so the header's rule that puts its last control at the right edge moves them all together (each went on its own, so only the last
+    // one stood at the right).
+    const group = el('span', { class: 'ctl ctl-group' }); this.head.append(group);
+    // Whose books, first (shared with the Depth pane): the venues switched on, the chart market's, or the markets chosen.
+    this.#venues = new BookVenues(store); group.append(this.#venues.root);
+    this.#sync.push(() => this.#venues.sync());
+    const select = (label: string, title: string, options: [string, string][], get: () => string, set: (value: string) => void): HTMLLabelElement => {
       const wrap = document.createElement('label'); wrap.className = 'ctl'; setTip(wrap, title); wrap.append(label);
       const control = document.createElement('select');
       for (const [value, text] of options) control.append(new Option(text, value));
       control.value = get(); control.onchange = () => set(control.value);
-      wrap.append(control); this.head.append(wrap);
+      wrap.append(control); group.append(wrap);
       this.#sync.push(() => { if (control.value !== get()) control.value = get(); });
+      return wrap;
     };
     // Any size, typed or from the menu; 0 is no filter.
-    const size = (label: string, title: string, sign: '≥' | '≤', none: string, presets: readonly number[], get: () => number, put: (usd: number) => void): void => {
+    const size = (label: string, title: string, sign: '≥' | '≤', none: string, presets: readonly number[], get: () => number, put: (usd: number) => void): HTMLLabelElement => {
       const wrap = document.createElement('label'); wrap.className = 'ctl'; setTip(wrap, title); wrap.append(label);
       const control = sizeControl(label, { sign, value: scaledUsd(get()), presets: presets.map(scaledUsd), min: 1, max: scaledUsd(SIZE_MAX_USD), none }, v => put(v === 0 ? 0 : unscaledUsd(v)));
-      wrap.append(control.root); this.head.append(wrap);
+      wrap.append(control.root); group.append(wrap);
       this.#sync.push(() => control.set(scaledUsd(get())));
+      return wrap;
     };
     // Exactly the half-lives the recording keeps the tracker for (`shared/lt-sample.ts`).
-    select(t('Half-life'), t("Distance from the touch, in basis points of price, at which a level's weight halves"), LT_HALF_LIVES.map(v => [String(v), `${v} bp`]), () => String(lt().halfLifeBp), v => patch({ halfLifeBp: Number(v) }));
-    size(t('Min'), t('Ignore price bins smaller than this'), '≥', t('any'), MIN_SIZES, () => lt().minUsd, v => patch({ minUsd: v }));
-    size(t('Max'), t('Ignore price bins larger than this'), '≤', t('no cap'), MAX_SIZES, () => lt().maxUsd, v => patch({ maxUsd: v }));
+    const half = select(t('Half-life'), t("Distance from the touch, in basis points of price, at which a level's weight halves"), LT_HALF_LIVES.map(v => [String(v), `${v} bp`]), () => String(lt().halfLifeBp), v => patch({ halfLifeBp: Number(v) }));
+    const min = size(t('Min'), t('Ignore price bins smaller than this'), '≥', t('any'), MIN_SIZES, () => lt().minUsd, v => patch({ minUsd: v }));
+    const max = size(t('Max'), t('Ignore price bins larger than this'), '≤', t('no cap'), MAX_SIZES, () => lt().maxUsd, v => patch({ maxUsd: v }));
+    // A pane's choices come first and its switches after them, the table's last at the right end (as on every pane).
+    const viewChoice = select(t('View'), t('Bid and ask lines, or the imbalance (bid - ask) / (bid + ask)'), [['lines', t('Bid & ask')], ['imbalance', t('Imbalance')]], () => lt().view, v => patch({ view: v as AppState['lt']['view'] }));
     const avg = document.createElement('label'); avg.className = 'ctl'; setTip(avg, t('Divide by the summed weights of the non-empty levels, as if each had size 1'));
     const box = document.createElement('input'); box.type = 'checkbox'; box.checked = lt().average; box.onchange = () => patch({ average: box.checked });
-    avg.append(box, t('Per level')); this.head.append(avg);
+    avg.append(box, t('Per level')); group.append(avg);
     // The balance tipping can sound (the threshold and the volume are in the Sounds panel).
     const bell = document.createElement('label'); bell.className = 'ctl'; const bellBox = document.createElement('input'); bellBox.type = 'checkbox';
     bellBox.onchange = () => setPanelSwitch(this.store, 'depth', bellBox.checked);
-    bell.append(bellBox, t('Sound')); setTip(bell, t('Within 1% of the price, the bids outweigh the asks (or the other way round) by more than this share. It sounds once and again only after the book has come back. Three steps.')); this.head.append(bell);
+    bell.append(bellBox, t('Sound')); setTip(bell, t('Within 1% of the price, the bids outweigh the asks (or the other way round) by more than this share. It sounds once and again only after the book has come back. Three steps.')); group.append(bell);
     this.#sync.push(() => { bellBox.checked = panelSwitchOn(this.store, 'depth'); });
     this.#sync.push(() => { if (box.checked !== lt().average) box.checked = lt().average; });
-    select(t('View'), t('Bid and ask lines, or the imbalance (bid - ask) / (bid + ask)'), [['lines', t('Bid & ask')], ['imbalance', t('Imbalance')]], () => lt().view, v => patch({ view: v as AppState['lt']['view'] }));
+    const table = el('label', { class: 'ctl', tip: `${t('Each venue\'s weighted bids and asks, their imbalance and its share of the total in a table on the pane, at the pointer\'s time or the newest. The largest venues get a row each; the rest are added up in the last row.')} ${t('× in the table is how many times the larger side is the smaller, in its colour: 2.50× is two and a half times as much on that side; ∞, the other side has none.')}` });
+    this.#tableBox.type = 'checkbox'; this.#tableBox.checked = store.state.ltTable; this.#tableBox.onchange = () => store.set({ ltTable: this.#tableBox.checked });
+    table.append(this.#tableBox, t('Table')); group.append(table);
+    this.#sync.push(() => { this.#tableBox.checked = this.store.state.ltTable; });
+    // On a phone the half-life is a row of chips, one tap to each (Karl, 2026-10-26: a menu is a long way to the one wanted), and the rest
+    // of the controls wait behind the key at the row's end. The select stays, in the sheet, for the half-lives with no chip.
+    const chips = el('div', { class: 'ctl lt-halves', role: 'group', ariaLabel: t('Half-life') }, el('span', { class: 'cap', textContent: `${t('Half-life')} · bp` }));
+    const seg = el('div', { class: 'seg' });
+    for (const bp of LT_HALF_LIVES) {
+      const chip = el('button', { type: 'button', textContent: String(bp), onclick: () => patch({ halfLifeBp: bp }) });
+      chip.dataset.bp = String(bp);
+      // Chips for the half-lives that are used; another one shows only while it is the one chosen.
+      if (!LT_CHIPS.includes(bp)) chip.classList.add('far');
+      seg.append(chip);
+    }
+    chips.append(seg); this.head.append(chips);
+    this.#sync.push(() => { for (const chip of seg.children) { const on = Number((chip as HTMLElement).dataset.bp) === lt().halfLifeBp; chip.classList.toggle('on', on); chip.setAttribute('aria-pressed', String(on)); } });
+    addTune(this.head, [this.#venues.root, half, min, max, viewChoice, avg, bell, table], t('Liquidity Tracker'), { fold: true });
   }
   /** Recompute on the next draw and reflect persisted settings in the controls. */
-  refresh(): void { this.#key = ''; for (const sync of this.#sync) sync(); this.invalidate(); }
+  refresh(): void { this.#key = ''; for (const sync of this.#sync) sync(); this.invalidate(); this.rangeStale(); }
 
   protected draw(): void {
     this.#lines = null;
+    this.#table.clear();
     this.#paint();
     const at = this.pointer;
     if (this.#lines && at) this.#card.show(this.#lines, at.x, at.y); else this.#card.hide();
   }
-  protected override undrawn(): void { this.#lines = null; this.#card.hide(); }
+  protected override undrawn(): void { this.#lines = null; this.#table.clear(); this.#card.hide(); }
+  protected override ownsPoint(x: number): boolean { return this.#table.owns(x, this.pointer); }
   #paint(): void {
     const { ctx, palette: p, view: v } = this, pw = this.plotW, ph = this.h, state = this.store.state, lt = state.lt;
-    const ids = activeIds(state);
-    const emptyScope = emptyScopeMessage(state);
-    if (emptyScope) { ctx.fillStyle = p.muted; ctx.textAlign = 'left'; ctx.fillText(emptyScope, 12, ph / 2); return; }
+    this.#venues.follow();
+    const ids = bookIds(state);
+    const emptyScope = bookEmptyMessage(state);
+    // Nothing to add up: the reason on the pane, and no figures in the header from the books counted before.
+    if (emptyScope) { this.#publish(null); setText(this.head.querySelector('.readout'), ''); ctx.fillStyle = p.muted; ctx.textAlign = 'left'; ctx.fillText(emptyScope, 12, ph / 2); return; }
     const t0 = Math.floor(v.t0 / MINUTE) * MINUTE, t1 = Math.ceil(v.t1 / MINUTE) * MINUTE;
-    const key = `${ids.join(',')}|${t0}|${t1}|${this.hub.columnsVersion}|${lt.halfLifeBp}|${lt.minUsd}|${lt.maxUsd}|${lt.average}`;
+    // Where the trackers come from: the lane (the tracker alone, asked for by this pane: lt-lane.ts) where the source has one and no size filter is
+    // set; the recorded columns (the books the map is drawn from, which a size filter needs, and which the browser engine has at hand) otherwise.
+    const lane = this.hub.ltLane, useLane = lane.serve(ids, v, pw, lt.halfLifeBp, lt.minUsd > 0 || lt.maxUsd > 0);
+    // Each market's part is asked for whenever more than one market is counted: the table lists them, and the Range summary measures only the
+    // windows that hold every one of them (a window lacking one reads lower for that alone).
+    const parts = ids.length > 1;
+    const key = useLane ? `lane|${ids.join(',')}|${t0}|${t1}|${lane.version}|${lt.halfLifeBp}|${lt.average}|${parts}`
+      : `${ids.join(',')}|${t0}|${t1}|${this.hub.columnsVersion}|${lt.halfLifeBp}|${lt.minUsd}|${lt.maxUsd}|${lt.average}|${parts}`;
     const liveTail = v.t1 > Date.now() - 2 * MINUTE;
     if (ids.length && !this.#busy && (key !== this.#key || (liveTail && performance.now() - this.#lastAt > 1_500))) {
       this.#key = key; this.#busy = true; this.#lastAt = performance.now();
       const params = { halfLifeBp: lt.halfLifeBp, minUsd: scaledUsd(lt.minUsd), maxUsd: scaledUsd(lt.maxUsd), average: lt.average };
-      void this.hub.lt(ids, t0, t1, params).then(r => { this.#series = { ...r, stepMs: this.hub.columnStepMs }; this.#busy = false; this.invalidate(); }, () => { this.#busy = false; });
+      // While the lane holds nothing for the step or half-life just chosen, the series on screen stays (it carries its own step) rather than a blank.
+      const asked = [...ids], settings = { halfLifeBp: lt.halfLifeBp, minUsd: lt.minUsd, maxUsd: lt.maxUsd, average: lt.average };
+      void this.hub.lt(asked, t0, t1, params, useLane, parts).then(r => { if (!(useLane && !lane.holds && this.#series)) this.#series = { ...r, stepMs: r.stepMs ?? this.hub.columnStepMs, ids: asked, asked: settings, answeredAt: Date.now() }; this.#busy = false; this.invalidate(); }, () => { this.#busy = false; });
     }
     const s = this.#series, readout = this.head.querySelector('.readout')!;
-    if (!s || !s.times.length) { ctx.fillStyle = p.muted; ctx.fillText(t('Liquidity tracker is collecting…'), 12, ph / 2); setText(readout, ''); return; }
+    if (!s || !s.times.length) { this.#publish(null); ctx.fillStyle = p.muted; ctx.fillText(t('Liquidity tracker is collecting…'), 12, ph / 2); setText(readout, ''); return; }
     let n = s.times.length;
-    if (replaying()) { const cut = pageNow(); while (n > 0 && s.times[n - 1]! > cut) n--; }
+    // In a replay only the windows that had ended by its moment: one under way then is the mean of samples taken after it.
+    if (replaying()) n = shownBy(s.times, s.stepMs, pageNow());
+    {
+      // The snapshot of what is drawn: a new one only for a new answer, a replay's cut moving, or its minute.
+      // No book to ask for (none yet, or the books counted away from the feed for a moment: book-markets.ts): nothing is asked and the old
+      // series stays drawn, but it stands for no book now.
+      const replayAt = replaying() ? Math.floor(pageNow() / MINUTE) * MINUTE : null, was = this.#held;
+      if (!ids.length) this.#publish(null);
+      else if (!was || was.times !== s.times || was.shown !== n || was.replayAt !== replayAt) {
+        const a = s.asked;
+        this.#publish({ key: ltHeldKey(s.ids, a), ids: s.ids, names: bookNames(s.ids, state.markets), halfLifeBp: a.halfLifeBp, minUsd: a.minUsd, maxUsd: a.maxUsd,
+          minApplied: scaledUsd(a.minUsd), maxApplied: scaledUsd(a.maxUsd), average: a.average,
+          times: s.times, bid: s.bid, ask: s.ask, parts: s.parts ?? null, approx: s.approx ?? null, stepMs: s.stepMs, shown: n, replayAt, answeredAt: s.answeredAt });
+      }
+    }
     if (!n) { setText(readout, ''); return; }
     const step = s.stepMs, xOf = (t: number) => v.xOf(t + step / 2, pw), gap = step * 2.5;
     let max = 0;
@@ -568,6 +1457,15 @@ export class LtPane extends TimePane {
     ctx.fillStyle = p.muted; ctx.textAlign = 'left';
     if (lt.view === 'lines') {
       const hi = Math.max(max, 1) * 1.08, y = (value: number) => ph - 6 - value / hi * (ph - 12);
+      this.scaleAt = at => usd(Math.max(0, (ph - 6 - at) / (ph - 12) * hi));
+      // On a phone the lines have round gridlines to read their height by and a tag at their ends with the newest figure, as the map's price has;
+      // the desktop keeps its two numbers (Karl, 2026-10-26: the tracker is the pane that is looked at).
+      const phone = isPhone(), ticks = phone ? niceTicks(0, hi, 3).values.filter(value => value > 0) : [];
+      if (phone && ticks.length) {
+        ctx.save(); ctx.strokeStyle = p.line; ctx.globalAlpha = 0.8; ctx.lineWidth = 1; ctx.setLineDash([1, 3]); ctx.beginPath();
+        for (const value of ticks) { const gy = Math.round(y(value)) + 0.5; ctx.moveTo(0, gy); ctx.lineTo(pw, gy); }
+        ctx.stroke(); ctx.restore();
+      }
       if (state.highlight.on) { // the gap between the lines takes the colour of the side with more, stronger the larger the imbalance
         for (let i = 0; i < n; i++) {
           const t = s.times[i]!, b = s.bid[i]!, a = s.ask[i]!, total = b + a; if (t + step < v.t0 - step || t > v.t1 + step || total <= 0) continue;
@@ -589,35 +1487,172 @@ export class LtPane extends TimePane {
         ctx.stroke();
       }
       ctx.lineWidth = 1; ctx.fillStyle = p.muted;
-      ctx.fillText(usd(hi), this.w - AXIS_W + 6, 10); ctx.fillText('0', this.w - AXIS_W + 6, ph - 8);
+      if (!phone) { ctx.fillText(usd(hi), this.w - AXIS_W + 6, 10); ctx.fillText('0', this.w - AXIS_W + 6, ph - 8); }
+      else {
+        // The newest figure of each line, in a tag at its end (the ask above the bid, never one over the other), and the round numbers between the tags.
+        const last = n - 1, tags: { y: number; text: string; color: string }[] = [];
+        if (last >= 0 && s.times[last]! + step >= v.t0 && s.times[last]! <= v.t1 + step) tags.push({ y: y(s.ask[last]!), text: usd(s.ask[last]!), color: p.ask }, { y: y(s.bid[last]!), text: usd(s.bid[last]!), color: p.bid });
+        tags.sort((a, b) => a.y - b.y);
+        for (let k = 1; k < tags.length; k++) if (tags[k]!.y - tags[k - 1]!.y < 15) tags[k]!.y = tags[k - 1]!.y + 15;
+        // Two lines near zero push the lower tag below the plot: the pair is lifted back up from the floor.
+        for (let k = tags.length - 1, floor = ph - 8; k >= 0; k--, floor = tags[k + 1]!.y - 15) if (tags[k]!.y > floor) tags[k]!.y = floor;
+        ctx.textAlign = 'left';
+        for (const value of [0, ...ticks]) { const gy = y(value); if (!tags.some(tag => Math.abs(tag.y - gy) < 9)) ctx.fillText(value === 0 ? '0' : usd(value), this.w - AXIS_W + 6, value === 0 ? ph - 8 : gy); }
+        for (const tag of tags) {
+          ctx.fillStyle = tag.color; ctx.fillRect(this.w - AXIS_W + 1, tag.y - 7, AXIS_W - 2, 14);
+          ctx.fillStyle = textOn(tag.color, 1, p); ctx.font = `600 10px ui-monospace, SFMono-Regular, Menlo, monospace`; ctx.textAlign = 'center'; ctx.fillText(tag.text, this.w - AXIS_W / 2, tag.y + 0.5);
+        }
+        ctx.font = '11px ui-sans-serif, system-ui, sans-serif'; ctx.textAlign = 'left';
+      }
     } else {
       const mid = ph / 2, half = ph / 2 - 6;
+      // The axis follows the data in view, as the lines' does (a book is rarely more than a few percent out of balance, and on ±100 % that is a hair):
+      // the largest imbalance on screen, up to the next of 2, 5, 10, 20, 50 and 100 %. The height of a bar is its share of that.
+      let largest = 0;
       for (let i = 0; i < n; i++) {
         const t = s.times[i]!, total = s.bid[i]! + s.ask[i]!; if (t + step < v.t0 || t > v.t1 || total <= 0) continue;
-        const imb = (s.bid[i]! - s.ask[i]!) / total, x0 = xOf(t - step / 2), x1 = xOf(t + step / 2);
+        largest = Math.max(largest, Math.abs(s.bid[i]! - s.ask[i]!) / total);
+      }
+      const axis = imbalanceAxis(largest);
+      this.scaleAt = at => { const share = (mid - at) / half * axis; return `${share >= 0 ? '+' : '−'}${(Math.abs(share) * 100).toFixed(1)}%`; };
+      for (let i = 0; i < n; i++) {
+        const t = s.times[i]!, total = s.bid[i]! + s.ask[i]!; if (t + step < v.t0 || t > v.t1 || total <= 0) continue;
+        const imb = (s.bid[i]! - s.ask[i]!) / total, x0 = xOf(t - step / 2), x1 = xOf(t + step / 2), height = Math.abs(imb) / axis * half;
         ctx.fillStyle = imb >= 0 ? p.bid : p.ask; ctx.globalAlpha = state.highlight.on ? 0.3 + 0.65 * Math.min(1, Math.abs(imb) / 0.5) : 0.7;
-        ctx.fillRect(x0, imb >= 0 ? mid - imb * half : mid, Math.max(1, x1 - x0 - 0.4), Math.max(1, Math.abs(imb) * half));
+        ctx.fillRect(x0, imb >= 0 ? mid - height : mid, Math.max(1, x1 - x0 - 0.4), Math.max(1, height));
       }
       ctx.globalAlpha = 1; ctx.strokeStyle = p.line; ctx.beginPath(); ctx.moveTo(0, mid + 0.5); ctx.lineTo(pw, mid + 0.5); ctx.stroke();
-      ctx.fillStyle = p.muted; ctx.fillText('+100%', this.w - AXIS_W + 6, 10); ctx.fillText('0', this.w - AXIS_W + 6, mid); ctx.fillText('-100%', this.w - AXIS_W + 6, ph - 8);
+      const edge = `${Math.round(axis * 100)}%`;
+      ctx.fillStyle = p.muted; ctx.fillText(`+${edge}`, this.w - AXIS_W + 6, 10); ctx.fillText('0', this.w - AXIS_W + 6, mid); ctx.fillText(`-${edge}`, this.w - AXIS_W + 6, ph - 8);
     }
     // Readout follows the cursor, else the newest point.
     let at = n - 1;
     if (state.hover) { at = 0; for (let i = 0; i < n; i++) if (s.times[i]! <= state.hover.t) at = i; }
-    const b = s.bid[at]!, a = s.ask[at]!, total = b + a;
+    const b = s.bid[at]!, a = s.ask[at]!, total = b + a, r = sideRatio(b, a);
+    const larger = r?.lead ? ` <b class="${r.lead > 0 ? 'bid' : 'ask'}">${r.lead > 0 ? t('bids') : t('asks')} ${ratioFigure(r.ratio)}</b>` : '';
     // ≈: part of the line was worked out from the minutes' average books (a size filter, or minutes recorded before the tracker was kept: see the help).
-    setHtml(readout, `${s.estimated ? '≈ ' : ''}${t('Bid')} <b class="bid">${usd(b)}</b> ${t('Ask')} <b class="ask">${usd(a)}</b> Δ <b>${usd(b - a)}</b> ${t('imb')} <b>${total > 0 ? Math.round((b - a) / total * 100) : 0}%</b> · ${tn(ids.length, '{n} venue', '{n} venues')}`);
-    const over = state.hover && this.pointer ? readAt(slotAt(s.times, step, state.hover.t), state.hover.t, n - 1, s.times[n - 1]) : -1;
+    setHtml(readout, `${s.estimated ? '≈ ' : ''}${t('Bid')} <b class="bid">${usd(b)}</b> ${t('Ask')} <b class="ask">${usd(a)}</b> Δ <b>${usd(b - a)}</b> ${t('imb')} <b>${total > 0 ? Math.round((b - a) / total * 100) : 0}%</b>${larger} · ${tn(s.ids.length, '{n} venue', '{n} venues')}`);
+    // The card reads the windows shown too: in a replay, never one under way at its moment or after it (the mask covers pixels, not the card).
+    const over = state.hover && this.pointer ? readAt(slotAt(s.times.subarray(0, n), step, state.hover.t), state.hover.t, n - 1, s.times[n - 1]) : -1;
     if (over >= 0 && state.hover && state.hover.t >= s.times[over]! + step) this.cursorT = s.times[over]! + step / 2;
-    if (over >= 0) this.#lines = ltCardLines({ time: s.times[over]!, bid: s.bid[over]!, ask: s.ask[over]!, halfLifeBp: lt.halfLifeBp, venues: ids.length });
+    if (over >= 0) this.#lines = ltCardLines({ time: s.times[over]!, bid: s.bid[over]!, ask: s.ask[over]!, halfLifeBp: lt.halfLifeBp, venues: s.ids.length });
+    // Each market at the window read (the readout's): a table drawn takes the popup's place, as on every pane with one (Table off brings the popup back).
+    if (state.ltTable && s.parts && s.ids.length > 1) {
+      const parts = s.parts, windows = s.times.length;
+      // The order is the series' (worked out once for it): rows keep their places while the pointer moves and as the newest window changes.
+      if (this.#rank?.series !== s || this.#rank.n !== n) this.#rank = { series: s, n, order: ltRank(parts, windows, s.ids.length, n) };
+      const rows = ltRowsAt(s, bookNames(s.ids, state.markets), this.#rank.order, at, tableRowCap(ph));
+      const foot = `${s.estimated ? '≈ ' : ''}${state.hover ? clock(s.times[at]!, true) : `${t('newest')} ${clock(s.times[at]!)}`}`;
+      // Per level is what the series was worked out with (its parts carry the weights), not the setting, which a new series may still be on its way for.
+      const heads = ltHeads(parts);
+      if (rows.length && this.#table.draw(ctx, p, { w: this.w, h: ph, plotW: pw, axisW: AXIS_W, pointing: this.pointer !== null }, { heads, minCols: 3, plateMin: heads.length - 1, focus: -1, foot, rows: ltTableRows(rows, p) })) this.#lines = null;
+    }
   }
+}
+
+/** A row of the Liquidity Tracker's table: a market (or the rest added up), its weighted bids and asks at the window read, and its share of the lines' total (null in the Per level mode). */
+export interface LtRow { name: string; bid: number; ask: number; share: number | null }
+
+/**
+ * The markets of a series' parts in the table's order: the most liquidity on average over the windows each holds of the `n` read (a replay cuts
+ * the rest) first, so the order barely moves as the series is read again every second or two (the newest window alone swapped markets of about
+ * the same size), and a market recorded over part of the view is judged by its size there, not put below the rest for the windows it lacks; a
+ * market with nothing in any of them is left out.
+ */
+export function ltRank(parts: LtParts, windows: number, owners: number, n: number): number[] {
+  const mean = new Float64Array(owners).fill(-1);
+  for (let m = 0; m < owners; m++) {
+    let sum = 0, count = 0;
+    for (let j = 0; j < n; j++) {
+      const b = parts.bid[m * windows + j]!, a = parts.ask[m * windows + j]!;
+      if (Number.isNaN(b) || Number.isNaN(a)) continue;
+      sum += b + a; count++;
+    }
+    if (count) mean[m] = sum / count;
+  }
+  return Array.from({ length: owners }, (_, m) => m).filter(m => mean[m]! >= 0).sort((a, b) => mean[b]! - mean[a]! || a - b);
+}
+
+/** The Liquidity Tracker table's heads: no share in the Per level mode, which is the series' own (its parts carry the weights), as in `ltRowsAt`. */
+export const ltHeads = (parts: LtParts): string[] => (parts.wBid ? ['', t('Bid'), t('Ask'), t('imb'), '×'] : ['', t('Bid'), t('Ask'), t('imb'), t('Share'), '×']);
+
+/**
+ * The table's rows at window `k`: the markets in `order` that have something in it, as many as `cap`, the rest added up in the last row (a
+ * market with nothing there has no row and is not among the rest). The Per level mode is the series' own (its parts carry the weights): each
+ * market's own average, the rest pooled over their weights, and no share, since the pooled weights do not add up to the lines'. Outside it
+ * every row has a share, 0 where the lines read nothing (a size filter no bin passes), so every row has the table's columns.
+ */
+export function ltRowsAt(s: Pick<LtSeries, 'times' | 'bid' | 'ask' | 'parts'>, names: readonly string[], order: readonly number[], k: number, cap: number): LtRow[] {
+  const parts = s.parts, windows = s.times.length;
+  if (!parts || cap < 1) return [];
+  const here = order.filter(m => ltPartAt(parts, windows, m, k) !== null);
+  if (!here.length) return [];
+  const average = parts.wBid !== undefined, total = s.bid[k]! + s.ask[k]!;
+  const share = (b: number, a: number): number | null => (average ? null : total > 0 ? (b + a) / total : 0);
+  const shown = here.length <= cap ? here : here.slice(0, cap - 1), rest = here.slice(shown.length);
+  const rows: LtRow[] = shown.map(m => { const f = ltPartAt(parts, windows, m, k)!; return { name: names[m] ?? '', bid: f.bid, ask: f.ask, share: share(f.bid, f.ask) }; });
+  if (rest.length) {
+    let b = 0, a = 0, wb = 0, wa = 0;
+    for (const m of rest) { const at = m * windows + k; b += parts.bid[at]!; a += parts.ask[at]!; wb += parts.wBid?.[at] ?? 0; wa += parts.wAsk?.[at] ?? 0; }
+    const bid = average ? (wb > 0 ? b / wb : 0) : b, ask = average ? (wa > 0 ? a / wa : 0) : a;
+    rows.push({ name: tn(rest.length, '{n} other', '{n} others'), bid, ask, share: share(b, a) });
+  }
+  return rows;
+}
+
+/** The Liquidity Tracker's table: a market a row, its bids and asks, its imbalance (bids less asks over both), where there is one its share, and how many times the larger side is the smaller (last: imb says the lean too, Share is said nowhere else). */
+export function ltTableRows(rows: readonly LtRow[], p: Pick<Palette, 'bid' | 'ask' | 'text' | 'muted'>): TableCell[][] {
+  return rows.map(r => {
+    const both = r.bid + r.ask, imb = both > 0 ? Math.round((r.bid - r.ask) / both * 100) : 0;
+    const cells: TableCell[] = [{ text: r.name }, { text: tableText(r.bid), color: tableInk(p.bid, p) }, { text: tableText(r.ask), color: tableInk(p.ask, p) },
+      { text: imb === 0 ? '0%' : `${imb > 0 ? '+' : '−'}${Math.abs(imb)}%`, color: imb ? tableInk(imb > 0 ? p.bid : p.ask, p) : p.muted }];
+    if (r.share !== null) cells.push({ text: `${Math.round(r.share * 100)}%`, color: p.muted });
+    cells.push(ratioCell(r.bid, r.ask, p));
+    return cells;
+  });
+}
+
+/**
+ * The names of books in a table: the venue's ("Binance", "Binance spot"), and where two would read the same (a server's spot and perpetual
+ * markets of one exchange share its venue name), the spot one says so.
+ */
+export function bookNames(ids: readonly string[], markets: AppState['markets']): string[] {
+  const names = ids.map(id => venueLabel(id)), count = new Map<string, number>();
+  for (const name of names) count.set(name, (count.get(name) ?? 0) + 1);
+  return names.map((name, i) => (count.get(name)! > 1 && kindOf(markets, ids[i]!) === 'spot' && !/spot/i.test(name) ? `${name} ${t('Spot')}` : name));
 }
 
 /** Strip under the chart with the enabled per-candle statistics, aligned to the candle slots (footprint on); the Stats button chooses, orders and configures them. */
 export class BarStatsPane extends TimePane {
+  /** A table: the pointer's height is a row, not a value, so it takes no horizontal line. */
+  protected override crossY = false;
   /** The strip is too short for a popup drawn on it, so the cell's popup is a page element. */
   #card = new HoverCard();
+  /** The cards of the pinned candles, page elements of their own beside the hover card: one each, kept for the next pin. */
+  #pinCards: HoverCard[] = [];
   #cell: StatCell | null = null;
+  /** The popup of the View column's cell under the pointer, when it is there. */
+  #viewLines: InfoLine[] | null = null;
+  /**
+   * The candles pinned by a click (their starts, oldest pin first), and the market, the markets counted and the timeframe they were pinned on: each
+   * shown with every statistic until it is clicked again, Esc is pressed, or any of those changes. A click pins one candle alone; a Shift+click adds
+   * a candle to the others (or takes it away), up to `MAX_PINS`, to read them side by side. (Not Ctrl: Ctrl+drag selects a Range, and a Ctrl+click
+   * would clear one.)
+   */
+  #pins: number[] = [];
+  #pinsOn = '';
+  #pinContext(state: AppState): string { return `${state.marketId}|${state.timeframe}|${this.heat.footprintMarkets(state).join(',')}`; }
+  /**
+   * Liquidations of the markets counted, every size the record keeps, by UTC day: each day asked on its own, so an answer holds a whole day
+   * (BTC: 900 to 3,500) rather than the largest 5,000 of a week; the day under way asked again every half minute; two at a time, the newest first.
+   */
+  #liqDays = new Map<number, LiquidationDay & { at: number }>();
+  #liqIds = '';
+  #liqLoading = new Set<number>();
+  #liqVersion = 0;
+  /** A day whose question failed is asked again after its own pause, the others meanwhile. */
+  #liqRetry = new Map<number, number>();
+  #liqBuckets: { key: string; value: StatInput['liquidations'] } | null = null;
   #button = document.createElement('button');
   #panel: Panel | null = null;
   /** The open interest's change in USD, worked out once per set of bars, parts and candles (the pane paints on every pointer move), and only in USD. */
@@ -630,13 +1665,15 @@ export class BarStatsPane extends TimePane {
     this.#usd = { oi: state.oi, parts, candles: state.candles, price: state.oiPrice, tfMs, map };
     return map;
   }
-  constructor(host: HTMLElement, store: Store, view: View, private heat: HeatPane) {
+  constructor(host: HTMLElement, store: Store, view: View, private heat: HeatPane, private hub: Hub) {
     super(host, store, view, 'bars');
     this.head.innerHTML = `<strong>${t('Bar stats')}</strong><span class="readout"></span>`;
-    this.head.querySelector('strong')!.after(helpButton('barStats'));
+    this.head.querySelector('strong')!.after(helpButton('stats'));
     this.#button.textContent = t('Stats'); setTip(this.#button, t('Choose, order and configure the statistics shown for each candle'));
     this.#button.onclick = () => { this.#panel = togglePanel(this.#button, { title: t('Bar stats'), width: 440, align: 'right', onClose: () => { this.#panel = null; } }, (tools, body) => this.#build(tools, body)); };
     this.head.append(this.#button);
+    this.canvas.addEventListener('click', e => this.#click(e));
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && this.#pins.length) { this.#pins = []; this.invalidate(); } });
   }
   /** Redraw after the configuration changed and keep an open panel in step. */
   refresh(): void { this.#panel?.render((tools, body) => this.#build(tools, body)); this.invalidate(); }
@@ -647,10 +1684,17 @@ export class BarStatsPane extends TimePane {
     const setStats = (ids: string[]) => this.store.set({ barStats: ids });
     const setOptions = (change: Partial<StatOptions>) => this.store.set({ barStatOptions: { ...this.store.state.barStatOptions, ...change } });
 
-    for (const [label, ids] of [[t('Default'), PRESETS.default], [t('All'), PRESETS.all], [t('None'), PRESETS.none]] as const) tools.append(button(label, () => setStats([...ids])));
+    for (const [label, ids] of [[t('Default'), PRESETS.default], [t('Order flow'), PRESETS.flow], [t('All'), PRESETS.all], [t('None'), PRESETS.none]] as const) tools.append(button(label, () => setStats([...ids])));
+    const exportButton = button(t('Export CSV'), () => this.#export()); setTip(exportButton, t('Save the candles in view as a CSV file: one line per candle, a column per statistic shown.')); tools.append(exportButton);
     tools.append(el('span', { class: 'muted', textContent: t('{shown} of {total} shown', { shown: chosen.length, total: BAR_STATS.length }) }));
 
     body.append(heading(t('Sound')), panelSwitchRow(this.store, 'bars'));
+    // Whose orders the table counts: the footprint's setting, so the two never need two loads and agree when both show.
+    const fp = state.footprint, setMarkets = (markets: typeof fp.markets) => this.store.set({ footprint: { ...this.store.state.footprint, markets } });
+    body.append(heading(t('Markets')),
+      selectRow(t('Count'), t('Whose market orders the footprint and the bar statistics count.'), [['all', t('Aggregated: every market switched on')], ['chart', t('The chart market')], ['custom', t('Chosen markets')]], fp.markets, v => setMarkets(v === 'chart' || v === 'custom' ? v : 'all')),
+      ...(fp.markets === 'custom' ? [marketPicker(this.store, this.hub.flow, 'footprint')] : []),
+      note(t('The footprint counts the same markets: changing them here changes them there.')));
     body.append(heading(t('Shown, in order')));
     if (!chosen.length) body.append(note(t('Nothing selected: tick statistics below to add them.')));
     else {
@@ -666,7 +1710,11 @@ export class BarStatsPane extends TimePane {
 
     body.append(heading(t('Options')));
     body.append(
-      selectRow(t('Cells'), t('Filled cells are shaded by magnitude (log scale between the visible 2nd and 99th percentile); text only is coloured by sign'), [['filled', t('Filled')], ['text', t('Text only')]], options.cells, v => setOptions({ cells: v as StatOptions['cells'] })),
+      selectRow(t('Cells'), t("Filled: shaded by size among the candles in view (log scale between the 2nd and 99th percentile). Unusual: shaded by how far each stands above its own recent candles, the Highlights' baseline, from 0 to 3σ. Line: each row drawn as a line. Text only: coloured by sign."),
+        [['filled', t('Filled')], ['unusual', t('Unusual (σ)')], ['line', t('Line')], ['text', t('Text only')]], options.cells, v => setOptions({ cells: v as StatOptions['cells'] })),
+      switchRow(t('Group rows by kind'), t('Gather the rows under a header per kind, in the order chosen within each; click a header to fold its rows away.'), options.grouped, grouped => setOptions({ grouped })),
+      selectRow(t('CVD from'), t("Where cvd, cvd retail and cvd whales start: the chart's left edge, or each day's start in the chart's time zone (the day the left edge falls in is loaded whole)."),
+        [['view', t('The left edge')], ['day', t("Each day's start")]], options.cvdFrom, v => setOptions({ cvdFrom: v === 'day' ? 'day' : 'view' })),
       selectRow(t('OI change in'), t("Open-interest change in base coin (the series' own unit) or as USD (change times the bar's close)"), [['base', t('Base coin')], ['usd', 'USD']], options.oiUnits, v => setOptions({ oiUnits: v as StatOptions['oiUnits'] })),
       numberRow(t('Imbalance ratio'), t('A level counts as imbalanced when its volume is at least this many times the opposite volume one row away'), { min: 1, step: 0.5, value: options.imbRatio }, v => setOptions({ imbRatio: v })),
       numberRow(t('Imbalance min USD'), t('Ignore imbalanced levels smaller than this'), { min: 0, step: scaledUsd(1000), value: scaledUsd(options.imbMinUsd) }, v => setOptions({ imbMinUsd: unscaledUsd(v) })),
@@ -684,95 +1732,371 @@ export class BarStatsPane extends TimePane {
   }
 
   protected draw(): void {
-    this.#cell = null;
-    this.#strip();
-    const at = this.pointer;
-    if (this.#cell && at) this.#card.show(statCellLines(this.#cell), at.x, at.y); else this.#card.hide();
+    this.#cell = null; this.#viewLines = null;
+    const held = this.#held, pins = this.#strip();
+    // The Range summary is worked out again only for a new table (a pointer move draws the pane from the same one).
+    if (this.#held !== held) this.rangeChanged();
+    const at = this.pointer, lines = this.#cell ? statCellLines(this.#cell) : this.#viewLines;
+    if (lines && at) this.#card.show(lines, at.x, at.y); else this.#card.hide();
+    this.#showPins(pins);
   }
 
-  protected override undrawn(): void { this.#cell = null; this.#card.hide(); }
+  /** The cards of the pinned candles, left to right, each clear of the one before it (the candles may be a slot apart, and a card is a few hundred pixels wide). */
+  #showPins(pins: readonly { lines: InfoLine[]; x: number; y: number }[]): void {
+    while (this.#pinCards.length < pins.length) this.#pinCards.push(new HoverCard());
+    let free = -Infinity;
+    pins.forEach((pin, i) => { const card = this.#pinCards[i]!; card.show(pin.lines, Math.max(pin.x, free), pin.y); free = card.right + 6 - CARD_GAP; });
+    for (let i = pins.length; i < this.#pinCards.length; i++) this.#pinCards[i]!.hide();
+  }
 
-  #strip(): void {
+  protected override undrawn(): void { this.#cell = null; this.#viewLines = null; this.#card.hide(); for (const card of this.#pinCards) card.hide(); }
+
+  /** What the table worked out last, for the Range summary of a selection made in this pane (range/bars-lines.ts); null without a table. */
+  get rangeHeld(): BarsPaneHeld | null { return this.#held; }
+  #held: BarsPaneHeld | null = null;
+  /** What the table worked out last, kept while nothing it was worked out from changes (a pointer move only redraws), and what Export CSV writes. */
+  #table: { key: unknown[]; times: number[]; defs: StatDef[]; values: (number | null)[][]; input: StatInput; view: { at: string; cells: (ViewCell | null)[] } | null } | null = null;
+  /** Where the View column is (plot coordinates), while it is drawn: the pointer there reads it, not a candle. */
+  #viewSpan: [number, number] | null = null;
+  /** The bands as last drawn, top to bottom (what a click on a header folds). */
+  #layout: { band: TableBand; y: number; h: number }[] = [];
+  protected override ownsPoint(x: number): boolean { return !!this.#viewSpan && x >= this.#viewSpan[0] && x <= this.#viewSpan[1]; }
+
+  /** A click on a kind's header folds or unfolds its rows; on a candle it pins it alone (on the pinned one, lets it go), and with Shift it adds it to the pinned ones. Not while the Range tool selects. */
+  #click(e: MouseEvent): void {
+    const state = this.store.state;
+    if (this.rangeGesture || e.ctrlKey || e.metaKey || state.rangeTool) { this.rangeGesture = false; return; }
+    const box = this.canvas.getBoundingClientRect(), x = e.clientX - box.left - leftGutter(state), y = e.clientY - box.top;
+    const hit = this.#layout.find(b => y >= b.y && y < b.y + b.h);
+    if (hit?.band.kind === 'head') {
+      const group = hit.band.group, folded = state.barStatOptions.folded;
+      this.store.set({ barStatOptions: { ...state.barStatOptions, folded: folded.includes(group) ? folded.filter(g => g !== group) : [...folded, group] } });
+      return;
+    }
+    const table = this.#table, tfMs = TIMEFRAMES[state.timeframe] ?? 3_600_000;
+    if (!table || x < 0 || x > this.plotW) return;
+    const at = this.view.tOf(x, this.plotW), start = table.times.find(s => at >= s && at < s + tfMs);
+    if (start === undefined) return;
+    const on = this.#pinContext(state);
+    if (this.#pinsOn !== on) this.#pins = [];
+    this.#pinsOn = on;
+    this.#pins = pinsAfterClick(this.#pins, start, e.shiftKey);
+    this.invalidate();
+  }
+
+  /**
+   * Ask for the UTC days of [from, to) not held, and again a day not answered to its end (the day under way, or one asked before its midnight)
+   * once what is held of it is half a minute old.
+   */
+  #ensureLiquidations(ids: string, from: number, to: number): void {
+    const source = this.hub.source; if (!source.liquidations) return;
+    // Other markets counted: what is held is not theirs, and an answer still out for the old ones is dropped when it comes.
+    if (ids !== this.#liqIds) { this.#liqIds = ids; this.#liqDays = new Map(); this.#liqRetry = new Map(); this.#liqVersion++; }
+    const now = Date.now();
+    for (let day = Math.floor((to - 1) / DAY_MS) * DAY_MS; day >= Math.floor(from / DAY_MS) * DAY_MS && this.#liqLoading.size < 2; day -= DAY_MS) {
+      const held = this.#liqDays.get(day);
+      if (this.#liqLoading.has(day) || now < (this.#liqRetry.get(day) ?? 0) || (held && (held.to >= day + DAY_MS || now - held.at < 30_000))) continue;
+      this.#liqLoading.add(day);
+      const asked = Date.now();
+      source.liquidations(day, day + DAY_MS).then(rows => {
+        if (ids !== this.#liqIds) return;
+        this.#liqRetry.delete(day);
+        this.#liqDays.set(day, { rows, cut: rows.length >= LIQUIDATIONS_PER_ANSWER, to: Math.min(day + DAY_MS, asked), at: Date.now() }); this.#liqVersion++;
+      }, () => { if (ids === this.#liqIds) this.#liqRetry.set(day, Date.now() + 15_000); })
+        // Drawn again whatever came back: the slot it held is free for the next day, an answer dropped for other markets included.
+        .finally(() => { this.#liqLoading.delete(day); this.invalidate(); });
+    }
+    // Only the days around the window are kept.
+    for (const day of [...this.#liqDays.keys()]) if (day + DAY_MS < from - DAY_MS || day > to + DAY_MS) this.#liqDays.delete(day);
+  }
+
+  /** The liquidations by candle over the table's candles, from the days answered (kept while neither they nor the candles change). */
+  #liquidationsFor(ids: readonly string[], times: readonly number[], tfMs: number, coverFrom: number): StatInput['liquidations'] {
+    if (ids.join(',') !== this.#liqIds) return undefined;
+    // By the minute too: the candle under way counts once the minute it starts in has been asked about.
+    const key = `${this.#liqVersion}|${this.#liqIds}|${times[0]}|${times.length}|${times[times.length - 1]}|${tfMs}|${coverFrom}|${Math.floor(Date.now() / 60_000)}`;
+    if (this.#liqBuckets?.key === key) return this.#liqBuckets.value;
+    const value = liquidationBuckets(this.#liqDays, ids, times, tfMs, coverFrom, Date.now());
+    this.#liqBuckets = { key, value };
+    return value;
+  }
+
+  #strip(): { lines: InfoLine[]; x: number; y: number }[] {
     const { ctx, palette: p, view: v } = this, pw = this.plotW, ph = this.h, state = this.store.state;
     const tfMs = TIMEFRAMES[state.timeframe] ?? 3_600_000, defs = enabledStats(state.barStats), options = state.barStatOptions;
-    const readout = this.head.querySelector('.readout');
+    const readout = this.head.querySelector('.readout'), data = this.heat.footprintData, daily = options.cvdFrom === 'day';
     // Aggregated, the rows count every market the footprint adds together; open interest stays the OI pane's one market (as its row's tip says).
-    const markets = this.heat.footprintMarkets(state).length, stats = tn(defs.length, '{n} stat · cvd sums the bars loaded for the view', '{n} stats · cvd sums the bars loaded for the view');
-    setText(readout, markets > 1 ? `${t('{n} markets', { n: markets })} · ${stats}` : stats);
-    if (!defs.length) { ctx.fillStyle = p.muted; ctx.fillText(t('No statistics selected: use Stats to add some.'), 12, ph / 2); return; }
+    const markets = this.heat.footprintMarkets(state), stats = daily
+      ? tn(defs.length, "{n} stat · cvd from each day's start", "{n} stats · cvd from each day's start")
+      : tn(defs.length, '{n} stat · cvd sums the bars loaded for the view', '{n} stats · cvd sums the bars loaded for the view');
+    // The size of the rows the footprint rows of the table (poc, imbalances) are read on: the footprint's at this zoom, whether it shows or not.
+    const rowSize = data.step > 0 ? ` · ${t('rows of {step}', { step: `$${fmtPrice(data.step, data.step)}` })}` : '';
+    setText(readout, (markets.length > 1 ? `${t('{n} markets', { n: markets.length })} · ${stats}` : stats) + rowSize);
+    this.#viewSpan = null; this.#layout = [];
+    if (!defs.length) { ctx.fillStyle = p.muted; ctx.fillText(t('No statistics selected: use Stats to add some.'), 12, ph / 2); this.#table = null; this.#held = null; return []; }
     // Replay: only the candles that ended by its moment (a candle under way would carry its future executions).
-    // The bars of the view and one each side (what the footprint asks for), not every bar it still holds: the running sums (cvd) start at the
-    // view, whatever was looked at before.
-    const data = this.heat.footprintData, until = replaying() ? pageNow() : Infinity;
-    const all = [...data.bars.values()].filter(b => b.t + tfMs <= until && b.t + 2 * tfMs > v.t0 && b.t < v.t1 + tfMs).sort((a, b) => a.t - b.t);
-    if (!all.length) { ctx.fillStyle = p.muted; ctx.fillText(t('Bar stats appear once the footprint has executions for the visible candles.'), 12, ph / 2); return; }
-    const parts = oiPartsUntil(state.oiParts, tfMs, replaying() ? Math.floor(pageNow() / tfMs) * tfMs : Infinity), candles = new Map(state.candles.map(c => [c[0], c] as const));
-    const input = { bars: all, step: data.step, options, cuts: data.cuts, candles, oi: new Map(state.oi.map(b => [b[0], b] as const)), oiChange: oiChangeByTime(state.oi, parts, tfMs), oiUsd: this.#oiUsd(state, parts, tfMs, candles) };
-    // A row taken at the nearest box edge for some bar (the source had no sums for the size set) says so: ≈ before its name.
+    // The candles of the view and one each side (what the footprint asks for), not every bar it still holds: the running sums (cvd) start at the
+    // view, whatever was looked at before; from each day's start, at the start of the day the left edge falls in (loaded whole for it).
+    const zone = resolveZone('page', state.timeZone), from = daily ? Math.min(v.t0, dayStartOf(v.t0, zone)) : v.t0;
+    const now = pageNow(), until = replaying() ? now : Infinity, near = (start: number): boolean => start + tfMs <= until && start + 2 * tfMs > from && start < v.t1 + tfMs;
+    // One slot per candle: the chart's candles, and a bar the footprint holds where a candle is missing. A candle without executions (before the
+    // recording, a gap) is a slot without a bar: the rows read from the candles and open interest still show there.
+    const starts = new Set<number>();
+    for (const c of state.candles) if (near(c[0])) starts.add(c[0]);
+    for (const b of data.bars.values()) if (near(b.t)) starts.add(b.t);
+    const times = [...starts].sort((a, b) => a - b);
+    if (!times.length) { ctx.fillStyle = p.muted; ctx.fillText(t('Bar stats appear once executions are recorded for the visible candles.'), 12, ph / 2); this.#table = null; this.#held = null; return []; }
+    const parts = oiPartsUntil(state.oiParts, tfMs, replaying() ? Math.floor(now / tfMs) * tfMs : Infinity);
+    // The exchange's own candles (Binance's): the candle delta and the fills read them.
+    const taker = defs.some(def => def.id === 'takerDelta' || def.id === 'fills' || def.id === 'avgFill') ? this.heat.takerRows(state, tfMs, times[0]!) : null;
+    // Liquidations of the markets counted, a UTC day per answer, over the days of the table's candles (none after now). A candle before the
+    // record reaches is not known: the source keeps a week (a page's own engine a day), and only since the recording started. The edge is
+    // taken to the next whole minute (a candle half expired is not known either), which also keeps it from changing on every frame.
+    const retention = this.hub.source.kind === 'browser' ? BROWSER_RETENTION_MS : LIQUIDATION_RETENTION_MS;
+    const liqTo = Math.min(times[times.length - 1]! + tfMs, Date.now()), liqCover = Math.max(Math.ceil((Date.now() - retention) / 60_000) * 60_000, this.hub.recordedSince > 0 ? this.hub.recordedSince : 0);
+    let liquidations: StatInput['liquidations'];
+    if (this.hub.source.liquidations && defs.some(def => def.id === 'liq' || def.id === 'liqNet') && markets.length) {
+      this.#ensureLiquidations(markets.join(','), Math.max(times[0]!, liqCover), liqTo);
+      liquidations = this.#liquidationsFor(markets, times, tfMs, liqCover);
+    }
+    const restart = daily ? resetKeys(times, 'day', zone) : undefined;
+    // Worked out again only when what it is worked out from changes: a pointer move redraws from what is held. The clock counts by the minute
+    // (the coverage of the candle under way).
+    // Whether a perpetual's executions are counted (a market of unknown kind may be one): oi × delta reads them against open interest.
+    const perps = markets.some(id => kindOf(state.markets, id) !== 'spot');
+    const key = [data.version, data.step, state.candles, state.oi, parts, state.oiPrice, state.barStats, options, data.cuts, taker, liquidations, zone, times[0], times[times.length - 1], times.length, tfMs, Math.floor(now / 60_000), perps];
+    let table = this.#table;
+    if (!table || table.key.length !== key.length || table.key.some((k, i) => k !== key[i])) {
+      const candles = new Map(state.candles.map(c => [c[0], c] as const));
+      const input: StatInput = { bars: times.map(start => data.bars.get(start) ?? null), times, tfMs, now, ...(taker ? { taker } : {}), ...(liquidations ? { liquidations } : {}), ...(restart ? { restart } : {}),
+        step: data.step, options, cuts: data.cuts, candles, oi: new Map(state.oi.map(b => [b[0], b] as const)), oiChange: oiChangeByTime(state.oi, parts, tfMs), oiUsd: this.#oiUsd(state, parts, tfMs, candles), perps };
+      table = this.#table = { key, times, defs, values: defs.map(def => def.compute(input)), input, view: null };
+    }
+    // The Range summary's snapshot: the same object while the table and what it is worked out for stay (range/bars-lines.ts). Only once the
+    // footprint holds the bars of these markets and this timeframe: the map switches it in its own frame, and this pane can draw first after
+    // a click, with the new choice but the old bars (published under the new key, they would be summed up, and kept, as the new markets').
+    const heldKey = barStatsHeldKey(state, markets), ours = data.holds(markets, state.timeframe);
+    if (ours && (this.#held?.input !== table.input || this.#held.key !== heldKey)) {
+      const chart = state.seriesInstrument || state.marketId;
+      this.#held = { key: heldKey, tfMs, tf: state.timeframe, input: table.input, times: table.times, defs: table.defs, values: table.values,
+        markets: markets.length, oiMarkets: Math.max(1, state.oiParts.length), coin: coinOf(state),
+        candleMarket: chart ? `${venueLabel(chart)} ${chart.split(':').slice(1).join(':')}` : '', quote: state.markets.find(m => (m.instrumentId ?? m.id) === chart)?.quote ?? '',
+        replayAt: replaying() ? Math.floor(now / tfMs) * tfMs : null, answered: data.answered };
+    }
+    const { input, values: rowsValues } = table, all = input.bars;
+    // A row taken at the nearest box edge for some bar (the source had no sums for the size set), or from a cut answer, says so: ≈ before its name.
     const labelOf = new Map(defs.map(def => [def.id, def.approx?.(input) ? `≈${def.label}` : def.label]));
-    const slot = pw * tfMs / (v.t1 - v.t0), top = 3, rowH = Math.max(15, (ph - 6) / defs.length), filled = options.cells === 'filled';
-    const visible = all.map((bar, i) => i).filter(i => all[i]!.t + tfMs >= v.t0 && all[i]!.t <= v.t1);
-    if (!visible.length) { ctx.fillStyle = p.muted; ctx.fillText(t('No executions recorded for the candles in view.'), 12, ph / 2); return; }
-    // Under the pointer: the candle (any pane's pointer says which, the time axis being shared) and, from this pane's own pointer, the row.
-    const hv = state.hover, under = hv ? all.findIndex(bar => hv.t >= bar.t && hv.t < bar.t + tfMs) : -1;
-    // Past the newest bar this pane's own pointer reads the newest (readAt); another pane's pointer there marks nothing here.
-    const hoverIdx = hv && this.pointer ? readAt(under, hv.t, all.length - 1, all[all.length - 1]!.t) : under;
-    if (hoverIdx >= 0 && hoverIdx !== under) this.cursorT = all[hoverIdx]!.t + tfMs / 2;
-    const hoverRow = hv && hv.source === 'bars' ? Math.floor((hv.y - top) / rowH) : -1;
-    let hoverCell: StatCell | null = null;
+    // The bands: rows as chosen, or under a header per kind; the rows share what the headers leave.
+    const bands = tableBands(defs, options), rowCount = bands.filter(b => b.kind === 'row').length, top = 3;
+    const rowH = Math.max(15, (ph - 6 - (bands.length - rowCount) * HEAD_H) / Math.max(1, rowCount));
+    let y0 = top;
+    const layout = this.#layout = bands.map(band => { const h = band.kind === 'head' ? HEAD_H : rowH, at = { band, y: y0, h }; y0 += h; return at; });
+    const gridBottom = y0, slot = pw * tfMs / (v.t1 - v.t0), cells = options.cells, filled = cells === 'filled' || cells === 'unusual';
+    const visible = times.map((_, i) => i).filter(i => times[i]! + tfMs > v.t0 && times[i]! < v.t1);
+    if (!visible.length) { ctx.fillStyle = p.muted; ctx.fillText(t('No executions recorded for the candles in view.'), 12, ph / 2); return []; }
+    // A candle the recording holds only in part: the rows read from executions are drawn faint there (rec % says how much).
+    const partial = all.map((bar, i) => { const share = bar ? coverageOf(bar, times[i]!, tfMs, now) : null; return share !== null && share < 0.95; });
+    // Under the pointer: the candle (any pane's pointer says which, the time axis being shared) and, from this pane's own pointer, the band; or,
+    // right of the plot, the band's View figure.
+    const vx = pw + 3, vw = Math.min(this.w - pw - 6, 120);
+    this.#viewSpan = vw >= 24 ? [vx, vx + vw] : null;
+    const box = this.pointer ? this.canvas.getBoundingClientRect() : null, local = box ? this.pointer!.x - box.left - leftGutter(state) : -1, overView = this.ownsPoint(local);
+    const bandAt = (y: number): number => layout.findIndex(b => y >= b.y && y < b.y + b.h);
+    const hv = state.hover, viewBand = overView && box ? bandAt(this.pointer!.y - box.top) : -1;
+    const under = hv && !overView ? times.findIndex(start => hv.t >= start && hv.t < start + tfMs) : -1;
+    // Past the newest candle this pane's own pointer reads the newest (readAt); another pane's pointer there marks nothing here.
+    const hoverIdx = overView ? -1 : hv && this.pointer ? readAt(under, hv.t, times.length - 1, times[times.length - 1]!) : under;
+    if (hoverIdx >= 0 && hoverIdx !== under) this.cursorT = times[hoverIdx]! + tfMs / 2;
+    const hoverBand = hv && hv.source === 'bars' ? bandAt(hv.y) : -1;
+    let hoverCell: StatCell | null = null, viewHover: InfoLine[] | null = null;
+    const toneColor = (tone: StatTone | null): string => tone === 'buy' ? p.candleUp : tone === 'sell' ? p.candleDown : p.muted;
+    const toneOf = (def: StatDef, value: number): StatTone => def.scale === 'category' ? def.tone?.(value) ?? 'text' : def.scale === 'diverging' ? (value - (def.center ?? 0) >= 0 ? 'buy' : 'sell') : 'text';
+    const shown = (def: StatDef, value: number | null | undefined): string => value === null || value === undefined ? '–' : def.format(value) || (def.id === 'cover' ? '100%' : '—');
     ctx.textBaseline = 'middle'; ctx.textAlign = 'center'; ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
-    defs.forEach((def, rowIndex) => {
-      const values = def.compute(input), scale = rowScale(def, visible.map(i => values[i]));
-      const found = state.highlight.on && def.scale !== 'plain' ? anomalies(Float64Array.from(values, value => value === null || value === undefined ? NaN : Math.abs(value)), state.highlight) : null, unusual = found?.flag ?? null;
-      const mine = hoverIdx >= 0 && rowIndex === hoverRow ? values[hoverIdx] : undefined;
-      if (hoverIdx >= 0 && rowIndex === hoverRow && mine !== null && mine !== undefined) {
-        const before = all[hoverIdx - 1], previous = before && before.t === all[hoverIdx]!.t - tfMs ? values[hoverIdx - 1] : null;
-        const seen = visible.map(i => values[i]).filter((x): x is number => x !== null && x !== undefined), rank = (x: number) => def.scale === 'diverging' ? Math.abs(x) : x;
+    layout.forEach(({ band, y, h }, bandIndex) => {
+      if (band.kind === 'head') {
+        // A kind's header across the table: ▾ open, ▸ folded with how many rows it holds; a click folds or unfolds it.
+        ctx.save(); ctx.fillStyle = mixHex(p.panel, p.ui, bandIndex === hoverBand || bandIndex === viewBand ? 0.24 : 0.14); ctx.fillRect(0, y, this.w, h - 1);
+        ctx.textAlign = 'left'; ctx.font = '600 10px ui-sans-serif, system-ui, sans-serif'; ctx.fillStyle = p.muted;
+        ctx.fillText(`${band.folded ? '▸' : '▾'} ${GROUP_SHORT[band.group]}${band.folded ? ` · ${band.count}` : ''}`, 6, y + (h - 1) / 2);
+        ctx.restore();
+        return;
+      }
+      const { def, index: rowIndex } = band, values = rowsValues[rowIndex]!, ranked = def.scale !== 'plain' && def.scale !== 'category', scale = ranked ? rowScale(def, visible.map(i => values[i])) : null;
+      // Each row's own baseline (the Highlights' window and multiple): its unusual candles are outlined while Highlights is on, and Unusual shades by it.
+      const found = ranked && (state.highlight.on || cells === 'unusual') ? anomalies(Float64Array.from(values, value => value === null || value === undefined ? NaN : deviation(def, value)), state.highlight) : null;
+      const unusual = state.highlight.on ? found?.flag ?? null : null;
+      const mine = hoverIdx >= 0 && bandIndex === hoverBand ? values[hoverIdx] : undefined;
+      if (hoverIdx >= 0 && bandIndex === hoverBand && mine !== null && mine !== undefined) {
+        const previous = hoverIdx > 0 && times[hoverIdx - 1] === times[hoverIdx]! - tfMs ? values[hoverIdx - 1] : null;
+        const seenValues = visible.map(i => values[i]).filter((x): x is number => x !== null && x !== undefined), rank = (x: number) => def.scale === 'diverging' ? deviation(def, x) : x;
+        const share = all[hoverIdx] ? coverageOf(all[hoverIdx]!, times[hoverIdx]!, tfMs, now) : null;
+        const sigma = found?.sigma[hoverIdx];
         hoverCell = {
-          label: labelOf.get(def.id)!, title: def.approx?.(input) ? `${def.title} ${t('≈ About: for some of these minutes only the size boxes are known (an older server, or minutes it has not filled in yet), so this line is drawn at the nearest box edge.')}` : def.title, value: def.format(mine), tone: def.scale === 'diverging' ? (mine - (def.center ?? 0) >= 0 ? 'buy' : 'sell') : 'text', time: clock(all[hoverIdx]!.t, true),
-          previous: previous === null || previous === undefined ? null : def.format(previous), rank: 1 + seen.filter(x => rank(x) > rank(mine)).length, of: seen.length,
-          sigma: unusual?.[hoverIdx] && found ? found.sigma[hoverIdx] ?? null : null,
+          label: labelOf.get(def.id)!, title: def.approx?.(input) ? `${def.title} ${def.approxNote?.() ?? t('≈ About: for some of these minutes only the size boxes are known (an older server, or minutes it has not filled in yet), so this line is drawn at the nearest box edge.')}` : def.title,
+          value: shown(def, mine), tone: toneOf(def, mine), time: clock(times[hoverIdx]!, true),
+          previous: previous === null || previous === undefined ? null : shown(def, previous), rank: ranked ? 1 + seenValues.filter(x => rank(x) > rank(mine)).length : null, of: seenValues.length,
+          sigma: (unusual?.[hoverIdx] || cells === 'unusual') && sigma !== undefined && Number.isFinite(sigma) && sigma > 0 ? sigma : null,
+          partial: def.source === 'executions' && share !== null && share < 0.95 ? Math.round(share * 100) : null,
         };
       }
-      const y = top + rowIndex * rowH;
-      if (!filled) { ctx.globalAlpha = 0.5; ctx.strokeStyle = p.line; ctx.beginPath(); ctx.moveTo(0, Math.round(y + rowH - 1) + 0.5); ctx.lineTo(pw, Math.round(y + rowH - 1) + 0.5); ctx.stroke(); ctx.globalAlpha = 1; }
+      if (!filled) { ctx.globalAlpha = 0.5; ctx.strokeStyle = p.line; ctx.beginPath(); ctx.moveTo(0, Math.round(y + h - 1) + 0.5); ctx.lineTo(pw, Math.round(y + h - 1) + 0.5); ctx.stroke(); ctx.globalAlpha = 1; }
+      if (cells === 'line' && def.scale !== 'category') { this.#line(def, values, visible, times, y, h, slot, partial, unusual); return; }
       for (const i of visible) {
-        const x = v.xOf(all[i]!.t, pw), w = Math.max(1, slot - 1), value = values[i];
+        const x = v.xOf(times[i]!, pw), w = Math.max(1, slot - 1), value = values[i], fade = def.source === 'executions' && partial[i] ? 0.45 : 1;
         if (value === null || value === undefined) {
-          if (filled) { ctx.globalAlpha = 0.5; ctx.fillStyle = p.line; ctx.fillRect(x, y, w, rowH - 1); ctx.globalAlpha = 1; }
-          if (slot >= 48) { ctx.fillStyle = p.muted; ctx.fillText('–', x + w / 2, y + (rowH - 1) / 2); }
+          if (filled) { ctx.globalAlpha = 0.5; ctx.fillStyle = p.line; ctx.fillRect(x, y, w, h - 1); ctx.globalAlpha = 1; }
+          if (slot >= 48) { ctx.fillStyle = p.muted; ctx.fillText('–', x + w / 2, y + (h - 1) / 2); }
           continue;
         }
-        const t = strength(def, value, scale), tone = (value - (def.center ?? 0)) >= 0 ? p.candleUp : p.candleDown;
+        if (def.scale === 'category') {
+          // A mark per candle: tinted by the side it stands for, empty where there is nothing to mark.
+          const mark = def.format(value), tone = mark ? def.tone?.(value) ?? null : null, fill = tone ? mixHex(p.panel, toneColor(tone), 0.32) : p.panel;
+          ctx.globalAlpha = fade;
+          if (filled || cells === 'line') { ctx.fillStyle = fill; ctx.fillRect(x, y, w, h - 1); }
+          if (mark && ctx.measureText(mark).width <= w - 2) { ctx.fillStyle = (filled || cells === 'line') && tone ? textOn(fill, 1, p) : toneColor(tone); ctx.fillText(mark, x + w / 2, y + (h - 1) / 2); }
+          ctx.globalAlpha = 1;
+          continue;
+        }
+        // Unusual: how far above its own recent candles, from 0 to 3σ (none while the baseline warms up); else its size among the candles in view.
+        const sigma = found?.sigma[i];
+        // A value flagged against a flat baseline (no spread, so no σ) is as unusual as a value can be.
+        const t = cells === 'unusual' ? (found?.flag[i] && !(sigma! > 0) ? 1 : sigma !== undefined && Number.isFinite(sigma) ? Math.min(1, Math.max(0, sigma) / 3) : 0) : strength(def, value, scale), tone = (value - (def.center ?? 0)) >= 0 ? p.candleUp : p.candleDown;
         // A filled cell takes its colours from the theme (the page's own colour toward its accent, or toward the side's colour) and its figures
         // from textOn: a fixed light ramp made a row of pale bars on every dark theme.
         const fill = def.scale === 'sequential' ? mixHex(p.panel, p.ui, 0.12 + 0.76 * t) : def.scale === 'diverging' ? mixHex(mixHex(p.panel, tone, 0.18), tone, t) : p.panel;
         if (filled) {
-          ctx.fillStyle = fill;
-          ctx.fillRect(x, y, w, rowH - 1);
-          if (def.scale === 'plain') { ctx.strokeStyle = p.line; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, rowH - 2); }
+          ctx.globalAlpha = fade; ctx.fillStyle = fill;
+          ctx.fillRect(x, y, w, h - 1);
+          if (def.scale === 'plain') { ctx.strokeStyle = p.line; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 2); }
+          ctx.globalAlpha = 1;
         }
-        if (unusual?.[i]) { ctx.save(); ctx.lineWidth = 1.6; ctx.strokeStyle = p.text; ctx.globalAlpha = 0.95; ctx.strokeRect(x + 0.8, y + 0.8, Math.max(1, w - 1.6), rowH - 2.6); ctx.restore(); }
+        if (unusual?.[i]) { ctx.save(); ctx.lineWidth = 1.6; ctx.strokeStyle = p.text; ctx.globalAlpha = 0.95 * fade; ctx.strokeRect(x + 0.8, y + 0.8, Math.max(1, w - 1.6), h - 2.6); ctx.restore(); }
         if (slot >= 48) {
           ctx.fillStyle = filled ? (def.scale === 'plain' ? p.text : textOn(fill, 1, p)) : def.scale === 'diverging' ? tone : p.text;
-          ctx.globalAlpha = filled ? 1 : 0.6 + 0.4 * t;
-          ctx.fillText(def.format(value), x + w / 2, y + (rowH - 1) / 2); ctx.globalAlpha = 1;
+          ctx.globalAlpha = (filled ? 1 : 0.6 + 0.4 * t) * fade;
+          ctx.fillText(def.format(value), x + w / 2, y + (h - 1) / 2); ctx.globalAlpha = 1;
         }
       }
     });
+    const hovered = hoverBand >= 0 ? layout[hoverBand] : undefined;
     // The cell under the pointer: its column and row tinted, the cell itself boxed, and a popup beside the pointer.
     if (hoverIdx >= 0) {
-      const x = v.xOf(all[hoverIdx]!.t, pw), w = Math.max(1, slot - 1), gridH = defs.length * rowH;
-      ctx.save(); ctx.fillStyle = p.text; ctx.globalAlpha = p.dark ? 0.12 : 0.08; ctx.fillRect(x, top, w, gridH);
-      if (hoverRow >= 0 && hoverRow < defs.length) {
-        const y = top + hoverRow * rowH;
-        ctx.fillRect(0, y, pw, rowH - 1);
-        ctx.globalAlpha = 1; ctx.strokeStyle = p.text; ctx.lineWidth = 1; ctx.strokeRect(Math.round(x) + 0.5, Math.round(y) + 0.5, Math.max(1, Math.round(w) - 1), Math.round(rowH) - 2);
-      } else { ctx.globalAlpha = 0.5; ctx.strokeStyle = p.text; ctx.lineWidth = 1; ctx.strokeRect(Math.round(x) + 0.5, top + 0.5, Math.max(1, Math.round(w) - 1), gridH - 1); }
+      const x = v.xOf(times[hoverIdx]!, pw), w = Math.max(1, slot - 1);
+      ctx.save(); ctx.fillStyle = p.text; ctx.globalAlpha = p.dark ? 0.12 : 0.08; ctx.fillRect(x, top, w, gridBottom - top);
+      if (hovered?.band.kind === 'row') {
+        ctx.fillRect(0, hovered.y, pw, hovered.h - 1);
+        ctx.globalAlpha = 1; ctx.strokeStyle = p.text; ctx.lineWidth = 1; ctx.strokeRect(Math.round(x) + 0.5, Math.round(hovered.y) + 0.5, Math.max(1, Math.round(w) - 1), Math.round(hovered.h) - 2);
+      } else { ctx.globalAlpha = 0.5; ctx.strokeStyle = p.text; ctx.lineWidth = 1; ctx.strokeRect(Math.round(x) + 0.5, top + 0.5, Math.max(1, Math.round(w) - 1), gridBottom - top - 1); }
       ctx.restore();
       this.#cell = hoverCell;
     }
+    // The pinned candles: each column boxed, and a card of every statistic beside it (gone with it out of view, back with it), left to right.
+    if (this.#pinsOn !== this.#pinContext(state)) this.#pins = [];
+    const pins: { lines: InfoLine[]; x: number; y: number }[] = [];
+    for (const start of this.#pins) {
+      const pinIdx = times.indexOf(start);
+      if (pinIdx < 0 || !visible.includes(pinIdx)) continue;
+      const x = v.xOf(times[pinIdx]!, pw), w = Math.max(1, slot - 1);
+      ctx.save(); ctx.strokeStyle = p.text; ctx.lineWidth = 2; ctx.strokeRect(Math.round(x) + 1, top + 1, Math.max(1, Math.round(w) - 2), gridBottom - top - 2); ctx.restore();
+      const page = this.canvas.getBoundingClientRect();
+      pins.push({ lines: pinnedLines(clock(times[pinIdx]!, true), defs.map((def, r) => { const value = rowsValues[r]![pinIdx]; return { label: labelOf.get(def.id)!, value: shown(def, value), tone: value === null || value === undefined ? 'text' : toneOf(def, value) }; })),
+        x: page.left + leftGutter(state) + x + w, y: page.top });
+    }
+    pins.sort((a, b) => a.x - b.x);
+    // The View column, right of the plot under the price axis and the columns: each row over the candles in view (its tip says how).
+    if (this.#viewSpan) {
+      // Worked out again only for other candles in view or other figures (a pointer move redraws from what is held).
+      const at = `${visible[0]}|${visible[visible.length - 1]}|${visible.length}`;
+      if (table.view?.at !== at) table.view = { at, cells: defs.map((def, r) => def.view?.(input, visible, rowsValues[r]!) ?? null) };
+      const viewCells = table.view.cells;
+      ctx.save();
+      ctx.globalAlpha = 0.6; ctx.strokeStyle = p.line; ctx.beginPath(); ctx.moveTo(Math.round(pw) + 0.5, top); ctx.lineTo(Math.round(pw) + 0.5, gridBottom); ctx.stroke(); ctx.globalAlpha = 1;
+      layout.forEach(({ band, y, h }, bandIndex) => {
+        if (band.kind !== 'row') return;
+        const def = band.def, cell = viewCells[band.index] ?? null;
+        const fill = cell && cell.tone !== 'text' ? mixHex(p.panel, toneColor(cell.tone), 0.22) : mixHex(p.panel, p.ui, 0.08);
+        ctx.fillStyle = fill; ctx.fillRect(vx, y, vw, h - 1);
+        if (cell) {
+          let size = 11; ctx.font = `${size}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+          while (size > 8 && ctx.measureText(cell.value).width > vw - 4) { size--; ctx.font = `${size}px ui-monospace, SFMono-Regular, Menlo, monospace`; }
+          if (ctx.measureText(cell.value).width <= vw - 2) { ctx.fillStyle = textOn(fill, 1, p); ctx.fillText(cell.value, vx + vw / 2, y + (h - 1) / 2); }
+        }
+        if (bandIndex === viewBand) {
+          ctx.strokeStyle = p.text; ctx.lineWidth = 1; ctx.strokeRect(Math.round(vx) + 0.5, Math.round(y) + 0.5, Math.round(vw) - 1, Math.round(h) - 2);
+          viewHover = viewCellLines(labelOf.get(def.id)!, cell, def.title, visible.length);
+        }
+      });
+      ctx.restore();
+    }
+    if (viewHover) this.#viewLines = viewHover;
     ctx.textAlign = 'left'; ctx.font = '10px ui-sans-serif, system-ui, sans-serif';
-    defs.forEach((def, i) => { const y = top + i * rowH, label = labelOf.get(def.id)!, w = ctx.measureText(label).width + 10; ctx.globalAlpha = 0.88; ctx.fillStyle = p.panel; ctx.fillRect(2, y + 2, w, rowH - 5); ctx.globalAlpha = 1; ctx.fillStyle = p.muted; ctx.fillText(label, 6, y + (rowH - 1) / 2); });
+    for (const { band, y, h } of layout) {
+      if (band.kind !== 'row') continue;
+      const label = labelOf.get(band.def.id)!, w = ctx.measureText(label).width + 10;
+      ctx.globalAlpha = 0.88; ctx.fillStyle = p.panel; ctx.fillRect(2, y + 2, w, h - 5); ctx.globalAlpha = 1; ctx.fillStyle = p.muted; ctx.fillText(label, 6, y + (h - 1) / 2);
+    }
+    return pins;
+  }
+
+  /**
+   * Line: a row drawn as a line through its candles (broken where one has no value), on its own scale: a share around 50 % or a signed figure
+   * about its centre line, with each candle's side shaded from it, and the rest from their lowest to their highest in view. Unusual candles get
+   * a ring while Highlights is on.
+   */
+  #line(def: StatDef, values: readonly (number | null)[], visible: readonly number[], times: readonly number[], y: number, h: number, slot: number, partial: readonly boolean[], unusual: Uint8Array | null): void {
+    const { ctx, palette: p, view: v } = this, pw = this.plotW, center = def.center ?? 0, seenValues = visible.flatMap(i => { const x = values[i]; return x === null || x === undefined ? [] : [x]; });
+    if (!seenValues.length) return;
+    const diverging = def.scale === 'diverging', reach = diverging ? Math.max(...seenValues.map(x => Math.abs(x - center))) || 1 : 0;
+    const lo = Math.min(...seenValues), hi = Math.max(...seenValues), span = hi - lo || 1, pad = 3;
+    const yOf = (x: number): number => diverging ? y + h / 2 - (x - center) / reach * (h / 2 - pad) : y + h - pad - (x - lo) / span * (h - 2 * pad);
+    ctx.save();
+    if (diverging) {
+      ctx.globalAlpha = 0.5; ctx.strokeStyle = p.line; ctx.beginPath(); ctx.moveTo(0, Math.round(y + h / 2) + 0.5); ctx.lineTo(pw, Math.round(y + h / 2) + 0.5); ctx.stroke();
+      for (const i of visible) {
+        const x = values[i]; if (x === null || x === undefined) continue;
+        const left = v.xOf(times[i]!, pw), w = Math.max(1, slot * 0.6), top = Math.min(yOf(x), y + h / 2);
+        ctx.globalAlpha = 0.35 * (def.source === 'executions' && partial[i] ? 0.5 : 1); ctx.fillStyle = x >= center ? p.candleUp : p.candleDown;
+        ctx.fillRect(left + (slot - w) / 2, top, w, Math.abs(yOf(x) - (y + h / 2)));
+      }
+    }
+    ctx.globalAlpha = 0.9; ctx.strokeStyle = diverging ? p.text : p.ui; ctx.lineWidth = 1.4; ctx.beginPath();
+    let open = false;
+    for (const i of visible) {
+      const x = values[i];
+      if (x === null || x === undefined) { open = false; continue; }
+      const px = v.xOf(times[i]!, pw) + slot / 2, py = yOf(x);
+      if (open) ctx.lineTo(px, py); else { ctx.moveTo(px, py); open = true; }
+    }
+    ctx.stroke();
+    // A value with none beside it (zoomed to one candle, or between gaps) is a dot, not a line of no length.
+    ctx.fillStyle = diverging ? p.text : p.ui;
+    visible.forEach((i, k) => {
+      const x = values[i], before = k > 0 ? values[visible[k - 1]!] : null, after = k < visible.length - 1 ? values[visible[k + 1]!] : null;
+      if (x === null || x === undefined || (before !== null && before !== undefined) || (after !== null && after !== undefined)) return;
+      ctx.beginPath(); ctx.arc(v.xOf(times[i]!, pw) + slot / 2, yOf(x), 2, 0, Math.PI * 2); ctx.fill();
+    });
+    if (unusual) for (const i of visible) {
+      const x = values[i]; if (!unusual[i] || x === null || x === undefined) continue;
+      ctx.globalAlpha = 1; ctx.strokeStyle = p.text; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.arc(v.xOf(times[i]!, pw) + slot / 2, yOf(x), 3, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /** Export CSV: the table's candles in view, one line each, every statistic shown as its number or its mark (empty where it has none). */
+  #export(): void {
+    const table = this.#table, shown = enabledStats(this.store.state.barStats);
+    // Only a table of the statistics now chosen (one held from before a change is not written).
+    if (!table || table.defs.length !== shown.length || table.defs.some((def, i) => def !== shown[i])) return;
+    const v = this.view, tfMs = TIMEFRAMES[this.store.state.timeframe] ?? 3_600_000;
+    const at = table.times.map((_, i) => i).filter(i => table.times[i]! + tfMs > v.t0 && table.times[i]! < v.t1);
+    if (!at.length) return;
+    const lines = [['candle_start_utc', ...table.defs.map(def => def.csv?.head ?? def.id)].join(',')];
+    for (const i of at) lines.push([new Date(table.times[i]!).toISOString(), ...table.values.map((row, r) => csvCell(table.defs[r]!, row[i]))].join(','));
+    const name = `bar-stats-${this.store.state.marketId.replace(/[^A-Za-z0-9]+/g, '-')}-${this.store.state.timeframe}-${new Date(table.times[at[at.length - 1]!]!).toISOString().slice(0, 16).replace(/[-:]/g, '')}Z.csv`;
+    // With a byte-order mark, so a spreadsheet reads the marks (▲, −) as UTF-8.
+    const url = URL.createObjectURL(new Blob([`\ufeff${lines.join('\n')}\n`], { type: 'text/csv' })), link = el('a', { href: url, download: name });
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
   }
 }

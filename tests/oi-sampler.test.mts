@@ -28,6 +28,7 @@ test('the server samples the venues the feed manager does not read, writing thei
   assert.ok(!asked.some(url => url.includes('binance.com') || url.includes('hyperliquid')), 'Binance and Hyperliquid are the feed manager\'s');
   assert.ok(recorded.length > 0 && recorded.every(m => m.instrumentId === 'bybit:BTCUSDT' && m.sourceTimestamp !== null), 'Bybit\'s history went to the store (Deribit has none)');
   assert.ok(recorded.every((m, i) => i === 0 || Number(m.sourceTimestamp) > Number(recorded[i - 1]!.sourceTimestamp)), 'oldest first');
+  assert.ok(recorded.every(m => Number(m.observationTimestamp) === Number(m.sourceTimestamp) - 1), 'each history reading is stored a millisecond before its moment: it closes the minute that ends there, as a live reading does');
   assert.deepEqual(applied.map(a => [a.venue, a.message.instrumentId, a.message.base, a.message.quality]), [['bybit', 'bybit:BTCUSDT', 123, 'sampled'], ['deribit', 'deribit:BTC-PERPETUAL', 1_000, 'sampled']]);
   const before = recorded.length;
   await sampler.round();
@@ -127,4 +128,149 @@ test('Bybit open interest stored as both sides is halved once, and only once', (
   const twice = new HistoryStore({ filePath });
   assert.equal(close(twice, 'bybit:BTCUSDT'), 30_000, 'not halved again');
   twice.close(); rmSync(dir, { recursive: true, force: true });
+});
+
+test('Hyperliquid open interest stored as both sides is halved once, its USD too, and only once, apart from Bybit\'s', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hyperliquid-oi-')), filePath = join(dir, 'history.sqlite');
+  const at = 1_700_000_000_000, row = (instrumentId: string, base: number, t: number, quote?: number) => ({ kind: 'openInterest', instrumentId, sourceTimestamp: t, observationTimestamp: t, receivedAt: t + 1, base, ...(quote === undefined ? {} : { quote }), quality: 'native' });
+  const before = new HistoryStore({ filePath });
+  before.recordOi(row('hyperliquid:BTC-PERP', 40_000, at, 3_200_000_000)); before.recordOi(row('hyperliquid:BTC-PERP', 40_010, at + 60_000, 3_200_800_000));
+  before.recordOi(row('hyperliquid:xyz:XYZ100-PERP', 100, at, 2_000));
+  before.recordOi(row('bybit:BTCUSDT', 30_000, at)); before.recordOi(row('binance:BTCUSDT', 90_000, at));
+  // A store written before the fix, after Bybit's was halved: Hyperliquid's mark is missing, Bybit's is there.
+  before.db.exec("DELETE FROM migration_state WHERE key = 'hyperliquid-oi-single'"); before.close();
+  const bars = (store: HistoryStore, id: string) => store.listOi(id, { from: 0 }) as { open?: number; high?: number; low?: number; close?: number; quote?: number | null }[];
+  const close = (store: HistoryStore, id: string): number => Number(bars(store, id).at(-1)?.close ?? NaN);
+  const once = new HistoryStore({ filePath });
+  assert.deepEqual(bars(once, 'hyperliquid:BTC-PERP').map(b => [b.open, b.high, b.low, b.close]), [[20_000, 20_000, 20_000, 20_000], [20_005, 20_005, 20_005, 20_005]], 'every figure of every bar halved');
+  assert.deepEqual(bars(once, 'hyperliquid:BTC-PERP').map(b => b.quote), [1_600_000_000, 1_600_400_000], 'its USD too');
+  assert.equal(close(once, 'hyperliquid:xyz:XYZ100-PERP'), 50, 'a builder-deployed market too');
+  assert.equal(close(once, 'bybit:BTCUSDT'), 30_000, 'Bybit\'s, halved before, is not halved again');
+  assert.equal(close(once, 'binance:BTCUSDT'), 90_000, 'other venues untouched');
+  once.recordOi(row('hyperliquid:BTC-PERP', 20_007, at + 120_000));
+  once.close();
+  const twice = new HistoryStore({ filePath });
+  assert.deepEqual(bars(twice, 'hyperliquid:BTC-PERP').map(b => b.close), [20_000, 20_005, 20_007], 'not halved again, nor the reading written since');
+  twice.close(); rmSync(dir, { recursive: true, force: true });
+});
+
+test('a reading keeps the venue\'s own clock, failures are counted and logged at most every ten minutes, and fast venues are read every five seconds', async () => {
+  let clock = NOW, failing = false;
+  const applied: OiSampleMessage[] = [], logs: string[] = [];
+  const get = async (url: string): Promise<unknown> => {
+    if (url.includes('open-interest?category')) return { result: { list: [] } };
+    if (url.includes('tickers')) { if (failing) throw new Error('HTTP 500'); return { result: { list: [{ openInterest: '20', singleOpenInterest: '10' }] }, time: 1_700_000_000_000 }; }
+    throw new Error(url);
+  };
+  const sampler = new OiSampler((message, venue) => applied.push(message), () => {}, get, () => clock, 60_000, message => logs.push(message));
+  sampler.sync(['bybit:BTCUSDT']);
+  await sampler.round();
+  assert.equal(applied[0]!.sourceTimestamp, 1_700_000_000_000, 'the venue\'s own clock rides the sample');
+  assert.equal(sampler.status().bybit.lastSuccess, NOW); assert.equal(sampler.status().bybit.failures, 0); assert.equal(sampler.status().bybit.fast, false);
+  sampler.setFast(['bybit']);
+  assert.equal(sampler.status().bybit.fast, true);
+  clock += 5_000; await sampler.roundFast();
+  assert.equal(applied.length, 2, 'a fast round reads the venue');
+  await sampler.roundFast();
+  assert.equal(applied.length, 2, 'not again within five seconds');
+  clock += 5_000; failing = true;
+  await sampler.roundFast();
+  assert.equal(sampler.status().bybit.failures, 1); assert.match(String(sampler.status().bybit.lastError), /500/); assert.equal(logs.length, 1, 'logged once');
+  clock += 5_000; await sampler.roundFast();
+  assert.equal(sampler.status().bybit.failures, 2); assert.equal(logs.length, 1, 'at most once every ten minutes');
+  clock += 10 * 60_000 + 5_000; await sampler.roundFast();
+  assert.equal(logs.length, 2, 'logged again after ten minutes');
+  sampler.setFast([]);
+  assert.equal(sampler.status().bybit.fast, false);
+  sampler.close();
+});
+
+test('an instrument is read once at a time: the fast round neither starts its history again nor reads beside a read under way', async () => {
+  let clock = NOW, historyAsks = 0, tickerAsks = 0, release: () => void = () => {};
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const get = async (url: string): Promise<unknown> => {
+    if (url.includes('open-interest?category')) { historyAsks++; await held; return { result: { list: [] } }; }
+    if (url.includes('tickers')) { tickerAsks++; return { result: { list: [{ singleOpenInterest: '10' }] } }; }
+    throw new Error(url);
+  };
+  const applied: OiSampleMessage[] = [];
+  const sampler = new OiSampler(message => applied.push(message), () => {}, get, () => clock, 60_000, () => {});
+  sampler.sync(['bybit:BTCUSDT']);
+  sampler.setFast(['bybit']);
+  const slow = sampler.round();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(historyAsks, 1, 'the minute round is reading the history');
+  clock += 5_000; await Promise.race([sampler.roundFast(), new Promise<void>(resolve => setImmediate(resolve))]);
+  assert.equal(historyAsks, 1, 'the fast round did not start it again');
+  assert.equal(tickerAsks, 0, 'nor read beside it');
+  release(); await slow;
+  assert.equal(tickerAsks, 1); assert.equal(applied.length, 1);
+  const read = historyAsks;
+  clock += 5_000; await sampler.roundFast();
+  assert.equal(historyAsks, read, 'a fast read is of the live value only');
+  assert.equal(tickerAsks, 2);
+  sampler.close();
+});
+
+test('an answer with no reading in it (an error body sent with 200) is counted and said as a failure', async () => {
+  const logs: string[] = [];
+  const get = async (url: string): Promise<unknown> => url.includes('open-interest?category') ? { result: { list: [] } } : { retCode: 10006, retMsg: 'Too many visits', result: {} };
+  const sampler = new OiSampler(() => {}, () => {}, get, () => NOW, 60_000, message => logs.push(message));
+  sampler.sync(['bybit:BTCUSDT']);
+  await sampler.round();
+  assert.equal(sampler.status().bybit.failures, 1);
+  assert.match(String(sampler.status().bybit.lastError), /no reading/);
+  assert.equal(logs.length, 1);
+  sampler.close();
+});
+
+test('a failed history read is tried again when due even while the fast round keeps meeting the minute round', async () => {
+  let clock = NOW, historyAsks = 0;
+  const get = async (url: string): Promise<unknown> => {
+    if (url.includes('open-interest?category')) { historyAsks++; throw new Error('HTTP 500'); }
+    if (url.includes('tickers')) return { result: { list: [{ singleOpenInterest: '10' }] } };
+    throw new Error(url);
+  };
+  const sampler = new OiSampler(() => {}, () => {}, get, () => clock, 60_000, () => {});
+  sampler.sync(['bybit:BTCUSDT']); await sampler.round();
+  assert.equal(historyAsks, 1, 'the first history read failed; it is due again a minute later');
+  sampler.setFast(['bybit']);
+  // A fast read under way each time the minute's round comes: the round must still read the history after it.
+  clock += 61_000;
+  const fast = sampler.roundFast(), minute = sampler.round();
+  await Promise.all([fast, minute]);
+  assert.equal(historyAsks, 2, 'the history read was not lost to the fast read');
+  sampler.close();
+});
+
+test('the sampler\x27s history fills only the minutes the server did not record live, so its few coins off never replace a live close', async () => {
+  // A restart over a stretch recorded live: Bybit's five-minute history reads 1006 where the live samples read 1000. Each reading is the last of
+  // its minute, so without its `historySource` mark the store took it as the close of every fifth live minute (review, 2026-11-10).
+  const MIN = 60_000, HOUR = 3_600_000, clock = Math.floor(Date.now() / HOUR) * HOUR, liveFrom = clock - HOUR, id = 'bybit:BTCUSDT';
+  const history = new HistoryStore({ filePath: ':memory:' });
+  for (let t = liveFrom; t < clock; t += 8_000) history.recordOi({ kind: 'openInterest', instrumentId: id, sourceTimestamp: t, receivedAt: t, base: 1_000, quality: 'native' });
+  history.flushOiBars();
+  const stamps = Array.from({ length: 19 }, (_, k) => clock - 90 * MIN + k * 5 * MIN);
+  const get = async (url: string): Promise<unknown> => {
+    if (url.includes('api.bybit.com/v5/market/open-interest')) {
+      if (!url.includes('intervalTime=5min')) return { result: { list: [] } };
+      const end = Number(new URL(url).searchParams.get('endTime'));
+      return { result: { list: stamps.filter(t => t <= end).reverse().map(t => ({ timestamp: String(t), openInterest: '2012', singleOpenInterest: '1006' })) } };
+    }
+    if (url.includes('api.bybit.com/v5/market/tickers')) return { result: { list: [{ openInterest: '2000', singleOpenInterest: '1000' }] } };
+    throw new Error(`not expected: ${url}`);
+  };
+  const sampler = new OiSampler(() => {}, oiHistoryWriter(history), get, () => clock, HOUR);
+  sampler.sync([id]);
+  await sampler.round();
+  sampler.close();
+  history.flushOiBars();
+  const bars = history.listOi(id, { from: 0, to: clock + HOUR, limit: 10_000 }) as { start: number; close: number }[];
+  const live = bars.filter(b => b.start >= liveFrom && b.start < clock);
+  assert.equal(live.length, 60);
+  assert.ok(live.every(b => b.close === 1_000), 'every live minute keeps its live close');
+  const before = bars.filter(b => b.start < liveFrom);
+  assert.deepEqual(before.map(b => (b.start - liveFrom) / MIN), [-31, -26, -21, -16, -11, -6, -1], 'the readings fill the minutes before the live samples, each the minute that ends at it');
+  assert.ok(before.every(b => b.close === 1_006));
+  history.close();
 });

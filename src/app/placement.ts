@@ -36,13 +36,16 @@ export function chooseSide(anchor: Box, need: number, view: View): Side {
   return above > below ? 'above' : 'below';
 }
 
-/** Where the panel goes on `side` of its button, and the tallest it may be there. It always lies whole inside the window. */
-export function placeOn(side: Side, anchor: Box, need: number, width: number, align: 'left' | 'right', view: View): Placement {
+/**
+ * Where the panel goes on `side` of its button, and the tallest it may be there. It always lies whole inside the window. Sideways it lines
+ * up with the button's left or right edge, or (`edge`) stands against the window's right edge, over the order book rather than the map.
+ */
+export function placeOn(side: Side, anchor: Box, need: number, width: number, align: 'left' | 'right' | 'edge', view: View): Placement {
   const room = side === 'below' ? view.height - anchor.bottom - GAP - EDGE : anchor.top - GAP - EDGE;
   const maxHeight = Math.max(FLOOR, Math.min(view.height - 2 * EDGE, room));
   const height = Math.min(need, maxHeight);
   const top = clamp(side === 'below' ? anchor.bottom + GAP : anchor.top - GAP - height, EDGE, view.height - EDGE - height);
-  const left = clamp(align === 'right' ? anchor.right - width : anchor.left, EDGE, view.width - width - EDGE);
+  const left = clamp(align === 'edge' ? view.width - width - EDGE : align === 'right' ? anchor.right - width : anchor.left, EDGE, view.width - width - EDGE);
   return { side, top, left, maxHeight };
 }
 
@@ -55,4 +58,19 @@ export function dragTo(want: { left: number; top: number }, size: { width: numbe
   const left = clamp(want.left, EDGE, view.width - size.width - EDGE);
   const top = clamp(want.top, EDGE, view.height - EDGE - Math.min(size.need, FLOOR));
   return { left, top, maxHeight: Math.max(FLOOR, view.height - top - EDGE) };
+}
+
+/**
+ * Where a panel about something on the chart goes: beside `box` (a selection, in window pixels), where the eye already is, and not over it.
+ * Right of it when the panel fits there, else left of it; where neither side has the room, against the window's edge on the roomier side
+ * (it then covers part of the box rather than leave the window). Its top lines up with the box's top, raised as far as it must be for the
+ * panel to fit, so a selection low on the screen keeps its panel whole. (A Range panel opened by its toolbar button landed in the window's
+ * corner while that button was folded away, far from the selection, and went unseen: Karl, 2026-11-13.)
+ */
+export function besideBox(box: Box, need: number, width: number, view: View): Dragged {
+  const right = view.width - EDGE - (box.right + GAP), left = box.left - GAP - EDGE;
+  const x = width <= right ? box.right + GAP : width <= left ? box.left - GAP - width : right >= left ? view.width - EDGE - width : EDGE;
+  const height = Math.min(need, view.height - 2 * EDGE);
+  const top = clamp(box.top, EDGE, view.height - EDGE - height);
+  return { left: clamp(x, EDGE, view.width - width - EDGE), top, maxHeight: Math.max(Math.min(FLOOR, view.height - 2 * EDGE), view.height - top - EDGE) };
 }

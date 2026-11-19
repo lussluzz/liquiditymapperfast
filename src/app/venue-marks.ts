@@ -1,4 +1,5 @@
 import { venueLabel } from './venues.ts';
+import { pixelRatio } from './pixel-ratio.ts';
 
 /**
  * A small mark for each exchange, drawn here: a square in the exchange's brand colour with a monogram in its ink colour, and a notch in the
@@ -41,6 +42,10 @@ type MarketLike = { instrumentId?: string | undefined; id?: string | undefined; 
 /** Where the page's market list is read from (`useMarkets`), and the spot instruments of each list as it was read. */
 let marketsOf: () => readonly MarketLike[] = () => [];
 const spotSets = new WeakMap<readonly MarketLike[], ReadonlySet<string>>();
+/**
+ * The source should hand back the same list while it holds (the page's store does): `marksKey` asks `markOf` for every mark a frame, and
+ * a list made afresh each time would have its spot set worked out again each time.
+ */
 export function useMarkets(source: () => readonly MarketLike[]): void { marketsOf = source; }
 /**
  * The instruments the market list says are spot, and the venues all of whose markets are (Coinbase, Kraken): most spot markets carry no
@@ -62,6 +67,13 @@ function spotIds(): ReadonlySet<string> {
   spotSets.set(markets, set = ids);
   return set;
 }
+let lastSpots: ReadonlySet<string> | null = null, spotEpoch = 0;
+/** A count that moves whenever the marks may look different (the market list's spot set changed): a canvas keeping marks draws them again. */
+export function marksEpoch(): number {
+  const spots = spotIds();
+  if (spots !== lastSpots) { lastSpots = spots; spotEpoch++; }
+  return spotEpoch;
+}
 
 /** The mark of an instrument or a venue (`binance:BTCUSDT`, `binancespot`, `binance`): its exchange's style, and whether it is a spot market. */
 export function markOf(id: string): MarkStyle & { spot: boolean; family: string } {
@@ -79,11 +91,21 @@ export const monogramPx = (size: number, text: string): number => size * (text.l
 const FONT = 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
 const bitmaps = new Map<string, HTMLCanvasElement>();
 
+/** Each id's bitmap by size, for the spot list it was made under: a mark asked for again is one lookup, no id parsing or key string. */
+const byId = new Map<number, Map<string, HTMLCanvasElement>>();
+let byIdFor: ReadonlySet<string> | null = null;
+
 /** A mark drawn once at `px` device pixels a side (kept for the next frame: a canvas of bubbles draws hundreds a frame). */
 function bitmap(id: string, px: number): HTMLCanvasElement {
+  const spots = spotIds();
+  if (spots !== byIdFor) { byId.clear(); byIdFor = spots; }
+  let sized = byId.get(px);
+  if (!sized) byId.set(px, sized = new Map());
+  const held = sized.get(id);
+  if (held) return held;
   const m = markOf(id), key = `${m.family}|${m.spot}|${px}`;
   let canvas = bitmaps.get(key);
-  if (canvas) return canvas;
+  if (canvas) { sized.set(id, canvas); return canvas; }
   canvas = document.createElement('canvas'); canvas.width = canvas.height = px;
   const ctx = canvas.getContext('2d')!, r = Math.max(1, px * 0.16);
   ctx.fillStyle = m.bg; ctx.beginPath(); ctx.roundRect(0, 0, px, px, r); ctx.fill();
@@ -93,15 +115,54 @@ function bitmap(id: string, px: number): HTMLCanvasElement {
   ctx.font = `700 ${monogramPx(px, m.text)}px ${FONT}`;
   ctx.fillText(m.text, px / 2, px / 2 + px * 0.04);
   if (m.spot) { const s = px * 0.32; ctx.beginPath(); ctx.moveTo(px, px - s); ctx.lineTo(px, px); ctx.lineTo(px - s, px); ctx.closePath(); ctx.fill(); }
-  if (bitmaps.size > 400) bitmaps.clear();
+  if (bitmaps.size > 400) { bitmaps.clear(); byId.clear(); }
   bitmaps.set(key, canvas);
+  (byId.get(px) ?? byId.set(px, new Map()).get(px)!).set(id, canvas);
   return canvas;
 }
 
-/** Paint the mark of `id`, `size` CSS px a side, centred on (`cx`, `cy`). */
-export function drawVenueMark(ctx: CanvasRenderingContext2D, id: string, cx: number, cy: number, size: number): void {
-  const dpr = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1, px = Math.max(8, Math.round(size * dpr));
-  ctx.drawImage(bitmap(id, px), Math.round(cx - size / 2), Math.round(cy - size / 2), size, size);
+/** Where a mark `size` CSS px a side centred on `c` starts: on a whole CSS pixel, which is where `drawVenueMark` puts it. */
+export const markCorner = (c: number, size: number): number => Math.round(c - size / 2);
+
+/** Paint the mark of `id`, `size` CSS px a side, centred on (`cx`, `cy`); a painter that knows its pixel ratio passes it (`dpr`). */
+export function drawVenueMark(ctx: CanvasRenderingContext2D, id: string, cx: number, cy: number, size: number, dpr = pixelRatio()): void {
+  const px = Math.max(8, Math.round(size * dpr));
+  ctx.drawImage(bitmap(id, px), markCorner(cx, size), markCorner(cy, size), size, size);
+}
+
+/** A mark as `drawVenueMark` paints it: centred on (`x`, `y`) CSS px, `size` a side, at opacity `a` (0 to 1). */
+export interface PaintedMark { id: string; x: number; y: number; size: number; a: number }
+
+/**
+ * What `marks` put on a canvas: each one's corner on whole pixels (`markCorner`), its size, its bitmap (its exchange, spot or not, at the
+ * pixel ratio) and its opacity in 255ths, the steps a canvas lays it in. Two lists with the same key paint the same pixels.
+ */
+export function marksKey(marks: readonly PaintedMark[]): string {
+  let key = String(pixelRatio());
+  for (const m of marks) key += `;${m.id}|${markOf(m.id).spot ? 's' : ''}|${m.size}|${markCorner(m.x, m.size)}|${markCorner(m.y, m.size)}|${Math.round(Math.min(1, Math.max(0, m.a)) * 255)}`;
+  return key;
+}
+
+/**
+ * Marks on a canvas of their own, painted again only when what lands on it changes (`marksKey`). The Tape's trail marks move a few pixels a
+ * second and a canvas painted again every frame is one the browser sends to the card and composes every frame (Karl, 2026-11-12, the
+ * phone's Tape). `begin` gets the canvas ready (cleared when something is on it), `draw` paints one mark.
+ */
+export class MarkLayer {
+  #key: string | null = null; #drawn = false;
+  /** The canvas was cleared (sized): the next `paint` paints what it is given. */
+  reset(): void { this.#key = null; this.#drawn = false; }
+  /** Paint `marks` unless the canvas shows them already; true when it painted (or cleared). */
+  paint(marks: readonly PaintedMark[], begin: (clear: boolean) => void, draw: (mark: PaintedMark) => void): boolean {
+    const key = marksKey(marks);
+    if (key === this.#key) return false;
+    this.#key = key;
+    if (!marks.length && !this.#drawn) return false;
+    begin(this.#drawn);
+    for (const m of marks) draw(m);
+    this.#drawn = marks.length > 0;
+    return true;
+  }
 }
 
 /**

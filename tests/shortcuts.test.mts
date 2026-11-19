@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SHORTCUTS, matchShortcut, togglePatch, type Feature, type KeyPress } from '../src/app/shortcuts.ts';
 import type { AppState } from '../src/app/store.ts';
+import { liqLevelsUrl } from '../src/app/liq-url.ts';
 
 const press = (key: string, extra: Partial<KeyPress> = {}): KeyPress => ({ key, code: extra.code ?? `Key${key.toUpperCase()}`, ctrlKey: false, metaKey: false, altKey: false, repeat: false, target: { tagName: 'CANVAS' }, ...extra });
 const kind = (e: KeyPress, dialog = false) => { const s = matchShortcut(e, dialog); return s ? s.action.kind === 'toggle' ? `toggle:${s.action.feature}` : s.action.kind === 'timeframe' ? `tf:${s.action.tf}` : s.action.kind : null; };
@@ -41,15 +42,28 @@ test('a switch does not flip back and forth while its key is held; zoom repeats'
 test('no two shortcuts share a key, and every switch has one', () => {
   const seen = new Set<string>();
   for (const s of SHORTCUTS) for (const k of [...(s.codes ?? []).map(c => `code:${c}`), ...(s.keys ?? []).map(k => `key:${k}`)]) { assert.ok(!seen.has(k), k); seen.add(k); }
-  const features: Feature[] = ['footprint', 'trades', 'liquidations', 'absorption', 'traded', 'keyLevels', 'vwap', 'highlights'];
+  // Liquidation levels only where its file has an address (liq-url.ts).
+  const features: Feature[] = ['footprint', 'trades', 'liquidations', ...(liqLevelsUrl() ? ['liqLevels' as const] : []), 'absorption', 'traded', 'tpo', 'keyLevels', 'vwap', 'highlights'];
   assert.deepEqual(SHORTCUTS.flatMap(s => s.action.kind === 'toggle' ? [s.action.feature] : []).sort(), [...features].sort());
-  assert.ok(!seen.has('key:m'), 'M is the Mirror toggle on the toolbar: not taken');
+  assert.ok(!seen.has('key:m'), "M stays free: it is Mirror's letter (its switch is in the order book's Cues panel)");
 });
 
 test('a switch flips its own feature and nothing else', () => {
-  const state = { show: { footprint: false, bubbles: true, traded: false, mirror: true }, liquidations: { on: false, min: 1 }, absorption: { on: true }, keyLevels: { on: false }, vwap: { on: false }, highlight: { on: true } } as unknown as AppState;
+  const state = { show: { footprint: false, bubbles: true, traded: false, mirror: true }, liquidations: { on: false, min: 1 }, liqLevels: { on: true }, absorption: { on: true }, keyLevels: { on: false }, vwap: { on: false }, highlight: { on: true } } as unknown as AppState;
   assert.deepEqual(togglePatch(state, 'footprint'), { show: { footprint: true, bubbles: true, traded: false, mirror: true } });
   assert.deepEqual(togglePatch(state, 'trades'), { show: { footprint: false, bubbles: false, traded: false, mirror: true } });
   assert.deepEqual(togglePatch(state, 'liquidations'), { liquidations: { on: true, min: 1 } });
+  assert.deepEqual(togglePatch(state, 'liqLevels'), { liqLevels: { on: false } });
   assert.deepEqual(togglePatch(state, 'highlights'), { highlight: { on: false } });
+});
+
+test('the brackets hide or show the two columns, matched by their place on the keyboard (on many layouts a bracket needs AltGr)', () => {
+  const side = (e: KeyPress): string | null => { const s = matchShortcut(e, false); return s && s.action.kind === 'column' ? s.action.side : null; };
+  assert.equal(side(press('[', { code: 'BracketLeft' })), 'left');
+  assert.equal(side(press(']', { code: 'BracketRight' })), 'right');
+  assert.equal(side(press('ü', { code: 'BracketLeft' })), 'left', 'a German keyboard types ü on that key');
+  assert.equal(side(press('[', { code: 'BracketLeft', ctrlKey: true, altKey: true })), null, 'AltGr types the bracket there: the page leaves it');
+  assert.equal(side(press('[', { code: 'BracketLeft', target: { tagName: 'INPUT' } })), null, 'typing in a field');
+  assert.equal(side(press('[', { code: 'BracketLeft', repeat: true })), null, 'held: not flipped back and forth');
+  assert.deepEqual(SHORTCUTS.filter(s => s.action.kind === 'column').map(s => s.caps[0]), ['[', ']']);
 });

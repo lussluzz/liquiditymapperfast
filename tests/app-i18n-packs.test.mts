@@ -8,8 +8,13 @@ import { appRoot, keysInSource, sources, template } from '../scripts/i18n-keys.m
 
 const packsDir = path.join(appRoot, 'i18n');
 
-/** Files that carry the page's words: everything but the guide's long text, the language machinery, workers and brand tables. */
-const SKIPPED = /^(format\.ts|guide\/|venues\.ts|i18n|boot\.ts|worker\/|wire\.ts|watermark\.ts|theme\.ts$|browser\/feeds)/;
+/**
+ * Files that carry the page's words: everything but the guide's long text, the language machinery, workers and brand tables, and the scripts'
+ * language (`script/lang/`: its words are the language's own, `Math` or `Invalid Date`, which scripts read as code; what a person reads of it
+ * goes through `script/messages.ts`), the tools offered to agents in the browser (`agent/`: English for agents, like the published reference),
+ * and the frame-rate panel's report for an AI assistant (`fps/report.ts`, English for the same reason).
+ */
+const SKIPPED = /^(format\.ts|guide\/|venues\.ts|i18n|boot\.ts|worker\/|wire\.ts|watermark\.ts|theme\.ts$|browser\/feeds|script\/lang\/|agent\/|fps\/report\.ts)/;
 
 /** Every English text the page asks to have translated (the calls to t() and tn() in the source, the guide's own chrome included). */
 const keysInPage = (): Set<string> => new Set(keysInSource().keys());
@@ -76,8 +81,10 @@ test('a count that changes the wording has the forms its language needs', () => 
 /** ---- text the page shows that is not going through t() ---------------------------------------------------------------------------- */
 
 const proseLike = (s: string): boolean => /[A-Za-z]{2}/.test(s) && (/\s/.test(s.trim()) ? /[a-z]{2}/i.test(s) : /^[A-Z][a-z]{2,}/.test(s));
-const EXCLUDE = new Set(['chip blocked faulty', 'chip blocked', 'muted blocked', 'LiquidityMapperFast', 'Karl']);
-const notText = (s: string): boolean => EXCLUDE.has(s) || /[<>{}]|;[^ ]|^[^ ]*;|=>|^[.#[]|https?:|\.(png|svg|css|json|ts)$|^\d+(\.\d+)?px |monospace|sans-serif|^[a-z]+(-[a-z0-9]+)+( [a-z0-9-]+)*$|^[a-z]+ [a-z]$|^(M|L|C|A|Z)[\d\s.,-]/.test(s) || /^[a-z]+(-[a-z]+)* (current|on|off|v|h|in|open|plain)$/.test(s);
+const EXCLUDE = new Set(['chip blocked faulty', 'chip blocked', 'muted blocked', 'LiquidityMapperFast', 'Karl', 'Plus']);
+// A KeyboardEvent.code (BracketLeft, Digit1, KeyF) is the name of a place on the keyboard: the shortcuts table matches by it, and no one reads it.
+const KEY_CODE = /^(Bracket|Digit|Key|Numpad|Arrow|Shift|Control|Alt|Meta)([A-Z]|d)/;
+const notText = (s: string): boolean => EXCLUDE.has(s) || KEY_CODE.test(s) && !/s/.test(s) || /[<>{}]|;[^ ]|^[^ ]*;|=>|^[.#[]|https?:|\.(png|svg|css|json|ts)$|^\d+(\.\d+)?px |monospace|sans-serif|^[a-z]+(-[a-z0-9]+)+( [a-z0-9-]+)*$|^[a-z]+ [a-z]$|^(M|L|C|A|Z)[\d\s.,-]/.test(s) || /^[a-z]+(-[a-z]+)* (current|on|off|v|h|in|open|plain)$/.test(s);
 const CALL_SKIP = /(^|\.)(querySelector|querySelectorAll|closest|matches|setProperty|getPropertyValue|addEventListener|removeEventListener|getItem|setItem|removeItem|createElement|createElementNS|getElementById|set|get|has|delete|getAttribute|importScripts|fetch|WebSocket|postMessage|log|warn|error|info|debug|test|includes|startsWith|endsWith|replace|replaceAll|split|join|indexOf|push|Number|String|parseInt|parseFloat|toggle|add|remove|dispatchEvent|Error|URL|Worker|matchMedia|measureText|createLinearGradient|addColorStop|assert|equal|Symbol|RegExp|padStart|padEnd|localeCompare|append|before|after|select|toggleAttribute|animate|requestFullscreen|scrollIntoView|focus|execCommand|canPlayType|decodeURIComponent|encodeURIComponent|JSON\.parse|JSON\.stringify|Intl\.\w+|DOMParser|Date)$/;
 const ASSIGN_TEXT = /(^|\.)(textContent|innerText|title|placeholder|ariaLabel|label|text|alt)$/;
 const PROP_SKIP = /^(class|type|id|key|role|kind|source|mode|value|rel|href|src|target|name|display|position|color|background|font|cursor|width|height|tag|icon|data|slug|layout|theme|state|status|side|dir|unit|market|scope|marketType|svg|path|html|selector|css|shape|tool|style|format|from|to|variant|tab|section|group|code|tier|anchor|align|origin|channel|event|method|url|endpoint|topic|stat|view|axis|ladderShow|show|sort|zone)$/;

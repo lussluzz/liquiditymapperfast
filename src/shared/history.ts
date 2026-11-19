@@ -1,5 +1,6 @@
 import { aggregateCandles, aggregateOi, withLiveOi, type Candle, type CandleRow, type OiBar, type OiRow } from './series.ts';
 import { BTC, type CoinVenue, type Listing } from './coins.ts';
+import { hyperliquidOneSide } from './oi-sides.ts';
 
 /**
  * History straight from each exchange's public REST API, as a browser can read it (every endpoint here answers with CORS headers):
@@ -10,9 +11,10 @@ import { BTC, type CoinVenue, type Listing } from './coins.ts';
 /**
  * Fetch one URL and parse its JSON; the browser passes `fetch`, tests pass a fake. A `wss://` URL is a request over a short-lived
  * WebSocket: `init.body` is sent as the first message and the first reply is the answer (Deribit's candle endpoint sends no CORS
- * headers, so a page cannot read it over HTTP, but its JSON-RPC socket serves the same method).
+ * headers, so a page cannot read it over HTTP, but its JSON-RPC socket serves the same method). A `.zip` URL (Binance's daily data
+ * archive) answers its bytes, a `Uint8Array`.
  */
-export type Fetcher = (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => Promise<unknown>;
+export type Fetcher = (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal; cache?: 'default' | 'no-cache' | 'no-store' }) => Promise<unknown>;
 
 /** One request and its first reply over a WebSocket (see `Fetcher`). */
 function socketRequest(url: string, body: string, timeoutMs: number): Promise<unknown> {
@@ -30,9 +32,12 @@ function socketRequest(url: string, body: string, timeoutMs: number): Promise<un
 /** The fetcher a page or a worker uses: HTTP with a 15 s limit, and a `wss://` URL as one request over a socket. */
 export const webGet: Fetcher = async (url, init) => {
   if (url.startsWith('wss://')) return socketRequest(url, init?.body ?? '', 15_000);
-  const response = await fetch(url, { ...init, signal: AbortSignal.timeout(15_000) });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.json();
+  const timeout = AbortSignal.timeout(15_000);
+  const response = await fetch(url, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout });
+  // The status and the start of the answer go with the error: a venue may say why in it (Gate answers a contract it does not list with a
+  // 400 that says `CONTRACT_NOT_FOUND`).
+  if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status}`), { status: response.status, body: (await response.text().catch(() => '')).slice(0, 500) });
+  return url.endsWith('.zip') ? new Uint8Array(await response.arrayBuffer()) : response.json();
 };
 
 const num = (value: unknown): number => Number(value);
@@ -40,67 +45,115 @@ const at = (value: unknown, ...path: (string | number)[]): unknown => path.reduc
 const list = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
 const MINUTE = 60_000, HOUR = 3_600_000, DAY = 86_400_000;
 
-/** One venue's candle endpoint: the intervals it serves natively, how many bars a page holds and how to read one page ending at `endMs`. */
+/**
+ * One venue's candle endpoint: the intervals it serves natively, how many bars a page holds, how to read one page ending at `endMs`, and how
+ * its pages answer for time. Most give the newest `limit` bars at or before the end, so a page short of `limit` is the start of what the
+ * venue holds (`lookback`: a venue that keeps only recent bars of an interval, Bitget's a month of minutes, where that is its limit and not
+ * the market's start); Coinbase, Deribit and Hyperliquid answer for a window of `limit` bars ending there (`window`), so a window with no bar
+ * is time nobody traded, and Hyperliquid holds only its newest 5,000 bars of each interval (`newest`).
+ */
 interface CandleSpec {
   /** Interval length in ms to the venue's name for it. */
   intervals: Readonly<Record<number, string>>;
   limit: number;
-  /** `symbol` is the market's own name for the coin. */
-  page(interval: string, intervalMs: number, endMs: number, get: Fetcher, symbol: string): Promise<CandleRow[]>;
+  /** `symbol` is the market's own name for the coin. An answer that is an error sent with HTTP 200 throws (`failed`). */
+  page(interval: string, intervalMs: number, endMs: number, get: Fetcher, symbol: string, limit?: number): Promise<CandleRow[]>;
+  window?: true;
+  lookback?: true;
+  newest?: number;
 }
 
-const row = (start: unknown, open: unknown, high: unknown, low: unknown, close: unknown, volume: unknown): CandleRow => ({ start: num(start), open: num(open), high: num(high), low: num(low), close: num(close), volume: num(volume) });
+/**
+ * The rows of a venue's answer, or an error when the answer is one: a page refused with HTTP 200 (Bybit's `retCode`, OKX's and Bitget's
+ * `code`, a JSON-RPC `error`) or rate-limited that way would otherwise read as a page with no candles, which is taken for the start of the
+ * venue's history (Bybit answers an unknown symbol with HTTP 200 and `retCode` 10001, OKX with `code` "51001": checked 2026-11-10).
+ */
+const failed = (venue: string, answer: unknown): Error => new Error(`${venue}: the candle page is an error: ${JSON.stringify(answer)?.slice(0, 200)}`);
+const rowsOf = (venue: string, answer: unknown, ok: boolean, rows: unknown): unknown[] => { if (!ok || !Array.isArray(rows)) throw failed(venue, answer); return rows; };
 
-const binanceRows = (json: unknown): CandleRow[] => list(json).map(r => row(at(r, 0), at(r, 1), at(r, 2), at(r, 3), at(r, 4), at(r, 5)));
+/** A taker-buy figure that is a number from nothing to the volume, or none: null, '', false or a figure past the volume is not a zero. */
+const takerBuy = (buy: unknown, volume: number): number | null => {
+  const n = typeof buy === 'number' ? buy : typeof buy === 'string' && buy.trim() !== '' ? Number(buy) : NaN;
+  return Number.isFinite(n) && n >= 0 && Number.isFinite(volume) && n <= volume * (1 + 1e-9) ? n : null;
+};
+/** A number, or a numeric string that is not empty; anything else NaN (`Number` would read null, '' and false as 0). */
+const figure = (value: unknown): number => typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
+const row = (start: unknown, open: unknown, high: unknown, low: unknown, close: unknown, volume: unknown, buy?: unknown, quote?: unknown, trades?: unknown, buyQuote?: unknown): CandleRow => {
+  const v = num(volume), b = buy === undefined ? null : takerBuy(buy, v);
+  // The trades and the quote volume with its part bought at market, together or not at all: a figure that is not one (null, '', false, a
+  // word) leaves all three out, never reads as 0.
+  const q = figure(quote), n = figure(trades), bq = buyQuote === undefined || !(q >= 0) ? null : takerBuy(buyQuote, q);
+  const detail = q >= 0 && Number.isSafeInteger(n) && n >= 0 && bq !== null ? { trades: n, quote: q, buyQuote: bq } : {};
+  return { start: num(start), open: num(open), high: num(high), low: num(low), close: num(close), volume: v, ...(b === null ? {} : { buy: b }), ...detail };
+};
+
+/**
+ * Binance's klines, the perpetual's and the spot market's alike: the tenth field is the taker buy volume, the part bought at market; the
+ * eighth the quote volume, the ninth the number of trades and the eleventh the taker buy quote volume.
+ */
+const binanceRows = (json: unknown): CandleRow[] => rowsOf('binance', json, true, json).map(r => row(at(r, 0), at(r, 1), at(r, 2), at(r, 3), at(r, 4), at(r, 5), at(r, 9), at(r, 7), at(r, 8), at(r, 10)));
+const bybitRows = async (category: string, i: string, end: number, get: Fetcher, symbol: string, limit: number): Promise<CandleRow[]> => {
+  const j = await get(`https://api.bybit.com/v5/market/kline?category=${category}&symbol=${symbol}&interval=${i}&end=${end}&limit=${limit}`);
+  return rowsOf('bybit', j, at(j, 'retCode') === 0, at(j, 'result', 'list')).map(r => row(at(r, 0), at(r, 1), at(r, 2), at(r, 3), at(r, 4), at(r, 5)));
+};
+/** OKX's history: `after` asks for bars older than it; up to 300 a page (100 before 2026-11-10, when 300 was checked). */
+const okxPage = async (i: string, end: number, get: Fetcher, symbol: string, limit: number): Promise<unknown[]> => {
+  const j = await get(`https://www.okx.com/api/v5/market/history-candles?instId=${symbol}&bar=${i}&after=${end + 1}&limit=${limit}`);
+  return rowsOf('okx', j, at(j, 'code') === '0', at(j, 'data'));
+};
+const bitgetPage = async (url: string, get: Fetcher): Promise<unknown[]> => { const j = await get(url); return rowsOf('bitget', j, at(j, 'code') === '00000', at(j, 'data')); };
 const BINANCE = { 60_000: '1m', 300_000: '5m', 900_000: '15m', 1_800_000: '30m', 3_600_000: '1h', 14_400_000: '4h', 86_400_000: '1d' } as const;
 
 const SPECS: Readonly<Record<string, CandleSpec>> = {
-  binance: { intervals: BINANCE, limit: 1500, page: async (i, _ms, end, get, symbol) => binanceRows(await get(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${i}&endTime=${end}&limit=1500`)) },
-  binancespot: { intervals: BINANCE, limit: 1000, page: async (i, _ms, end, get, symbol) => binanceRows(await get(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${i}&endTime=${end}&limit=1000`)) },
+  binance: { intervals: BINANCE, limit: 1500, page: async (i, _ms, end, get, symbol, limit = 1500) => binanceRows(await get(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${i}&endTime=${end}&limit=${limit}`)) },
+  binancespot: { intervals: BINANCE, limit: 1000, page: async (i, _ms, end, get, symbol, limit = 1000) => binanceRows(await get(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${i}&endTime=${end}&limit=${limit}`)) },
   bybit: {
     intervals: { 60_000: '1', 300_000: '5', 900_000: '15', 1_800_000: '30', 3_600_000: '60', 14_400_000: '240', 86_400_000: 'D' }, limit: 1000,
-    page: async (i, _ms, end, get, symbol) => list(at(await get(`https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${i}&end=${end}&limit=1000`), 'result', 'list')).map(r => row(at(r, 0), at(r, 1), at(r, 2), at(r, 3), at(r, 4), at(r, 5))),
+    page: async (i, _ms, end, get, symbol, limit = 1000) => bybitRows('linear', i, end, get, symbol, limit),
   },
   bybitspot: {
     intervals: { 60_000: '1', 300_000: '5', 900_000: '15', 1_800_000: '30', 3_600_000: '60', 14_400_000: '240', 86_400_000: 'D' }, limit: 1000,
-    page: async (i, _ms, end, get, symbol) => list(at(await get(`https://api.bybit.com/v5/market/kline?category=spot&symbol=${symbol}&interval=${i}&end=${end}&limit=1000`), 'result', 'list')).map(r => row(at(r, 0), at(r, 1), at(r, 2), at(r, 3), at(r, 4), at(r, 5))),
+    page: async (i, _ms, end, get, symbol, limit = 1000) => bybitRows('spot', i, end, get, symbol, limit),
   },
   okx: {
     intervals: { 60_000: '1m', 300_000: '5m', 900_000: '15m', 1_800_000: '30m', 3_600_000: '1H', 14_400_000: '4H', 86_400_000: '1Dutc' }, limit: 300,
     // volCcy (column 6) is in coin; the plain volume is in contracts.
-    page: async (i, _ms, end, get, symbol) => list(at(await get(`https://www.okx.com/api/v5/market/history-candles?instId=${symbol}&bar=${i}&after=${end + 1}&limit=100`), 'data')).map(r => row(at(r, 0), at(r, 1), at(r, 2), at(r, 3), at(r, 4), at(r, 6))),
+    page: async (i, _ms, end, get, symbol, limit = 300) => (await okxPage(i, end, get, symbol, limit)).map(r => row(at(r, 0), at(r, 1), at(r, 2), at(r, 3), at(r, 4), at(r, 6))),
   },
   okxspot: {
     intervals: { 60_000: '1m', 300_000: '5m', 900_000: '15m', 1_800_000: '30m', 3_600_000: '1H', 14_400_000: '4H', 86_400_000: '1Dutc' }, limit: 300,
     // On spot the plain volume (column 5) is in coin; volCcy is in USDT.
-    page: async (i, _ms, end, get, symbol) => list(at(await get(`https://www.okx.com/api/v5/market/history-candles?instId=${symbol}&bar=${i}&after=${end + 1}&limit=100`), 'data')).map(r => row(at(r, 0), at(r, 1), at(r, 2), at(r, 3), at(r, 4), at(r, 5))),
+    page: async (i, _ms, end, get, symbol, limit = 300) => (await okxPage(i, end, get, symbol, limit)).map(r => row(at(r, 0), at(r, 1), at(r, 2), at(r, 3), at(r, 4), at(r, 5))),
   },
+  // Bitget's candles reach about a month back at a minute (a page asked further back is empty: checked 2026-11-10), so a short page is its
+  // limit, not the market's start.
   bitget: {
-    intervals: { 60_000: '1m', 300_000: '5m', 900_000: '15m', 1_800_000: '30m', 3_600_000: '1H', 14_400_000: '4H', 86_400_000: '1Dutc' }, limit: 1000,
-    page: async (i, _ms, end, get, symbol) => list(at(await get(`https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&productType=usdt-futures&granularity=${i}&endTime=${end}&limit=1000`), 'data')).map(r => row(at(r, 0), at(r, 1), at(r, 2), at(r, 3), at(r, 4), at(r, 5))),
+    intervals: { 60_000: '1m', 300_000: '5m', 900_000: '15m', 1_800_000: '30m', 3_600_000: '1H', 14_400_000: '4H', 86_400_000: '1Dutc' }, limit: 1000, lookback: true,
+    page: async (i, _ms, end, get, symbol, limit = 1000) => (await bitgetPage(`https://api.bitget.com/api/v2/mix/market/candles?symbol=${symbol}&productType=usdt-futures&granularity=${i}&endTime=${end}&limit=${limit}`, get)).map(r => row(at(r, 0), at(r, 1), at(r, 2), at(r, 3), at(r, 4), at(r, 5))),
   },
   bitgetspot: {
     // Spot names its intervals unlike futures (1min, not 1m).
-    intervals: { 60_000: '1min', 300_000: '5min', 900_000: '15min', 1_800_000: '30min', 3_600_000: '1h', 14_400_000: '4h', 86_400_000: '1Dutc' }, limit: 1000,
-    page: async (i, _ms, end, get, symbol) => list(at(await get(`https://api.bitget.com/api/v2/spot/market/candles?symbol=${symbol}&granularity=${i}&endTime=${end}&limit=1000`), 'data')).map(r => row(at(r, 0), at(r, 1), at(r, 2), at(r, 3), at(r, 4), at(r, 5))),
+    intervals: { 60_000: '1min', 300_000: '5min', 900_000: '15min', 1_800_000: '30min', 3_600_000: '1h', 14_400_000: '4h', 86_400_000: '1Dutc' }, limit: 1000, lookback: true,
+    page: async (i, _ms, end, get, symbol, limit = 1000) => (await bitgetPage(`https://api.bitget.com/api/v2/spot/market/candles?symbol=${symbol}&granularity=${i}&endTime=${end}&limit=${limit}`, get)).map(r => row(at(r, 0), at(r, 1), at(r, 2), at(r, 3), at(r, 4), at(r, 5))),
   },
   coinbase: {
-    intervals: { 60_000: '60', 300_000: '300', 900_000: '900', 3_600_000: '3600', 21_600_000: '21600', 86_400_000: '86400' }, limit: 300,
+    intervals: { 60_000: '60', 300_000: '300', 900_000: '900', 3_600_000: '3600', 21_600_000: '21600', 86_400_000: '86400' }, limit: 300, window: true,
     // [time in seconds, low, high, open, close, volume]
-    page: async (i, ms, end, get, symbol) => list(await get(`https://api.exchange.coinbase.com/products/${symbol}/candles?granularity=${i}&start=${new Date(end - 299 * ms).toISOString()}&end=${new Date(end).toISOString()}`)).map(r => row(num(at(r, 0)) * 1000, at(r, 3), at(r, 2), at(r, 1), at(r, 4), at(r, 5))),
+    page: async (i, ms, end, get, symbol, limit = 300) => { const j = await get(`https://api.exchange.coinbase.com/products/${symbol}/candles?granularity=${i}&start=${new Date(end - Math.max(1, limit - 1) * ms).toISOString()}&end=${new Date(end).toISOString()}`); return rowsOf('coinbase', j, true, j).map(r => row(num(at(r, 0)) * 1000, at(r, 3), at(r, 2), at(r, 1), at(r, 4), at(r, 5))); },
   },
   deribit: {
-    intervals: { 60_000: '1', 300_000: '5', 900_000: '15', 1_800_000: '30', 3_600_000: '60', 86_400_000: '1D' }, limit: 1000,
-    page: async (i, ms, end, get, symbol) => {
-      const request = { jsonrpc: '2.0', id: 1, method: 'public/get_tradingview_chart_data', params: { instrument_name: symbol, resolution: i, start_timestamp: end - 999 * ms, end_timestamp: end } };
-      const d = at(await get('wss://www.deribit.com/ws/api/v2', { method: 'RPC', headers: {}, body: JSON.stringify(request) }), 'result');
-      return list(at(d, 'ticks')).map((t, k) => row(t, at(d, 'open', k), at(d, 'high', k), at(d, 'low', k), at(d, 'close', k), at(d, 'volume', k)));
+    intervals: { 60_000: '1', 300_000: '5', 900_000: '15', 1_800_000: '30', 3_600_000: '60', 86_400_000: '1D' }, limit: 1000, window: true,
+    page: async (i, ms, end, get, symbol, limit = 1000) => {
+      const request = { jsonrpc: '2.0', id: 1, method: 'public/get_tradingview_chart_data', params: { instrument_name: symbol, resolution: i, start_timestamp: end - (limit - 1) * ms, end_timestamp: end } };
+      const answer = await get('wss://www.deribit.com/ws/api/v2', { method: 'RPC', headers: {}, body: JSON.stringify(request) }), d = at(answer, 'result');
+      // A window nobody traded in answers `status: "no_data"` and no ticks; an error has no `result`.
+      if (d === null || typeof d !== 'object') throw failed('deribit', answer);
+      return (at(d, 'status') === 'no_data' ? [] : rowsOf('deribit', answer, true, at(d, 'ticks'))).map((t, k) => row(t, at(d, 'open', k), at(d, 'high', k), at(d, 'low', k), at(d, 'close', k), at(d, 'volume', k)));
     },
   },
   hyperliquid: {
-    intervals: { 60_000: '1m', 300_000: '5m', 900_000: '15m', 1_800_000: '30m', 3_600_000: '1h', 14_400_000: '4h', 86_400_000: '1d' }, limit: 1000,
-    page: async (i, ms, end, get, symbol) => list(await get('https://api.hyperliquid.xyz/info', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'candleSnapshot', req: { coin: symbol, interval: i, startTime: end - 999 * ms, endTime: end } }) }))
-      .map(r => row(at(r, 't'), at(r, 'o'), at(r, 'h'), at(r, 'l'), at(r, 'c'), at(r, 'v'))),
+    intervals: { 60_000: '1m', 300_000: '5m', 900_000: '15m', 1_800_000: '30m', 3_600_000: '1h', 14_400_000: '4h', 86_400_000: '1d' }, limit: 1000, window: true, newest: 5_000,
+    page: async (i, ms, end, get, symbol, limit = 1000) => { const j = await get('https://api.hyperliquid.xyz/info', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'candleSnapshot', req: { coin: symbol, interval: i, startTime: end - (limit - 1) * ms, endTime: end } }) }); return rowsOf('hyperliquid', j, true, j).map(r => row(at(r, 't'), at(r, 'o'), at(r, 'h'), at(r, 'l'), at(r, 'c'), at(r, 'v'))); },
   },
 };
 
@@ -121,26 +174,75 @@ export function nativeInterval(spec: Pick<CandleSpec, 'intervals'>, tfMs: number
 
 /**
  * Candles for `instrumentId` at `tfMs` over [from, to], oldest first, built from the venue's native bars (a coarser timeframe is
- * aggregated from a finer one) by walking back page by page from `to`. Returns [] for a venue it does not know.
+ * aggregated from a finer one) by walking back page by page from `to`. Returns [] for a venue it does not know. A page that fails throws,
+ * unless `partial` is asked for and pages came before it: then what came is returned, the newest part of [from, to] unbroken, for the
+ * caller to ask on from where it got to (a timeout on the fifteenth page of four months of five-minute bars threw the fourteen away). `buy`:
+ * each candle carries its taker buys where the venue reports them (Binance), for the volume profile's split.
  */
-export async function fetchCandles(instrumentId: string, tfMs: number, from: number, to: number, get: Fetcher, listing?: HistoryListing, maxPages = 12): Promise<Candle[]> {
+export async function fetchCandles(instrumentId: string, tfMs: number, from: number, to: number, get: Fetcher, listing?: HistoryListing, maxPages = 12, options?: CandleReadOptions): Promise<Candle[]> {
+  return (await readCandles(instrumentId, tfMs, from, to, get, listing, maxPages, options)).rows;
+}
+
+/**
+ * `strict`: a page with a bar that is not one (a price or volume that is not a number, a high under the open or close, a start off the interval)
+ * fails the read; 'drop' leaves such bars out and reads on (a history that is asked again every minute would otherwise fail for good on one
+ * odd bar). `now`: the clock for a venue that serves only its newest bars.
+ */
+export interface CandleReadOptions { pageSize?: number; strict?: boolean | 'drop'; partial?: boolean; buy?: boolean; now?: number }
+/**
+ * What a read walking back from `to` found: the candles of [from, to], how far back its pages answered for (`coveredFrom`: the oldest
+ * bar's start of a page that holds the venue's newest bars before its end, or a window's start, with or without bars in it), and why it
+ * stopped: it got to `from` ('reached'), the venue has nothing older ('start': a page short of its limit), the venue serves no older bars
+ * to a page ('limited': Bitget's month of minutes, Hyperliquid's newest 5,000), the page ceiling ('pages'), or a page failed after others
+ * came ('failed', with `partial`). Infinity when no page answered for anything.
+ */
+export interface CandleRead { rows: Candle[]; coveredFrom: number; stop: 'reached' | 'start' | 'limited' | 'pages' | 'failed' }
+
+/** `fetchCandles`, saying how far back the venue answered and why it stopped (`CandleRead`). */
+export async function readCandles(instrumentId: string, tfMs: number, from: number, to: number, get: Fetcher, listing?: HistoryListing, maxPages = 12, options?: CandleReadOptions): Promise<CandleRead> {
   const spec = SPECS[venueOf(instrumentId)], market = listingOf(venueOf(instrumentId), listing);
   const native = spec ? nativeInterval(spec, tfMs) : null;
-  if (!spec || !market || native === null) return [];
+  if (!spec || !market || native === null) return { rows: [], coveredFrom: Infinity, stop: 'reached' };
   const interval = spec.intervals[native]!;
   const rows = new Map<number, CandleRow>();
-  let end = to;
+  // Hyperliquid's oldest bar it still serves: windows before it are not quiet, there is nothing to read there.
+  const oldestServed = spec.newest ? Math.floor((options?.now ?? Date.now()) / native) * native - (spec.newest - 1) * native : -Infinity;
+  let end = to, coveredFrom = Infinity, stop: CandleRead['stop'] = 'pages';
   // Enough pages for the window, with a ceiling so a misbehaving endpoint cannot loop.
-  for (let pages = 0; pages < maxPages && end > from; pages++) {
-    const got = (await spec.page(interval, native, end, get, market.symbol)).filter(r => Number.isFinite(r.start) && Number.isFinite(r.open) && Number.isFinite(r.close));
-    if (!got.length) break;
+  for (let pages = 0; pages < maxPages; pages++) {
+    if (end <= from) { stop = 'reached'; break; }
+    if (end < oldestServed) { stop = 'limited'; break; }
+    // Price context and VWAP/levels ask only for the bars they need, including small tail refreshes.
+    const limit = options?.pageSize === undefined ? undefined : Math.max(1, Math.min(spec.limit, options.pageSize, Math.ceil((end - from) / native) + 2));
+    let received: CandleRow[];
+    try { received = await spec.page(interval, native, end, get, market.symbol, limit); } catch (error) { if (options?.partial && rows.size) { stop = 'failed'; break; } throw error; }
+    const bad = (r: CandleRow): boolean => ![r.start, r.open, r.high, r.low, r.close, r.volume].every(Number.isFinite) || !Number.isSafeInteger(r.start) || r.start < 0 || r.start % native !== 0 || !(r.low > 0) || r.high < Math.max(r.open, r.close) || r.low > Math.min(r.open, r.close) || !(r.volume! >= 0);
+    if (options?.strict === true && received.some(bad)) throw new Error('Invalid candle page');
+    const got = received.filter(r => Number.isFinite(r.start) && Number.isFinite(r.open) && Number.isFinite(r.close) && !(options?.strict === 'drop' && bad(r)));
     let oldest = Infinity;
     for (const r of got) { rows.set(r.start, r); oldest = Math.min(oldest, r.start); }
+    const asked = limit ?? spec.limit;
+    if (spec.window) {
+      // The page answered for its whole window, bars or none (a window with none is time nobody traded), down to what the venue serves.
+      const start = end - (asked - 1) * native;
+      coveredFrom = Math.min(coveredFrom, Math.max(start, oldestServed));
+      // The next window ends at the last bar start before this one began: a whole page of bars, none left between the two.
+      end = Math.floor((start - 1) / native) * native;
+      continue;
+    }
+    if (got.length) coveredFrom = Math.min(coveredFrom, oldest);
+    // Short of what was asked: the venue holds nothing older (or, for a venue that keeps only recent bars, nothing older it serves).
+    if (received.length < asked) { stop = spec.lookback ? 'limited' : 'start'; break; }
     if (oldest >= end) break;
     end = oldest - 1;
   }
+  // The ceiling of pages met just as the last one got there.
+  if (stop === 'pages' && coveredFrom <= from) stop = 'reached';
+  // Never answered for further back than the bars kept (those before `from` and its interval are not returned): a page of only older bars
+  // (the venue's newest before a quiet stretch) must not make time count as known whose bars were let go (Sol, code review 2026-11-10).
+  coveredFrom = Math.max(coveredFrom, from - tfMs);
   const u = market.unit, kept = [...rows.values()].filter(r => r.start >= from - tfMs && r.start <= to);
-  return aggregateCandles(u === 1 ? kept : kept.map(r => ({ ...r, open: r.open / u, high: r.high / u, low: r.low / u, close: r.close / u, ...(r.volume === undefined ? {} : { volume: r.volume * u }) })), tfMs);
+  return { rows: aggregateCandles(u === 1 ? kept : kept.map(r => ({ ...r, open: r.open / u, high: r.high / u, low: r.low / u, close: r.close / u, ...(r.volume === undefined ? {} : { volume: r.volume * u }), ...(r.buy === undefined ? {} : { buy: r.buy * u }) })), tfMs, options?.buy === true), coveredFrom, stop };
 }
 
 /**
@@ -148,9 +250,12 @@ export async function fetchCandles(instrumentId: string, tfMs: number, from: num
  * two at five minutes; its statistics endpoint sends no CORS header, so only the server reads it). Every figure is in coins.
  */
 export const OI_VENUES: readonly string[] = ['binance', 'bybit', 'okx'];
+/** The venues of `OI_VENUES` whose history a page can read: OKX's answers with no CORS header from any of its hosts (checked 2026-10-30). */
+export const OI_PAGE_VENUES: readonly string[] = ['binance', 'bybit'];
 /**
- * Venues whose live open interest can be sampled, in coins: the perpetuals of the largest venues (measured 2026-10-13 on BTC: Binance 94K,
- * Bybit 57K, Hyperliquid 38K, Bitget 32K, OKX 29K, Deribit 10K). Those without a history build theirs up while they are sampled.
+ * Venues whose live open interest can be sampled, in coins on one side of every contract (`oi-sides.ts`): the perpetuals of the largest
+ * venues (measured 2026-11-04 on BTC, as read here: Binance 99K, Bitget 38K, OKX 35K, Bybit 35K, Hyperliquid 20K, Deribit 8K). Those
+ * without a history build theirs up while they are sampled.
  */
 export const OI_SAMPLE_VENUES: readonly string[] = ['binance', 'bybit', 'hyperliquid', 'bitget', 'okx', 'deribit'];
 
@@ -161,13 +266,24 @@ const OKX_OI_PERIODS: Readonly<Record<number, string>> = { 300_000: '5m', 3_600_
 /** At most this many pages a history question reads, oldest last. */
 const OI_PAGES = 12;
 
-const oiRow = (t: number, coins: number): OiRow => ({ start: t, open: coins, high: coins, low: coins, close: coins });
+/**
+ * A history row is one reading of the open interest at a moment (`at`), not a bar. It is kept as a sample a millisecond before that moment,
+ * so `aggregateOi` files it in the bucket that ends at it, at any timeframe, as it files the live readings (each minute's last value closes its
+ * minute). Filed at `at` itself, a reading on a bucket's edge opened the next bucket: every bar read from history showed the open interest at
+ * its start, a period late, and NL/NS gave each change to the next candle's takers (measured 2026-11-10 against the live bars: Binance's
+ * hourly row stamped T was within 6 BTC of the bar ending at T and 252 BTC from the bar starting there; Bybit's five-minute rows equalled the
+ * bar ending at their stamp).
+ */
+const oiReading = (venue: string, at: number, coins: number): OiRow => ({ observationTimestamp: at - 1, sourceTimestamp: at, base: coins, historySource: venue });
 
-/** A venue's perpetual open interest in coins per bucket over [from, to), from its public history (empty for a venue that has none). */
+/**
+ * A venue's perpetual open interest in coins over [from, to], from its public history: readings, oldest first, each the close of the bar that
+ * ends at it (`oiReading`; empty for a venue that has none).
+ */
 export async function fetchOiHistory(instrumentId: string, tfMs: number, from: number, to: number, get: Fetcher, listing?: HistoryListing): Promise<OiRow[]> {
   const venue = venueOf(instrumentId), market = listingOf(venue, listing);
   if (!market || !OI_VENUES.includes(venue)) return [];
-  const rows = new Map<number, OiRow>(), take = (t: number, coins: number): void => { if (Number.isFinite(t) && coins > 0 && t >= from - tfMs && t <= to) rows.set(t, oiRow(t, coins * market.unit)); };
+  const rows = new Map<number, OiRow>(), take = (t: number, coins: number): void => { if (Number.isFinite(t) && coins > 0 && t >= from - tfMs && t <= to) rows.set(t, oiReading(venue, t, coins * market.unit)); };
   // An answer that is not the venue's list (an error sent with HTTP 200) fails the read: the sampler tries again later, where an empty
   // history would have been taken as done.
   const rowsOf = (answer: unknown, ok: boolean, path: (string | number)[]): unknown[] => {
@@ -197,7 +313,7 @@ export async function fetchOiHistory(instrumentId: string, tfMs: number, from: n
     for (let end = to, page = 0; page < OI_PAGES && end >= from; page++) {
       // Rows of [ts, contracts, coins, USD], newest first, 100 a page. A row is stamped with the start of its period but holds the reading at
       // its end (it matches a live sample a period after its stamp, measured 2026-10-14 on 5m and 1H; Binance's and Bybit's match at their
-      // stamp), so it is put at the end, the period still under way at `to`.
+      // stamp), so its reading is taken at the end, the period still under way at `to`.
       const answer = await get(`https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-history?instId=${market.symbol}&period=${OKX_OI_PERIODS[period]}&limit=100&end=${Math.floor(end)}`);
       const got = rowsOf(answer, at(answer, 'code') === undefined || String(at(answer, 'code')) === '0', ['data']);
       let oldest = Infinity;
@@ -206,7 +322,7 @@ export async function fetchOiHistory(instrumentId: string, tfMs: number, from: n
       end = oldest - 1;
     }
   }
-  return [...rows.values()].sort((a, b) => Number(a.start) - Number(b.start));
+  return [...rows.values()].sort((a, b) => Number(a.observationTimestamp) - Number(b.observationTimestamp));
 }
 
 /**
@@ -226,31 +342,47 @@ export async function fetchOiSample(venue: string, get: Fetcher, listing?: Histo
 
 /**
  * The same reading with, for an inverse market (Deribit's BTC and ETH perpetuals, counted in USD), its own USD as `quote`: its coins are
- * the USD at the mark of the moment, and only the USD tells contracts opened or closed apart from the price moving.
+ * the USD at the mark of the moment, and only the USD tells contracts opened or closed apart from the price moving. Where the venue's
+ * answer carries its own clock (Binance's and Bybit's `time`, OKX's row `ts`), it is kept as `sourceTimestamp`, so the reading is placed by the
+ * exchange's time, not by when it arrived here.
  */
-export async function fetchOiReading(venue: string, get: Fetcher, listing?: HistoryListing): Promise<{ base: number; quote?: number } | null> {
+export async function fetchOiReading(venue: string, get: Fetcher, listing?: HistoryListing): Promise<{ base: number; quote?: number; sourceTimestamp?: number } | null> {
   const value = await readOiSample(venue, get, listing);
   return value === null ? null : typeof value === 'number' ? { base: value } : value;
 }
 
-async function readOiSample(venue: string, get: Fetcher, listing?: HistoryListing): Promise<number | { base: number; quote: number } | null> {
+async function readOiSample(venue: string, get: Fetcher, listing?: HistoryListing): Promise<number | { base: number; quote?: number; sourceTimestamp?: number } | null> {
   const market = listingOf(venue, listing); if (!market) return null;
   const coins = (v: number): number | null => v > 0 && Number.isFinite(v) ? v * market.unit : null;
-  if (venue === 'binance') return coins(num(at(await get(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${market.symbol}`), 'openInterest')));
+  const exchangeTime = (value: unknown): number | null => { const t = num(value); return Number.isFinite(t) && t > 0 ? t : null; };
+  if (venue === 'binance') {
+    const answer = await get(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${market.symbol}`);
+    const base = coins(num(at(answer, 'openInterest'))), sourceTimestamp = exchangeTime(at(answer, 'time'));
+    return base === null ? null : { base, ...(sourceTimestamp === null ? {} : { sourceTimestamp }) };
+  }
   if (venue === 'hyperliquid') {
     const result = await get('https://api.hyperliquid.xyz/info', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'metaAndAssetCtxs' }) });
     const universe = list(at(result, 0, 'universe')), index = universe.findIndex(u => at(u, 'name') === market.symbol);
-    return index >= 0 ? coins(num(at(result, 1, index, 'openInterest'))) : null;
+    // One side, as every other venue reports (Hyperliquid's `openInterest` counts both: oi-sides.ts).
+    return index >= 0 ? coins(hyperliquidOneSide(num(at(result, 1, index, 'openInterest')))) : null;
   }
   if (venue === 'bybit') {
-    const ticker = at(await get(`https://api.bybit.com/v5/market/tickers?category=${market.inverse ? 'inverse' : 'linear'}&symbol=${market.symbol}`), 'result', 'list', 0);
+    const answer = await get(`https://api.bybit.com/v5/market/tickers?category=${market.inverse ? 'inverse' : 'linear'}&symbol=${market.symbol}`);
+    const ticker = at(answer, 'result', 'list', 0);
+    const sourceTimestamp = exchangeTime(at(answer, 'time'));
+    const stamped = sourceTimestamp === null ? {} : { sourceTimestamp };
     // One side, as every other venue reports (Bybit's `openInterest` counts both: `singleOpenInterest` is half of it).
-    if (!market.inverse) return coins(bybitSingle(ticker, 'openInterest'));
+    if (!market.inverse) { const base = coins(bybitSingle(ticker, 'openInterest')); return base === null ? null : { base, ...stamped }; }
     // An inverse perpetual: open interest in USD, and its value in coins at the mark of the moment.
     const usd = bybitSingle(ticker, 'openInterest'), base = coins(bybitSingle(ticker, 'openInterestValue'));
-    return base !== null && usd > 0 ? { base, quote: usd * market.unit } : null;
+    return base !== null && usd > 0 ? { base, quote: usd * market.unit, ...stamped } : null;
   }
-  if (venue === 'okx') return coins(num(at(await get(`https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=${market.symbol}`), 'data', 0, 'oiCcy')));
+  if (venue === 'okx') {
+    const answer = await get(`https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=${market.symbol}`);
+    const sourceTimestamp = exchangeTime(at(answer, 'data', 0, 'ts'));
+    const base = coins(num(at(answer, 'data', 0, 'oiCcy')));
+    return base === null ? null : { base, ...(sourceTimestamp === null ? {} : { sourceTimestamp }) };
+  }
   if (venue === 'bitget') return coins(num(at(await get(`https://api.bitget.com/api/v2/mix/market/open-interest?symbol=${market.symbol}&productType=usdt-futures`), 'data', 'openInterestList', 0, 'size')));
   if (venue === 'deribit') {
     const summary = at(await get(`https://www.deribit.com/api/v2/public/get_book_summary_by_instrument?instrument_name=${market.symbol}`), 'result', 0);

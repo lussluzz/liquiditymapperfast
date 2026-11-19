@@ -35,6 +35,31 @@ export function mapVenues(state: MapState): Set<string> | null {
 export type MapState = Pick<AppState, 'levels'> & Partial<Pick<AppState, 'bookGone'>>;
 
 /**
+ * Whether the orders of an instrument (`okx:BTC-USDT-SWAP`) are drawn on the map (trade bubbles, live dust, venue lines, liquidations,
+ * absorption) and sound: its venue's chip on, and its book on the map or there moments ago (`mapVenues`), the venue rule of `flowIds`
+ * (executions ignore its Spot / Perp filter). The chips are the map's books, so a venue with no book has none and could not be switched off:
+ * with Deribit's chip alone on, OKX's trades went on drawing while its book was down (Karl, 2026-11-07). Make one per frame or batch: it
+ * builds the map's venue set once, and answers each instrument from a memo keyed by the id itself (the bubbles ask for every print in view).
+ */
+export function instrumentShown(state: Pick<AppState, 'disabledVenues'> & MapState): (id: string) => boolean {
+  const drawn = mapVenues(state), off = state.disabledVenues, seen = new Map<string, boolean>();
+  return id => {
+    let shown = seen.get(id);
+    if (shown === undefined) { const venue = venueOfInstrument(id); seen.set(id, shown = !off.includes(venue) && (drawn === null || drawn.has(venue))); }
+    return shown;
+  };
+}
+
+/**
+ * Everything `instrumentShown` reads, as a key: the venues with a book on the map (or one moments ago) and the chips switched off. A cache of
+ * what it let in is stale when this changes (the map's largest prints in view, `HeatPane.#printsInView`).
+ */
+export function shownKey(state: Pick<AppState, 'disabledVenues'> & MapState): string {
+  const drawn = mapVenues(state);
+  return `${drawn === null ? '*' : [...drawn].sort().join(',')}|${state.disabledVenues.join(',')}`;
+}
+
+/**
  * The instruments the flow views count: every market the page knows and everything that has flow, on a venue that has a book on the map
  * (or had one moments ago: `mapVenues`), with its chip left on, and inside the Spot / Perp / Both filter.
  */
@@ -46,6 +71,14 @@ export function flowIds(state: Pick<AppState, 'markets' | 'disabledVenues' | 'sc
   const drawn = mapVenues(state);
   return [...known].filter(id => !state.disabledVenues.includes(venueOfInstrument(id)) && (drawn === null || drawn.has(venueOfInstrument(id))) && inScope(state.scope, state.markets, id));
 }
+
+/**
+ * The same for open interest, whatever the Spot / Perp filter says: only perpetuals have it, so under Spot these are the markets Both
+ * counts (the chips and the books on the map still count). Switching open interest on asks for it, and a Spot filter left on for the heat
+ * map emptied the OI pane and its profiles (Karl, 2026-11-05).
+ */
+export const oiFlowIds = (state: Pick<AppState, 'markets' | 'disabledVenues' | 'scope'> & MapState, withFlow: readonly string[]): string[] =>
+  flowIds({ ...state, scope: 'all' }, withFlow);
 
 /**
  * Every instrument whose flow the page asks the server for: all the markets it knows, not only the ones the filter and the chips let
@@ -69,16 +102,22 @@ export function pinChoices(state: Pick<AppState, 'markets'>, withFlow: readonly 
   return [...keys].sort((a, b) => venueLabel(a).localeCompare(venueLabel(b)));
 }
 
+/** A spot market under the flow feeds' name (`binance:BTCUSDT:spot` is `binancespot:BTCUSDT` there); null for any other id. */
+export function flowFeedSpotId(id: string): string | null {
+  const m = /^([^:]+):(.+):spot$/.exec(id);
+  return m ? `${m[1]}spot:${m[2]}` : null;
+}
+
 /**
  * The instrument whose recorded seconds give the price strip its price: the market on screen when it has flow, else its spot twin under
- * the flow feeds' name (`binance:BTCUSDT:spot` is `binancespot:BTCUSDT` there), else none, and the strip falls back to candle closes.
+ * the flow feeds' name (`flowFeedSpotId`), else none, and the strip falls back to candle closes.
  */
 export function priceFlowId(candidates: readonly string[], has: (id: string) => boolean): string | null {
   for (const id of candidates) {
     if (!id) continue;
     if (has(id)) return id;
-    const m = /^([^:]+):(.+):spot$/.exec(id);
-    if (m && has(`${m[1]}spot:${m[2]}`)) return `${m[1]}spot:${m[2]}`;
+    const spot = flowFeedSpotId(id);
+    if (spot && has(spot)) return spot;
   }
   return null;
 }

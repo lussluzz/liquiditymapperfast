@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { INFO, layoutInfo, type InfoLine } from '../src/app/infobox.ts';
+import { INFO, layoutInfo, paintInfoBox, type InfoLine } from '../src/app/infobox.ts';
+import { PALETTES } from '../src/app/theme.ts';
 import { placeCard } from '../src/app/hovercard.ts';
 import { statCellLines, type StatCell } from '../src/app/panes/bar-stats.ts';
 import { rowCellAt, rowCellLines, type Bar } from '../src/app/panes/footprint.ts';
@@ -37,7 +38,7 @@ test('a rule adds height once, above the first row of a wrapped sentence only', 
 });
 
 test('a bar-stat popup names the statistic, the candle and the value, and only adds what is known', () => {
-  const cell: StatCell = { label: 'delta', title: 'Buy minus sell volume of the bar (USD)', value: '-2.1M', tone: 'sell', time: 'Oct 5 21:00', previous: '+0.4M', rank: 3, of: 24, sigma: 2.14 };
+  const cell: StatCell = { label: 'delta', title: 'Buy minus sell volume of the bar (USD)', value: '-2.1M', tone: 'sell', time: 'Oct 5 21:00', previous: '+0.4M', rank: 3, of: 24, sigma: 2.14, partial: null };
   const lines = statCellLines(cell);
   assert.deepEqual(texts(lines).slice(0, 6), ['delta', 'Candle: Oct 5 21:00', 'Value: -2.1M', 'Candle before: +0.4M', 'Rank in view: 3 of 24', 'Unusual: 2.1σ above its baseline']);
   assert.equal(lines[2]!.color, 'sell');
@@ -47,6 +48,7 @@ test('a bar-stat popup names the statistic, the candle and the value, and only a
   assert.equal(last.color, 'muted');
   assert.deepEqual(texts(statCellLines({ ...cell, previous: null, rank: null, sigma: null })), ['delta', 'Candle: Oct 5 21:00', 'Value: -2.1M', cell.title]);
   assert.ok(!texts(statCellLines({ ...cell, of: 1 })).some(l => l.startsWith('Rank')), 'a rank among one is not a rank');
+  assert.ok(texts(statCellLines({ ...cell, partial: 62 })).some(l => l.startsWith('Recorded: 62 %')), 'a candle recorded in part says how much');
 });
 
 const bar: Bar = { t: Date.UTC(2026, 9, 5, 21), rows: [[85700, 1e6, 3e6], [85750, 3e6, 1e6], [85800, 0.5e6, 0.5e6]], buyUsd: 4.5e6, sellUsd: 4.5e6 };
@@ -119,4 +121,36 @@ test('a hover card goes above and right of the pointer, flips to the left near t
   assert.ok(corner.left >= 6 && corner.left + size.w <= view.w - 6 && corner.top >= 6 && corner.top + size.h <= view.h - 6);
   const tiny = placeCard(10, 10, { w: 2000, h: 2000 }, view);
   assert.ok(tiny.left >= 6 && tiny.top >= 6, 'a card larger than the page is still pinned to its corner');
+});
+
+test('a labelled line marked to wrap keeps its label at the left and breaks its text under it, where the two do not fit side by side', () => {
+  // The bar stats card's "Recorded" line ran out of the box: a label and a long sentence were one row, whatever the wrap width.
+  const sentence = '90 % of the candle: the figure counts only that part';
+  const laid = layoutInfo(measure, [{ label: 'Recorded', text: sentence, color: 'sell', wrap: true, rule: true }], 150);
+  assert.deepEqual(laid.rows.map(r => [r.label ?? null, r.text]).slice(0, 2), [['Recorded', ''], [null, '90 % of the candle: the']], 'the label alone on its row, the text under it');
+  assert.equal(laid.rows.map(r => r.text).filter(Boolean).join(' '), sentence, 'no word is lost or reordered');
+  for (const row of laid.rows) assert.ok(measure(row.text, false) <= 150, row.text);
+  assert.ok(laid.rows.every(r => r.color === 'sell'));
+  assert.deepEqual(laid.rows.map(r => r.rule), [true, ...laid.rows.slice(1).map(() => false)], 'the hairline once, on the label row');
+  assert.ok(laid.width <= 150 + 16, `the box is ${laid.width} px wide`);
+  // Short enough to sit beside its label, it stays one row.
+  const short = layoutInfo(measure, [{ label: 'Recorded', text: '90 %', wrap: true }], 250);
+  assert.deepEqual(short.rows.map(r => [r.label, r.text]), [['Recorded', '90 %']]);
+  // A label with no wrap is never broken (as before).
+  assert.equal(layoutInfo(measure, [{ label: 'Recorded', text: sentence }], 100).rows.length, 1);
+});
+
+test('a box drawn says where it stands (a tap on the TPO block\'s box is checked against it), kept inside its bounds; no lines, no box', () => {
+  const fills: number[][] = [];
+  const ctx = new Proxy({}, {
+    get: (_t, k) => k === 'measureText' ? (s: string) => ({ width: s.length * 6 }) : k === 'fillRect' ? (...r: number[]) => { fills.push(r); } : () => {},
+    set: () => true,
+  }) as unknown as CanvasRenderingContext2D;
+  const lines: InfoLine[] = [{ text: 'Y · Nov 12 12:00 – 12:30', bold: true }, { label: 'Row', text: '71,620 – 71,640' }, { text: 'Tap this box for the TPO menu', color: 'muted' }];
+  const bounds = { x0: 0, y0: 0, x1: 390, y1: 700 };
+  const rect = paintInfoBox(ctx, lines, 380, 20, bounds, PALETTES.dark!, { placement: 'up' })!;
+  assert.ok(rect && rect.w > 0 && rect.h > 0);
+  assert.ok(rect.x >= bounds.x0 && rect.x + rect.w <= bounds.x1 && rect.y >= bounds.y0 && rect.y + rect.h <= bounds.y1, 'kept inside the map');
+  assert.ok(fills.some(f => f[0] === rect.x && f[1] === rect.y && f[2] === rect.w && f[3] === rect.h), 'the rectangle returned is the one filled');
+  assert.equal(paintInfoBox(ctx, [], 10, 10, bounds, PALETTES.dark!), null);
 });

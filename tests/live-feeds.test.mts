@@ -1171,7 +1171,7 @@ test('metadata hydration emits a snapshot and initial asset-context OI', async (
   assert.deepEqual(JSON.parse(textValue(requests[0].body)), { type: 'metaAndAssetCtxs' });
   assert.equal(defined(defined(messages.find(item => item.message.kind === 'metadata')).message.assets)[0].coin, 'BTC');
   const oi = defined(messages.find(item => item.message.kind === 'openInterest')).message;
-  assert.equal(oi.base, 12); assert.equal(oi.quote, 1200); assert.equal(oi.sourceTimestamp, null);
+  assert.equal(oi.base, 6, 'one side of the two-sided 12'); assert.equal(oi.quote, 600); assert.equal(oi.sourceTimestamp, null);
   assert.equal(manager.status()['hl-metadata'].state, 'snapshot');
   manager.stop();
 });
@@ -1204,6 +1204,25 @@ test('OI polling uses the Binance descriptor and emits normalized OI', async () 
   assert.equal(defined(sample).base,12); assert.equal(messages[0].message.instrumentId,'binance:BTCUSDT'); assert.match(requests[0].url,/fapi\.binance\.com\/fapi\/v1\/openInterest/);
 });
 
+test('the Binance OI poll every five seconds spends a REST budget of its own, never the attempts Binance depth snapshots need', async () => {
+  let clock = 1_700_000_000_000;
+  const asked: string[] = [];
+  const manager = new LiveFeedManager({ networkEnabled: true, restTransport: { request: async request => { asked.push(request.url); return request.url.includes('openInterest') ? { symbol: 'BTCUSDT', openInterest: '12', time: clock } : { lastUpdateId: 1, bids: [], asks: [] }; } }, oiPollMs: 0, now: () => clock });
+  for (let i = 0; i < 12; i++) { assert.notEqual(await manager.pollOpenInterest({ symbol: 'BTCUSDT' }), null, `poll ${i + 1} of the minute`); clock += 5_000; }
+  clock -= 5_000;
+  const call = (manager as unknown as { rest: { request(request: unknown, context: { venue: string; key: string }): Promise<unknown> } }).rest;
+  await assert.doesNotReject(call.request({ url: 'https://fapi.binance.com/fapi/v1/depth?symbol=BTCUSDT&limit=1000', method: 'GET' }, { venue: 'binance', key: 'depth' }), 'a depth snapshot in the same minute is not refused');
+  manager.stop();
+});
+
+test('the Binance OI poll keeps its own budget when the manager is given venue policies that do not name it', async () => {
+  let clock = 1_700_000_000_000;
+  const manager = new LiveFeedManager({ networkEnabled: true, restTransport: { request: async () => ({ symbol: 'BTCUSDT', openInterest: '12', time: clock }) }, oiPollMs: 0, now: () => clock,
+    restRetryPolicies: { binance: { maxAttempts: 3, maxAttemptsPerWindow: 12, windowMs: 60_000, baseDelayMs: 250, maxDelayMs: 4_000, jitterRatio: 0.2 } } });
+  for (let i = 0; i < 12; i++) { assert.notEqual(await manager.pollOpenInterest({ symbol: 'BTCUSDT' }), null, `poll ${i + 1} of the minute`); clock += 5_000; }
+  manager.stop();
+});
+
 test('Binance public OI history is bounded, explicit, and statused', async () => {
   const requests: ExchangeRestRequest[] = []; const messages: LiveFeedEvent[] = [];
   const manager = new LiveFeedManager({ networkEnabled: true, restTransport: { request: async request => { requests.push(request); return [
@@ -1213,6 +1232,7 @@ test('Binance public OI history is bounded, explicit, and statused', async () =>
   const rows = await manager.syncOpenInterestHistory({ symbol: 'BTCUSDT', period: '5m', limit: 2 });
   assert.equal(rows.length, 2); assert.match(requests[0].url, /futures\/data\/openInterestHist/); assert.match(requests[0].url, /period=5m/);
   assert.equal(messages.filter((item) => item.message.kind === 'openInterest').length, 2);
+  assert.deepEqual(messages.filter((item) => item.message.kind === 'openInterest').map((item) => [item.message.sourceTimestamp, (item.message as { observationTimestamp?: unknown }).observationTimestamp]), [[1700000000000, 1699999999999], [1700000300000, 1700000299999]], 'a reading closes the bar that ends at its stamp');
   const status = manager.status()['binance-openInterest-history']; assert.equal(status.sampleCount, 2); assert.equal(status.coverageStart, 1700000000000); assert.equal(status.coverageEnd, 1700000300000);
 });
 

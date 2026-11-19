@@ -1,5 +1,6 @@
-import { WAVE_GLSL, WaveField, pulseFor, type WaveRegion } from '../glass/waves.ts';
+import { WAVE_GLSL, WAVE_STRENGTH_DEFAULT, WaveField, strengthGain, type WaveRegion } from '../glass/waves.ts';
 import { STRIDE, type TapeRing } from '../tape/ring.ts';
+import { built, startProgram, uniforms, type Building } from '../gl-build.ts';
 import type { TrailStyle } from './model.ts';
 
 /**
@@ -64,6 +65,8 @@ export interface GlassFrame {
    * sides' colours (0-1 RGB).
    */
   fill: number; bookBid: readonly [number, number, number]; bookAsk: readonly [number, number, number];
+  /** How strongly the waves are drawn (glass/waves.ts `strengthGain` of the person's Strength); the default Strength's without one. */
+  waveGain?: number;
 }
 
 const STYLE_ID: Record<TrailStyle, number> = { phosphor: 0, etched: 1, beads: 2 };
@@ -125,10 +128,12 @@ vec4 crest(vec4 c, vec2 wf, float gain) {
 float envelope(float age) { return age < 0.0 || age > 1500.0 ? 0.0 : age < 80.0 ? age / 80.0 : exp(-2.2 * (age - 80.0) / 450.0); }
 // The light (premultiplied) and the shade a row's change puts on the book's glass at distance d from the book's inner edge, and how much
 // brighter (above 1) or dimmer its bar's fill is: liquidity added lights the row up, pulled dims it (Karl, 2026-10-16).
-vec4 pulseLight(bool bid, float d, float wBar, vec4 g1, vec4 g2, out float shade, out float fill) {
+vec4 pulseLight(bool bid, float d, float wBar, vec4 g1, int row, out float shade, out float fill) {
   shade = 0.0; fill = 1.0;
-  float v = bid ? g1.r : g1.g, at = bid ? g1.b : g1.a, before = bid ? g2.r : g2.g;
+  float v = bid ? g1.r : g1.g, at = bid ? g1.b : g1.a;
   if (pulse == 0 || v == 0.0) return vec4(0.0);
+  // The bars before the change only for a row that has one (most rows have none).
+  vec4 g2 = texelFetch(rows, ivec2(2, row), 0); float before = bid ? g2.r : g2.g;
   bool traded = abs(v) > 1.5; float strength = abs(v) - (traded ? 2.0 : 0.0), age = nowMs - at, env = envelope(age) * strength;
   // A pull's outline in Deposit dissolves on its own, slower clock; everything else ends with the envelope.
   bool outline = pulse == 2 && v < 0.0;
@@ -201,6 +206,8 @@ vec4 sharp(vec2 p) { return texture(scene, p / px); }
 vec4 soft(vec2 p) { return vec4(1.0) - exp(-texture(small, p / px) * gain); }
 // The three colours read a little apart where the glass bends the light: a lens's dispersion, strongest at the edges.
 vec4 split3(vec2 p, vec2 off, bool blurred) {
+  // Where the glass bends nothing (its flat middle with no wave passing) the three are one.
+  if (off == vec2(0.0)) return blurred ? soft(p) : sharp(p);
   vec4 a = blurred ? soft(p + off) : sharp(p + off), b = blurred ? soft(p + off * 1.16) : sharp(p + off * 1.16), c = blurred ? soft(p + off * 1.32) : sharp(p + off * 1.32);
   return vec4(a.r, b.g, c.b, max(a.a, max(b.a, c.a)));
 }
@@ -235,11 +242,11 @@ void main() {
   float x0 = pc.x, x1 = pc.y, yb = ext.x, yt = ext.y, bevel = pc.w;
   vec3 tint = tintC; float ta = candle ? tintA.y : tintA.x;
   bool bid = at == 0;
-  vec4 g0 = vec4(0.0), g1 = vec4(0.0), g2 = vec4(0.0);
-  if (!candle && hasRows) { int row = int(px.y - 1.0 - floor(f.y)); g0 = texelFetch(rows, ivec2(0, row), 0); g1 = texelFetch(rows, ivec2(1, row), 0); g2 = texelFetch(rows, ivec2(2, row), 0); }
+  vec4 g0 = vec4(0.0), g1 = vec4(0.0); int row = int(px.y - 1.0 - floor(f.y));
+  if (!candle && hasRows) { g0 = texelFetch(rows, ivec2(0, row), 0); g1 = texelFetch(rows, ivec2(1, row), 0); }
   float wBar = bid ? g0.r : g0.g, inner = bid ? x1 : x0, d = bid ? inner - f.x : f.x - inner;
   float sh = 0.0, k = 1.0; vec4 lt = vec4(0.0);
-  if (!candle && hasRows) lt = pulseLight(bid, d, wBar, g1, g2, sh, k);
+  if (!candle && hasRows) lt = pulseLight(bid, d, wBar, g1, row, sh, k);
   bool inBar = !candle && hasRows && wBar > 0.0 && d <= wBar;
   if (!candle && bricks) {
     // A brick: glass only inside the row's bar, from the book's inner edge (next to the candle) out to the bar's length. A pulse's outline
@@ -424,6 +431,8 @@ export class TrailGL {
   /** The ring's orders on the card: up to which write number, for which of the ring's epochs. */
   #uploaded = 0; #uploadedEpoch = -1;
   #loc = new Map<WebGLProgram, Map<string, WebGLUniformLocation | null>>();
+  /** The programs the card is still building (gl-build.ts) and the uniforms to read from each once built; null once they are. */
+  #building: (readonly [Building, readonly string[]])[] | null;
   readonly #flashData = new Float32Array(MAX_FLASH * FLASH_STRIDE);
   #dpr = 1;
 
@@ -431,25 +440,21 @@ export class TrailGL {
   #field: WaveField | null = null; #mediumKey = '';
 
   constructor(readonly canvas: HTMLCanvasElement, readonly ring: TapeRing) {
-    const gl = canvas.getContext('webgl2', { premultipliedAlpha: true, alpha: true, antialias: false });
+    // No depth buffer: nothing here tests depth, and a phone's card would keep one the canvas's size for nothing.
+    const gl = canvas.getContext('webgl2', { premultipliedAlpha: true, alpha: true, antialias: false, depth: false });
     if (!gl) throw new Error('WebGL2 unavailable');
     this.gl = gl;
-    const compile = (type: number, source: string): WebGLShader => {
-      const shader = gl.createShader(type)!; gl.shaderSource(shader, source); gl.compileShader(shader);
-      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader) ?? 'shader');
-      return shader;
-    };
-    const program = (vert: string, frag: string, names: string[]): WebGLProgram => {
-      const p = gl.createProgram()!; gl.attachShader(p, compile(gl.VERTEX_SHADER, vert)); gl.attachShader(p, compile(gl.FRAGMENT_SHADER, frag)); gl.linkProgram(p);
-      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p) ?? 'program');
-      this.#loc.set(p, new Map(names.map(n => [n, gl.getUniformLocation(p, n)])));
-      return p;
-    };
-    this.#trail = program(TRAIL_VERT, TRAIL_FRAG, ['now', 'win', 'xr', 'yr', 'pr', 'px', 'size', 'style', 'mask', 'dark', 'bidC', 'askC', 'opacity']);
-    this.#flash = program(FLASH_VERT, FLASH_FRAG, ['px', 'style', 'dark', 'bidC', 'askC', 'mid']);
-    this.#down = program(FULL_VERT, DOWN_FRAG, ['src', 'small', 'texel']);
-    this.#blur = program(FULL_VERT, BLUR_FRAG, ['src', 'size', 'dir']);
-    this.#comp = program(FULL_VERT, COMP_FRAG, ['scene', 'small', 'rows', 'px', 'ext', 'gain', 'dpr', 'piece', 'frost', 'count', 'bricks', 'dark', 'tintC', 'bidC', 'askC', 'tintA', 'pulse', 'nowMs', 'hasRows', 'bookBid', 'bookAsk', 'fillA', 'waves', 'wavesPrev', 'waveCells', 'waveCssH', 'hasWaves']);
+    // Built beside the page (gl-build.ts): asked how they went at once, the five held a phone's page for ~0.6 s, the glass's composite alone
+    // ~0.4 s (Research_Findings.md, 2026-11-07). Nothing is drawn until `built` finds them done.
+    const building: (readonly [Building, readonly string[]])[] = [
+      [startProgram(gl, TRAIL_VERT, TRAIL_FRAG), ['now', 'win', 'xr', 'yr', 'pr', 'px', 'size', 'style', 'mask', 'dark', 'bidC', 'askC', 'opacity']],
+      [startProgram(gl, FLASH_VERT, FLASH_FRAG), ['px', 'style', 'dark', 'bidC', 'askC', 'mid']],
+      [startProgram(gl, FULL_VERT, DOWN_FRAG), ['src', 'small', 'texel']],
+      [startProgram(gl, FULL_VERT, BLUR_FRAG), ['src', 'size', 'dir']],
+      [startProgram(gl, FULL_VERT, COMP_FRAG), ['scene', 'small', 'rows', 'px', 'ext', 'gain', 'dpr', 'piece', 'frost', 'count', 'bricks', 'dark', 'tintC', 'bidC', 'askC', 'tintA', 'pulse', 'nowMs', 'hasRows', 'bookBid', 'bookAsk', 'fillA', 'waves', 'wavesPrev', 'waveCells', 'waveCssH', 'waveGain', 'hasWaves']],
+    ];
+    this.#building = building;
+    [this.#trail, this.#flash, this.#down, this.#blur, this.#comp] = building.map(([b]) => b.program) as [WebGLProgram, WebGLProgram, WebGLProgram, WebGLProgram, WebGLProgram];
     this.#field = WaveField.create(gl);
     const texture = (): WebGLTexture => {
       const tex = gl.createTexture()!; gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -486,6 +491,18 @@ export class TrailGL {
     this.setMask([]);
   }
 
+  /**
+   * Whether the programs are built and their uniforms read: false while the card still builds them (asked without waiting, gl-build.ts).
+   * Throws what failed. Nothing is drawn before it is true (the pane keeps its solid look meanwhile).
+   */
+  built(): boolean {
+    const building = this.#building; if (!building) return true;
+    if (!built(this.gl, building.map(([b]) => b))) return false;
+    for (const [b, names] of building) this.#loc.set(b.program, uniforms(this.gl, b.program, names));
+    this.#building = null;
+    return true;
+  }
+
   /** Size the canvas: CSS px times the pixel ratio (the pane caps it, a glow gains nothing from a phone's third device pixel). */
   resize(width: number, height: number, dpr: number): void {
     const w = Math.max(1, Math.round(width * dpr)), h = Math.max(1, Math.round(height * dpr));
@@ -504,7 +521,7 @@ export class TrailGL {
   get dpr(): number { return this.#dpr; }
 
   /** A wave from where an order arrived (CSS px), as large as `usd` against `min`, a buy's or a sell's; nothing without the field. */
-  wave(x: number, y: number, usd: number, min: number, side: 0 | 1): void { this.#field?.add({ x, y, side, ...pulseFor(usd, min) }, performance.now()); }
+  wave(x: number, y: number, usd: number, min: number, side: 0 | 1): void { this.#field?.order(x, y, usd, min, side, performance.now()); }
   /** Whether a wave still runs (the pane keeps drawing while one does). */
   get waving(): boolean { return this.#field?.alive(performance.now()) ?? false; }
 
@@ -556,9 +573,13 @@ export class TrailGL {
     }
   }
 
+  /** Draw a frame; nothing until the programs are built (`built`, which the pane asks first). */
   draw(f: TrailFrame): void {
+    if (!this.built()) return;
     const gl = this.gl, ring = this.ring, dpr = this.#dpr, W = this.canvas.width, H = this.canvas.height;
-    // The waves first, in their own buffers: the glass's pieces are glass to them, the welds walls; then the frame as before.
+    // The waves first, in their own buffers: the glass's pieces are glass to them, the welds walls; then the frame as before. Waves whose
+    // programs did not build are let go (the glass keeps its other light).
+    if (this.#field?.failed) this.#field = null;
     const field = this.#field;
     if (field && f.glass) {
       const g = f.glass, key = `${g.y0},${g.y1},${g.pieces.map(q => `${q.x0},${q.x1}`).join(';')}`;
@@ -570,8 +591,12 @@ export class TrailGL {
       field.step(performance.now());
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, W, H);
-    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
-    if (!(f.p1 > f.p0) || !(f.windowMs > 0)) return;
+    gl.clearColor(0, 0, 0, 0);
+    // With glass the composite writes every pixel of the screen and clears it just before (`#composite`): cleared here as well, a tiled card
+    // (a phone's) would write the cleared screen out and read it back in for the composite.
+    const drawn = f.p1 > f.p0 && f.windowMs > 0;
+    if (!drawn || !f.glass) gl.clear(gl.COLOR_BUFFER_BIT);
+    if (!drawn) return;
     // With glass the trail is drawn off screen, then copied out with the glass's part frosted (`#composite`).
     if (f.glass) { gl.bindFramebuffer(gl.FRAMEBUFFER, this.#sceneFbo); gl.clear(gl.COLOR_BUFFER_BIT); }
     const style = STYLE_ID[f.style], additive = f.dark && f.style === 'phosphor';
@@ -609,8 +634,10 @@ export class TrailGL {
   #composite(glass: GlassFrame, f: TrailFrame): void {
     const dark = f.dark;
     const gl = this.gl, dpr = this.#dpr, W = this.canvas.width, H = this.canvas.height, [sw, sh] = this.#smallSize;
+    // Each pass below writes every pixel of its target: a tiled card need not read the old ones back in first.
+    const fresh = [gl.COLOR_ATTACHMENT0];
     gl.disable(gl.BLEND);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.#smallFbo); gl.viewport(0, 0, sw, sh);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.#smallFbo); gl.viewport(0, 0, sw, sh); gl.invalidateFramebuffer(gl.FRAMEBUFFER, fresh);
     const d = this.#loc.get(this.#down)!;
     gl.useProgram(this.#down);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.#scene); gl.uniform1i(d.get('src')!, 0);
@@ -619,11 +646,12 @@ export class TrailGL {
     // The Gaussian: across into the other half, then down back into the small copy.
     const b = this.#loc.get(this.#blur)!;
     gl.useProgram(this.#blur); gl.uniform2f(b.get('size')!, sw, sh); gl.uniform1i(b.get('src')!, 0);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.#tmpFbo); gl.bindTexture(gl.TEXTURE_2D, this.#small); gl.uniform2f(b.get('dir')!, GLASS_SPREAD, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.#tmpFbo); gl.invalidateFramebuffer(gl.FRAMEBUFFER, fresh); gl.bindTexture(gl.TEXTURE_2D, this.#small); gl.uniform2f(b.get('dir')!, GLASS_SPREAD, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.#smallFbo); gl.bindTexture(gl.TEXTURE_2D, this.#tmp); gl.uniform2f(b.get('dir')!, 0, GLASS_SPREAD);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.#smallFbo); gl.invalidateFramebuffer(gl.FRAMEBUFFER, fresh); gl.bindTexture(gl.TEXTURE_2D, this.#tmp); gl.uniform2f(b.get('dir')!, 0, GLASS_SPREAD);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, W, H);
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
     const c = this.#loc.get(this.#comp)!;
     gl.useProgram(this.#comp);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.#scene); gl.uniform1i(c.get('scene')!, 0);
@@ -647,6 +675,7 @@ export class TrailGL {
     gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, field ? field.texture : null); gl.uniform1i(c.get('waves')!, 3);
     gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, field ? field.previous : null); gl.uniform1i(c.get('wavesPrev')!, 4);
     gl.uniform1i(c.get('hasWaves')!, waving ? 1 : 0); gl.uniform2f(c.get('waveCells')!, field?.cols ?? 1, field?.rows ?? 1); gl.uniform1f(c.get('waveCssH')!, H / dpr);
+    gl.uniform1f(c.get('waveGain')!, glass.waveGain ?? strengthGain(WAVE_STRENGTH_DEFAULT));
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.activeTexture(gl.TEXTURE0);
   }

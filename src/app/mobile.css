@@ -45,17 +45,34 @@ html[data-bar="compact"] .toolbar .spacer { order: 4; flex: 1 1 0; min-width: 0;
 html[data-bar="compact"] .toolbar .status { order: 5; flex: none; font-size: 0; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 38px; }
 html[data-bar="compact"] .toolbar .status::before { width: 10px; height: 10px; margin: 0; }
 html[data-bar="compact"] .more-btn { order: 6; display: inline-grid; place-items: center; flex: none; width: 44px; padding: 0; }
-/* A notice lies over the top of the map, as on the desktop's bar: the compact bar keeps its height when one comes or goes, and two lie one
-   under the other. */
+/* The arrow that folds the bar away, after Settings; folded, the bar keeps only the top safe area (the clock and notch above it). */
+html[data-bar="compact"] .toolbar .bar-collapse { order: 7; flex: none; width: 44px; padding: 0; }
+/* A notice lies over the top of the map, as on the desktop's bar: the compact bar keeps its height when one comes or goes, and several lie one
+   under the other (the toolbar sets each one's `top` by what the one above measures: on a phone a notice wraps to three lines). */
 html[data-bar="compact"] .toolbar { position: relative; z-index: 30; }
 html[data-bar="compact"] .toolbar .notice { position: absolute; left: 8px; right: 8px; top: calc(100% + 4px); z-index: 45; margin: 0; box-shadow: 2px 2px 0 var(--shadow); }
-html[data-bar="compact"] .toolbar .notice:not([hidden]) ~ .notice:not([hidden]) { top: calc(100% + 40px); }
 .more-btn { display: none; }
-/* Recentre is a symbol in the bar: the word would not fit beside seven timeframes. */
-html[data-bar="compact"] .tb-time > button { flex: none; width: 44px; padding: 0; font-size: 0; display: inline-grid; place-items: center; }
+/* A phone's Tape tab: the tape as a list or as a chart (toolbar.ts `setTapeView`; Karl, 2026-11-14), right after the spacer so nothing else in
+   the bar moves when it comes: a wave while the list shows (the chart's trail of trades), lines while the chart does. */
+.tape-view-btn { display: none; }
+html[data-bar="compact"] .tape-view-btn:not([hidden]) { order: 4; display: inline-grid; place-items: center; flex: none; width: 44px; padding: 0; }
+html[data-bar="compact"] .tape-view-btn::before { content: ""; width: 22px; height: 22px; background: currentColor; -webkit-mask: var(--icon-tape-wave) center / contain no-repeat; mask: var(--icon-tape-wave) center / contain no-repeat; }
+html[data-bar="compact"] .tape-view-btn[data-shows="chart"]::before { -webkit-mask-image: var(--icon-tape-list); mask-image: var(--icon-tape-list); }
+html {
+  --icon-tape-wave: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 12C3.5 7 5.5 7 7 12S10.5 17 12 12 15.5 7 17 12 20.5 17 22 12'/%3E%3C/svg%3E");
+  --icon-tape-list: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M9 6.5h11M9 12h11M9 17.5h11M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01'/%3E%3C/svg%3E");
+}
+/* Light or dark in one tap (Karl, 2026-11-01): a drawn sun or moon before Settings, which keeps the whole list of themes. */
+.flip-btn { display: none; }
+html[data-bar="compact"] .flip-btn { order: 6; display: inline-grid; place-items: center; flex: none; width: 44px; padding: 0; }
+html[data-bar="compact"] .flip-btn::before { content: ""; width: 20px; height: 20px; background: currentColor; -webkit-mask: var(--mark-moon) center / contain no-repeat; mask: var(--mark-moon) center / contain no-repeat; }
+html[data-bar="compact"] .flip-btn[data-to="light"]::before { -webkit-mask-image: var(--mark-sun); mask-image: var(--mark-sun); }
+/* Recentre is a symbol in the bar: the word would not fit beside seven timeframes. A flex box, not a grid: the hidden word is an item of its own,
+   and in a grid it took a row of its own and lifted the symbol 3.8 px above the middle of the button (Karl, 2026-10-26). */
+html[data-bar="compact"] .tb-time > button { flex: none; width: 44px; padding: 0; font-size: 0; display: inline-flex; align-items: center; justify-content: center; }
+html { --icon-recenter: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='6.5'/%3E%3Cpath d='M12 2v4M12 18v4M2 12h4M18 12h4'/%3E%3C/svg%3E"); }
 html[data-bar="compact"] .tb-time > button::before { content: ""; width: 20px; height: 20px; background: currentColor;
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='6.5'/%3E%3Cpath d='M12 2v4M12 18v4M2 12h4M18 12h4'/%3E%3C/svg%3E") center / contain no-repeat;
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='6.5'/%3E%3Cpath d='M12 2v4M12 18v4M2 12h4M18 12h4'/%3E%3C/svg%3E") center / contain no-repeat; }
+  -webkit-mask: var(--icon-recenter) center / contain no-repeat; mask: var(--icon-recenter) center / contain no-repeat; }
 /* The name is "LMF" where the room is short. */
 @media (max-width: 700px) {
   html[data-bar="compact"] .toolbar .brand { font-size: 0; margin: 0; }
@@ -70,6 +87,13 @@ html[data-bar="compact"] .tb-time > button::before { content: ""; width: 20px; h
   html[data-layout="phone"][data-bar="compact"] .toolbar .market { flex: 0 1 auto; max-width: 100%; }
   html[data-layout="phone"][data-bar="compact"] .tb-time .seg { flex: 1 1 0; min-width: 0; }
   html[data-layout="phone"][data-bar="compact"] .toolbar .notice { left: 10px; right: 10px; }
+}
+/* The Tape tab's switch makes eight things on the top row (2026-11-14): 375 px of them at 44 px a key and 8 px between. Under 390 px the gaps
+   are 4 px, and under 360 px the keys are 36 px and the edges 8 px, on every tab alike, so nothing moves when the switch comes. */
+@media (max-width: 389px) { html[data-layout="phone"][data-bar="compact"] .tb-main { gap: 4px; } }
+@media (max-width: 359px) {
+  html[data-layout="phone"][data-bar="compact"] .tb-main { padding: 0 8px; }
+  html[data-layout="phone"][data-bar="compact"] :is(.flip-btn, .more-btn, .bar-collapse, .tape-view-btn:not([hidden])) { width: 36px; }
 }
 
 /* ---- the Settings sheet and every floating panel become bottom sheets ------------------------------------------------------------- */
@@ -94,12 +118,46 @@ html[data-bar="compact"] :is(dialog.venues h3, .guide-head) { cursor: auto; touc
 .sheet-sec-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 6px; min-height: 28px; }
 .sheet-sec-head h4 { margin: 0; font-size: 11px; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
 .sheet-sec-head button { min-height: 34px; padding: 0 14px; border-radius: var(--radius); font-size: 13px; }
-.sheet-sec-head button.help { width: 26px; height: 26px; min-height: 0; padding: 0; margin: 0; font-size: 13px; line-height: 24px; }
+.sheet-sec-head button.help { width: 26px; height: 26px; min-height: 0; padding: 0; margin: 0; font-size: 0; line-height: 0; }
 /* The small "?" keeps its look but has a finger's reach: an invisible ring around it takes the touch (the drawn glyph is its ::before). */
 html[data-bar="compact"] button.help::after { content: ""; position: absolute; inset: -9px; }
 .sheet-body :is(button, select) { min-height: var(--tap); font-size: 15px; border-radius: var(--radius); padding: 0 14px; }
 /* 16px is the size below which an iPhone zooms the page in when a field takes focus; the page's own picker normally stops that from happening, and this is the backstop. */
 .sheet select { text-overflow: ellipsis; font-size: 16px; }
+/* A list's arrow is drawn, in the column of the split buttons' settings keys (its centre 22 px in from the edge, the same 18 px box and
+   stroke as their sliders; Karl, 2026-11-01: the browser's own arrow sat against the border and looked off). The select gives up its own
+   arrow and its row carries the mark, a select having no pseudo-elements; a select in a group of a pane's sheet (Depth's Bands, the order-book
+   panes' Venues) is marked by its own label. The Classic frame keeps its drawn select. */
+html:not([data-frame="bevel"]) .sheet select,
+html[data-bar="compact"]:not([data-frame="bevel"]) .panel .field > select { -webkit-appearance: none; appearance: none; padding-right: 44px; }
+html:not([data-frame="bevel"]) :is(.sheet-field, .sheet .tune-body > .ctl, .sheet .tune-body > .ctl-group > .ctl):has(> select),
+html[data-bar="compact"]:not([data-frame="bevel"]) .panel .field:has(> select) { position: relative; }
+html:not([data-frame="bevel"]) :is(.sheet-field, .sheet .tune-body > .ctl, .sheet .tune-body > .ctl-group > .ctl):has(> select)::after,
+html[data-bar="compact"]:not([data-frame="bevel"]) .panel .field:has(> select)::after {
+  content: ""; position: absolute; right: 13px; top: 50%; width: 18px; height: 18px; transform: translateY(-50%); pointer-events: none;
+  background: currentColor; -webkit-mask: var(--mark-chevron) center / contain no-repeat; mask: var(--mark-chevron) center / contain no-repeat;
+}
+/* A settings panel's row keeps 8 px of room after its control (`.panel .field`): the mark is 22 px in from the select's own edge there too. */
+html[data-bar="compact"]:not([data-frame="bevel"]) .panel .field:has(> select)::after { right: 21px; }
+/* A stacked row (the Market) holds its select under its name. The row is a grid and the mark is placed in the select's cell, which then is
+   the box the rule above centres it in: no offsets to outweigh (a `bottom` override here lost to that rule once its :is() grew heavier, and
+   the arrow sat at the row's middle, against the select's top edge; Karl, 2026-11-13). */
+.sheet .sheet-field.stack:has(> select) { display: grid; grid-template-columns: minmax(0, 1fr); align-content: center; }
+/* Every line named: an absolutely placed item's `auto` line is the container's padding edge, which would take in the 12 px under the select. */
+html:not([data-frame="bevel"]) .sheet .sheet-field.stack:has(> select)::after { grid-area: 2 / 1 / 3 / 2; }
+.sheet .sheet-field.stack:has(> select) > .sheet-label { grid-row: 1; } .sheet .sheet-field.stack:has(> select) > select { grid-row: 2; }
+/* A size field's menu of common sizes is a list of its own: the same arrow, in the middle of its own box (44 px in Settings, 40 in a panel). */
+html:not([data-frame="bevel"]) .sheet .size-ctl .size-menu,
+html[data-bar="compact"]:not([data-frame="bevel"]) .panel .size-ctl .size-menu { -webkit-appearance: none; appearance: none; }
+html:not([data-frame="bevel"]) .sheet .size-ctl:has(> .size-menu),
+html[data-bar="compact"]:not([data-frame="bevel"]) .panel .size-ctl:has(> .size-menu) { position: relative; }
+html:not([data-frame="bevel"]) .sheet .size-ctl:has(> .size-menu)::after,
+html[data-bar="compact"]:not([data-frame="bevel"]) .panel .size-ctl:has(> .size-menu)::after {
+  content: ""; position: absolute; right: 13px; top: 50%; width: 18px; height: 18px; transform: translateY(-50%); pointer-events: none;
+  background: currentColor; -webkit-mask: var(--mark-chevron) center / contain no-repeat; mask: var(--mark-chevron) center / contain no-repeat;
+}
+html[data-bar="compact"]:not([data-frame="bevel"]) .panel .size-ctl:has(> .size-menu)::after { right: 11px; }
+html:not([data-frame="bevel"]) :is(.sheet-field, .sheet .tune-body > .ctl, .sheet .tune-body > .ctl-group > .ctl):has(> select:disabled)::after { opacity: .4; }
 .sheet-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(138px, 1fr)); gap: 8px; }
 .sheet-tiles > button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
 /* A split button fills its tile: the switch takes the room, the settings key a finger's width. Its tiles are wider than a plain button's
@@ -110,6 +168,7 @@ html[data-bar="compact"] button.help::after { content: ""; position: absolute; i
 .sheet-tiles > .split > .split-cfg { width: 44px; }
 .sheet-tiles > .split > .split-cfg::before { width: 18px; height: 18px; }
 .sheet-field { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 52px; border-top: 1px solid var(--line); }
+.sheet-field[hidden] { display: none; }
 .sheet-sec-head + .sheet-field { border-top: 0; }
 .sheet-label { flex: 1 1 auto; font-size: 15px; }
 .sheet-field > :not(.sheet-label) { flex: 0 1 62%; min-width: 0; }
@@ -117,22 +176,40 @@ html[data-bar="compact"] button.help::after { content: ""; position: absolute; i
 .sheet-field.stack { flex-direction: column; align-items: stretch; justify-content: center; gap: 6px; padding: 10px 0 12px; }
 .sheet-field.stack > :not(.sheet-label) { flex: none; }
 .sheet-field.stack .sheet-label { flex: none; }
-.sheet .seg.toggles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; width: 100%; }
-.sheet .seg.toggles button { border-radius: var(--radius); margin: 0; padding: 0 6px; }
+/* Three to a row, each at least a third of it; a name that a third cannot hold on one line ("Финансирование", "Financiamento", over even at
+   12 px on a 375 px phone, with its tick) takes the width it needs and its row holds two, both grown to the edge. The last row's buttons
+   stay a third wide: the trailing filler takes its spare room (its negative margin cancels its own gap, so it never wraps alone). The
+   gap is one property: the thirds and the filler are counted from it. */
+.sheet .seg.toggles { --toggle-gap: 8px; display: flex; flex-wrap: wrap; gap: var(--toggle-gap); width: 100%; }
+.sheet .seg.toggles::after { content: ""; flex: 999 1 0; margin-left: calc(-1 * var(--toggle-gap)); }
+/* A button is as wide on as off, or a tap would move the buttons under the finger: the tick sits in a margin both sides keep, and the
+   name is made heavier by a shadow, which takes no room, rather than by a bolder face. */
+.sheet .seg.toggles button { position: relative; flex: 1 1 auto; min-width: calc((100% - 2 * var(--toggle-gap)) / 3); white-space: nowrap; border-radius: var(--radius); margin: 0; padding: 0 20px; }
 /* A switched-on pane is tinted rather than filled black: these are settings, not the primary actions the desktop's inverted buttons suit. */
-.sheet .seg.toggles button.on { background: color-mix(in srgb, var(--ui) 15%, var(--panel)); border-color: var(--ui); color: var(--text); font-weight: 650; }
-.sheet .seg.toggles button.on::before { content: ""; display: inline-block; width: 12px; height: 12px; margin-right: 6px; vertical-align: -1px; background: var(--ui); -webkit-mask: var(--mark-check) center / contain no-repeat; mask: var(--mark-check) center / contain no-repeat; }
-.sheet .seg.scope { display: flex; width: 100%; }
-.sheet .seg.scope button { flex: 1 1 0; border-radius: 0; margin-left: -1px; }
-.sheet .seg.scope button:first-child { border-radius: var(--radius) 0 0 var(--radius); margin-left: 0; } .sheet .seg.scope button:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
+.sheet .seg.toggles button.on { background: color-mix(in srgb, var(--ui) 15%, var(--panel)); border-color: var(--ui); color: var(--text); text-shadow: .45px 0 0 currentColor; }
+.sheet .seg.toggles button.on::before { content: ""; position: absolute; left: 6px; top: 50%; width: 12px; height: 12px; margin-top: -6px; background: var(--ui); -webkit-mask: var(--mark-check) center / contain no-repeat; mask: var(--mark-check) center / contain no-repeat; }
+.sheet .seg:is(.scope, .zone-seg) { display: flex; width: 100%; }
+.sheet .seg:is(.scope, .zone-seg) button { flex: 1 1 0; border-radius: 0; margin-left: -1px; }
+.sheet .seg:is(.scope, .zone-seg) button:first-child { border-radius: var(--radius) 0 0 var(--radius); margin-left: 0; } .sheet .seg:is(.scope, .zone-seg) button:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
 .sheet .scale { display: flex; flex-direction: column; gap: 4px; width: 100%; }
 .sheet .legend { height: 20px; }
 .sheet .legend i { font-size: 11px; }
 .sheet .scale input[type=range] { height: 32px; }
+/* The Waves strength under its switch: the slider and its share on one line, the share in a column of its own so the slider does not move. */
+.sheet .wave-strength { display: flex; align-items: center; gap: 10px; }
+.sheet .wave-strength input[type=range] { flex: 1; min-width: 0; height: 32px; margin: 0; accent-color: var(--ui); }
+.sheet .wave-strength output { min-width: 42px; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
 .sheet-chips { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 4px; }
 .sheet-chips .chips { gap: 8px; }
 .sheet .chip { min-height: 38px; display: inline-flex; align-items: center; padding: 0 15px; font-size: 14px; border-radius: var(--radius); }
 .sheet .theme-btn { justify-content: center; }
+/* Language and Theme are lists too: the choice sits at the left as in a select, and the same arrow stands in the same column (their own
+   small caret goes). */
+html:not([data-frame="bevel"]) .sheet-field > :is(.theme-btn, .language-btn) { flex: 0 1 62%; position: relative; justify-content: flex-start; padding-right: 44px; }
+html:not([data-frame="bevel"]) .sheet-field > :is(.theme-btn, .language-btn)::after {
+  position: absolute; right: 13px; top: 50%; width: 18px; height: 18px; margin: 0; border: 0; transform: translateY(-50%); color: inherit;
+  background: currentColor; -webkit-mask: var(--mark-chevron) center / contain no-repeat; mask: var(--mark-chevron) center / contain no-repeat;
+}
 .sheet .icon-btn::after { content: attr(aria-label); font-size: 15px; }
 .sheet .seg.toggles + .sheet-tiles { margin-top: 10px; }
 .sheet .led-btn { padding-left: 32px; }
@@ -152,7 +229,9 @@ html[data-bar="compact"] .panel-head h3 { font-size: 18px; }
 html[data-bar="compact"] .panel-body { overscroll-behavior: contain; padding-bottom: 16px; }
 html[data-bar="compact"] .panel :is(button, select, input[type=number]) { min-height: 40px; }
 /* The ? among a panel's tools is the round button of the sheet's section heads, not a 40 px strip one help-button wide. */
-html[data-bar="compact"] .panel-tools button.help { width: 26px; height: 26px; min-height: 0; padding: 0; margin: 0; font-size: 13px; line-height: 24px; }
+html[data-bar="compact"] .panel-tools button.help { width: 26px; height: 26px; min-height: 0; padding: 0; margin: 0; font-size: 0; line-height: 0; }
+/* So is a script's ? in the Scripts panel's rows (its invisible ring gives it a finger's reach). */
+html[data-bar="compact"] .panel-body .layout-row > button.help { width: 26px; height: 26px; min-height: 0; padding: 0; margin: 0; font-size: 0; line-height: 0; }
 html[data-bar="compact"] .panel .opt, html[data-bar="compact"] .panel .field { padding-top: 9px; padding-bottom: 9px; }
 html[data-bar="compact"] .panel .field > select, html[data-bar="compact"] .panel .field > input[type=number] { width: 140px; }
 html[data-bar="compact"] .panel .field.pin-field > select { width: 100%; }
@@ -168,7 +247,19 @@ html[data-bar="compact"] .panel .switch input:checked + i::after { transform: tr
 html[data-bar="compact"] .panel .opt input[type=checkbox], html[data-bar="compact"] .panel .tier-name input { width: 20px; height: 20px; }
 html[data-bar="compact"] .panel .opt { grid-template-columns: 24px 1fr; }
 html[data-bar="compact"] .keylevel-grid { grid-template-columns: 1fr repeat(3, 48px); }
-html[data-bar="compact"] .keylevel-grid input[type=checkbox] { width: 20px; height: 20px; }
+html[data-bar="compact"] .period-grid { grid-template-columns: minmax(0, 1fr) 72px 88px; }
+html[data-bar="compact"] .anchor-grid { grid-template-columns: minmax(0, 1fr) repeat(5, 40px); }
+/* The candle colours' grid keeps its three columns (the Key levels' four above would scatter it): a swatch and its reset, 30 px each, a cell. */
+html[data-bar="compact"] .candle-color-grid { grid-template-columns: minmax(0, 1fr) repeat(2, 76px); }
+html[data-bar="compact"] :is(.line-swatch, .line-swatch-reset, .anchor-eye) { width: 30px; height: 30px; }
+html[data-bar="compact"] .anchor-row .anchor-edit { min-height: 30px; }
+html[data-bar="compact"] .anchor-date-fields :is(.anchor-date, .anchor-time) { height: 36px; font-size: 16px; }
+html[data-bar="compact"] .anchor-date-fields .anchor-date { width: 160px; }
+html[data-bar="compact"] .anchor-date-fields .anchor-time { width: 116px; }
+html[data-bar="compact"] .anchor-date-fields .anchor-go { flex: 1 0 100%; min-height: 40px; }
+html[data-bar="compact"] .anchor-row { gap: 10px; }
+html[data-bar="compact"] .panel-jump button { min-height: 34px; padding: 4px 12px; font-size: 13px; }
+html[data-bar="compact"] .keylevel-grid input:is([type=checkbox], [type=radio]) { width: 20px; height: 20px; }
 html[data-bar="compact"] .keylevel-grid .what { padding: 8px 0; }
 html[data-bar="compact"] .panel .grip { width: 30px; height: 36px; }
 html[data-bar="compact"] .panel .srow { grid-template-columns: 32px 18px minmax(0, 1fr) 38px; padding: 5px 6px; }
@@ -206,14 +297,16 @@ html[data-layout^="phone"] .chart-col, html[data-layout^="phone"] .side-col, htm
 html[data-layout^="phone"] .splitter, html[data-layout^="phone"] .grip { display: none; }
 html[data-layout^="phone"] .pane.heat { order: 0; flex: 1 1 0; min-height: 140px; }
 html[data-layout^="phone"] .chart-col > .pane:not(.heat), html[data-layout^="phone"] .side-col > .pane, html[data-layout^="phone"] .flow-col > .pane { display: none; order: 2; }
-html[data-layout^="phone"] main[data-tab="flow"] .pane.cvd:not([hidden]),
-html[data-layout^="phone"] main[data-tab="book"] .pane.ladder:not([hidden]),
 html[data-layout^="phone"] main[data-tab="depth"] .pane.depth:not([hidden]),
 html[data-layout^="phone"] main[data-tab="oi"] .pane.oi:not([hidden]),
 html[data-layout^="phone"] main[data-tab="delta"] .pane.delta:not([hidden]),
 html[data-layout^="phone"] main[data-tab="ls"] .pane.ls:not([hidden]),
-html[data-layout^="phone"] main[data-tab="lt"] .pane.lt:not([hidden]),
-html[data-layout^="phone"] main[data-tab="stats"] .pane.bars:not([hidden]) { display: flex; flex: 0 0 var(--dock-size, 40%) !important; min-height: 0 !important; }
+html[data-layout^="phone"] main[data-tab="stats"] .pane.bars:not([hidden]),
+html[data-layout^="phone"] main[data-tab="script"] .pane.script:not([hidden]) { display: flex; flex: 0 0 var(--dock-size, 40%) !important; min-height: 0 !important; }
+/* LT has no tab on a phone (Liq took it, Karl 2026-11-01): switched on in Settings, it sits under the map on the Map tab, as on a desktop. */
+html[data-layout^="phone"] main[data-tab="map"] .pane.lt:not([hidden]) { display: flex; flex: 0 0 36% !important; min-height: 0 !important; }
+/* Funding has no tab either (2026-11-07): switched on in Settings, it sits under the map on the Map tab, as LT does. */
+html[data-layout^="phone"] main[data-tab="map"] .pane.funding:not([hidden]) { display: flex; flex: 0 0 32% !important; min-height: 0 !important; }
 
 /* The handle between the map and the pane: a sheet-style pill that drags to resize. */
 .dock-grip { display: none; }
@@ -228,22 +321,92 @@ html[data-layout^="phone"] .dock { display: flex; background: var(--panel); bord
 .dock-tab { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 52px; padding: 5px 2px 4px; border: 0; border-radius: 0; background: transparent; color: var(--muted); font-size: 11.5px; font-weight: 600; line-height: 1.1; }
 .dock-tab[hidden] { display: none; }
 .dock-tab svg { width: 22px; height: 22px; flex: none; }
-.dock-tab.on { background: transparent; color: var(--text); box-shadow: inset 0 3px 0 var(--ui); }
+.dock-tab.on { background: transparent; color: var(--text); }
 .dock-tab.on svg { color: var(--ui); }
+/* The mark under the open tab slides to the one chosen (dock.ts `ink`): the top of its button upright, its edge on the rail. */
+.dock-ink { display: none; }
+html[data-layout^="phone"] .dock { position: relative; }
+html[data-layout^="phone"] .dock-ink { display: block; position: absolute; left: 0; top: 0; height: 3px; width: var(--ink-len, 0); transform: translateX(var(--ink-at, 0)); background: var(--ui); pointer-events: none; }
+html[data-layout^="phone"] .dock-ink.slide { transition: transform .26s cubic-bezier(.3, .9, .25, 1), width .26s cubic-bezier(.3, .9, .25, 1); }
+html[data-layout="phone-landscape"] .dock-ink { left: auto; right: 0; width: 3px; height: var(--ink-len, 0); transform: translateY(var(--ink-at, 0)); }
+html[data-layout="phone-landscape"] .dock-ink.slide { transition: transform .26s cubic-bezier(.3, .9, .25, 1), height .26s cubic-bezier(.3, .9, .25, 1); }
+/* A tab under a finger answers at once: its icon gives a little. */
+.dock-tab svg { transition: transform .12s ease-out; }
+.dock-tab:active svg { transform: scale(.86); }
+/* A pane that comes up (a tab chosen) fades in rather than appearing: the animation starts when its box does. */
+@keyframes pane-in { from { opacity: 0; } to { opacity: 1; } }
+html[data-layout^="phone"] main > .pane:not([hidden]), html[data-layout^="phone"] main :is(.chart-col, .side-col, .flow-col) > .pane:not([hidden]) { animation: pane-in .18s ease-out; }
 /* Ten tabs share the width: a longer word than English has ("Глубина", "Profundidade") shrinks a little more instead of running into its neighbour's. */
 html[data-layout^="phone"] .dock-tab { font-size: min(11.5px, 2.55vw); }
 html[data-layout="phone"] .dock { padding: 0 0 var(--safe-b); }
 
-/* The Tape tab (panes/candle-pane.ts) fills the area in place of the map, in either orientation, with nothing beside it to resize. */
+/* The Tape tab (panes/candle-pane.ts) and the Flow tab (panes/cvd-pane.ts) fill the area in place of the map, in either orientation, with
+   nothing beside them to resize (`FULL_TABS` in dock.ts). */
 .pane.candle { display: none; }
-html[data-layout^="phone"] main[data-tab="candle"] { display: flex; flex-direction: column; }
-html[data-layout^="phone"] main[data-tab="candle"] .pane.heat, html[data-layout^="phone"] main[data-tab="candle"] > .dock-grip { display: none; }
-/* The tape has no timeframe: the map's timeframes and recentre leave the top bar while it shows. */
-html[data-layout^="phone"]:has(main[data-tab="candle"]) .toolbar .tb-time { display: none; }
-html[data-layout^="phone"] main[data-tab="candle"] > .pane.candle { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; order: 0; }
+
+/* The Liq tab (panes/liq-pane.ts): the liquidation ladder fills the area held upright, as the Book does, and sits beside the map held
+   sideways. Only a phone has it: a desktop draws the levels on the map and in their column. */
+.pane.liq { display: none; }
+html[data-layout="phone"] main[data-tab="liq"] { display: flex; flex-direction: column; }
+html[data-layout="phone"] main[data-tab="liq"] .pane.heat, html[data-layout="phone"] main[data-tab="liq"] > .dock-grip { display: none; }
+html[data-layout="phone"]:has(main[data-tab="liq"]) .toolbar .tb-time { display: none; }
+html[data-layout="phone"] main[data-tab="liq"] > .pane.liq { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; order: 0; }
+html[data-layout="phone-landscape"] main[data-tab="liq"] > .pane.liq { display: flex; flex-direction: column; grid-column: 3; grid-row: 1; flex: none !important; min-height: 0; }
+.pane.liq .liq-head { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; padding: 4px var(--ph-edge, 10px) 2px; min-height: 0; }
+.pane.liq .liq-head strong { font-size: 15px; letter-spacing: -.01em; }
+/* The title says what the levels show and opens the menu that chooses it (liq-menu.ts): words with an arrow, a lock while a Plus choice is held back. */
+.pane.liq .liq-head button.liq-title { position: relative; flex: none; display: inline-flex; align-items: center; gap: 5px; height: auto; padding: 2px 18px 2px 0; border: 0; background: none; color: var(--text); font-size: 15px; font-weight: 700; letter-spacing: -.01em; white-space: nowrap; }
+.pane.liq .liq-head button.liq-title::after { content: ""; position: absolute; right: 2px; top: 50%; width: 11px; height: 11px; margin-top: -5px; background: currentColor; -webkit-mask: var(--mark-chevron) center / contain no-repeat; mask: var(--mark-chevron) center / contain no-repeat; }
+.pane.liq .liq-head button.liq-title.locked::before { content: ""; flex: none; width: 12px; height: 12px; background: currentColor; -webkit-mask: var(--mark-lock) center / contain no-repeat; mask: var(--mark-lock) center / contain no-repeat; }
+.pane.liq .liq-head .liq-sub { flex: 1 1 auto; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pane.liq .liq-head button.help { align-self: center; flex: none; }
+.liq-sum { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; padding: 4px 12px 8px; }
+.liq-sum[hidden] { display: none; }
+.liq-side { display: flex; flex-direction: column; min-width: 0; }
+.liq-side.short { align-items: flex-end; text-align: right; }
+.liq-side small { font-size: 10.5px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.liq-usd { font-size: 24px; font-weight: 760; line-height: 1.15; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.liq-usd.long { color: var(--candle-down); }
+.liq-usd.short { color: var(--candle-up); }
+.liq-balance { grid-column: 1 / -1; display: flex; gap: 3px; height: 7px; margin: 5px 0 3px; }
+.liq-balance i { display: block; flex: 1 1 0; min-width: 4px; border-radius: 4px; transition: flex-grow .7s cubic-bezier(.2, .8, .2, 1); }
+.liq-balance .long { background: linear-gradient(90deg, var(--candle-down), color-mix(in srgb, var(--candle-down) 45%, transparent)); box-shadow: 0 0 10px color-mix(in srgb, var(--candle-down) 45%, transparent); }
+.liq-balance .short { background: linear-gradient(90deg, color-mix(in srgb, var(--candle-up) 45%, transparent), var(--candle-up)); box-shadow: 0 0 10px color-mix(in srgb, var(--candle-up) 45%, transparent); }
+.liq-meta { grid-column: 1 / -1; display: flex; justify-content: space-between; gap: 8px; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.liq-ratio { font-weight: 700; white-space: nowrap; }
+.liq-ratio.long { color: var(--candle-down); }
+.liq-ratio.short { color: var(--candle-up); }
+.pane.liq .liq-range { display: flex; margin: 0 10px 8px; }
+.pane.liq .liq-range[hidden] { display: none; }
+.pane.liq .liq-range button { flex: 1 1 0; min-width: 0; min-height: 34px; font-variant-numeric: tabular-nums; }
+.pane.liq .liq-range button.on { background: var(--text); border-color: var(--text); color: var(--panel); font-weight: 650; }
+.liq-body { position: relative; flex: 1 1 0; min-height: 0; overflow: hidden; background: var(--bg); }
+.liq-body canvas { position: absolute; left: 0; top: 0; touch-action: none; }
+/* The price's pulse: a ring that swells from the price tag and fades, so the ladder reads as live (none for reduced motion). */
+.liq-pulse { position: absolute; left: 0; top: 0; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle, color-mix(in srgb, var(--text) 55%, transparent), transparent 70%); }
+.liq-pulse::after { content: ""; position: absolute; inset: 0; border-radius: 50%; border: 1.5px solid var(--text); animation: liq-pulse 2.4s cubic-bezier(.2, .6, .3, 1) infinite; }
+.liq-pulse[hidden] { display: none; }
+@keyframes liq-pulse { 0% { transform: scale(.6); opacity: .7; } 100% { transform: scale(3.4); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .liq-pulse::after { animation: none; opacity: 0; } }
+/* The foot wraps to a second line rather than cutting what it says last (stops as of, the take profits): at most two lines. */
+.liq-foot { padding: 5px 10px 6px; font-size: 11px; line-height: 1.35; color: var(--muted); border-top: 1px solid var(--line); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.liq-foot:empty { display: none; }
+html[data-layout^="phone"] main:is([data-tab="candle"], [data-tab="flow"]) { display: flex; flex-direction: column; }
+html[data-layout^="phone"] main:is([data-tab="candle"], [data-tab="flow"]) .pane.heat, html[data-layout^="phone"] main:is([data-tab="candle"], [data-tab="flow"]) > .dock-grip { display: none; }
+/* Neither has a timeframe: the map's timeframes and recentre leave the top bar while one shows. */
+html[data-layout^="phone"]:has(main:is([data-tab="candle"], [data-tab="flow"])) .toolbar .tb-time { display: none; }
+/* The Tape tab: the flow column's list (`main[data-tape="list"]`, the default) or the chart of the tape (Karl, 2026-11-14). */
+html[data-layout^="phone"] main[data-tab="candle"]:not([data-tape="list"]) > .pane.candle, html[data-layout^="phone"] main[data-tab="flow"] .pane.cvd:not([hidden]),
+html[data-layout^="phone"] main[data-tab="candle"][data-tape="list"] .pane.cvd:not([hidden]) { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; order: 0; }
+/* The Book held upright fills the area as the Tape and the Flow do (it keeps its place beside the map held sideways): twice the price rows. */
+html[data-layout="phone"] main[data-tab="book"] { display: flex; flex-direction: column; }
+html[data-layout="phone"] main[data-tab="book"] .pane.heat, html[data-layout="phone"] main[data-tab="book"] > .dock-grip { display: none; }
+html[data-layout="phone"]:has(main[data-tab="book"]) .toolbar .tb-time { display: none; }
+html[data-layout="phone"] main[data-tab="book"] .pane.ladder:not([hidden]) { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; order: 0; }
 /* The tab already says "Tape": its header is the readout and help on one slim row (its choices are in Settings). */
 html[data-layout^="phone"] .pane.candle .pane-head strong { display: none; }
-html[data-layout^="phone"] .pane.candle .pane-head { flex-wrap: nowrap; min-height: 34px; column-gap: 6px; }
+html[data-layout^="phone"] .pane.candle .pane-head { flex-wrap: nowrap; min-height: 0; column-gap: 6px; }
 html[data-layout^="phone"] .pane.candle .pane-head .readout { order: 0; flex: 1 1 auto; padding-bottom: 0; }
 html[data-layout^="phone"] .pane.candle .pane-head button.help { order: 1; flex: none; }
 .candle-body { position: relative; flex: 1 1 0; min-height: 0; overflow: hidden; background: var(--bg); }
@@ -261,12 +424,13 @@ html[data-layout="phone-landscape"] main:not([data-tab="map"]) > .dock-grip { di
 html[data-layout="phone-landscape"] .dock-grip i { width: 4px; height: 40px; }
 html[data-layout="phone-landscape"] .dock-grip.active i { width: 4px; height: 56px; }
 html[data-layout="phone-landscape"] .dock-grip::before { inset: 0 -12px; }
-html[data-layout="phone-landscape"] main[data-tab="flow"] .pane.cvd:not([hidden]),
 html[data-layout="phone-landscape"] main[data-tab="book"] .pane.ladder:not([hidden]),
 html[data-layout="phone-landscape"] main[data-tab="depth"] .pane.depth:not([hidden]),
 html[data-layout="phone-landscape"] main[data-tab="oi"] .pane.oi:not([hidden]),
-html[data-layout="phone-landscape"] main[data-tab="lt"] .pane.lt:not([hidden]),
-html[data-layout="phone-landscape"] main[data-tab="stats"] .pane.bars:not([hidden]) { display: flex; grid-column: 3; grid-row: 1; flex: none !important; }
+html[data-layout="phone-landscape"] main[data-tab="delta"] .pane.delta:not([hidden]),
+html[data-layout="phone-landscape"] main[data-tab="ls"] .pane.ls:not([hidden]),
+html[data-layout="phone-landscape"] main[data-tab="stats"] .pane.bars:not([hidden]),
+html[data-layout="phone-landscape"] main[data-tab="script"] .pane.script:not([hidden]) { display: flex; grid-column: 3; grid-row: 1; flex: none !important; }
 html[data-layout="phone-landscape"] .dock { grid-column: 2; grid-row: 2; flex-direction: column; justify-content: flex-start; width: 60px; border-top: 0; border-left: 1px solid var(--line); padding-right: env(safe-area-inset-right); overflow-y: auto; }
 html[data-layout="phone-landscape"] .dock-tab { flex: 0 0 auto; min-height: 56px; box-shadow: none; }
 /* Ten tabs do not fit the rail of a short screen, which scrolls: a shade at its foot (and at its head once it has scrolled) says there are more,
@@ -279,40 +443,119 @@ html[data-layout="phone-landscape"] .dock {
     linear-gradient(transparent, color-mix(in srgb, var(--text) 20%, transparent)) 0 100% / 100% 12px no-repeat scroll,
     var(--panel);
 }
-html[data-layout="phone-landscape"] .dock-tab.on { box-shadow: inset -3px 0 0 var(--ui); }
-/* The Candle tab fills the area on its side too: not the grid of map, handle and pane above. */
-html[data-layout="phone-landscape"] main[data-tab="candle"] { display: flex; flex-direction: column; }
-html[data-layout="phone-landscape"] main[data-tab="candle"] > .dock-grip { display: none; }
+/* The Tape and the Flow fill the area on their side too: not the grid of map, handle and pane above. */
+html[data-layout="phone-landscape"] main:is([data-tab="candle"], [data-tab="flow"]) { display: flex; flex-direction: column; }
+html[data-layout="phone-landscape"] main:is([data-tab="candle"], [data-tab="flow"]) > .dock-grip { display: none; }
 
-/* The headers of the panes. */
-html[data-layout^="phone"] .pane-head { min-height: 42px; padding: 3px 8px 3px 12px; gap: 2px 8px; }
+/* The headers of the panes, every tab alike (Karl, 2026-11-02: the "?" a small box beside large keys, each tab's edges and heights its own).
+   One height for every control in a header (--ph-ctl-h: a finger's, less held sideways, where there is no height to spare), one size for
+   every key in it, the "?" among them (--ph-key-w), and the bar's own edge (--ph-edge), so that a header's first and last controls stand
+   under the bar's. */
+html[data-layout="phone"] { --ph-ctl-h: 36px; --ph-key-w: 40px; --ph-edge: 10px; }
+html[data-layout="phone-landscape"] { --ph-ctl-h: 32px; --ph-key-w: 38px; --ph-edge: 10px; }
+html[data-layout^="phone"] .pane-head { min-height: 42px; padding: 3px var(--ph-edge); gap: 2px 8px; }
 html[data-layout^="phone"] .pane-head strong { font-size: 13px; }
-/* The flow column's span buttons become a menu on a phone. */
-html[data-layout^="phone"] .pane.cvd .cvd-seg { display: none; }
-html[data-layout^="phone"] .pane.cvd .cvd-span-select { display: inline-block; }
+/* The Flow view (panes/cvd-pane.ts, Karl 2026-10-26). The tab already says "Flow", so its header is the spans as chips across the width, the
+   settings and the help, and under them one line that reads what the lines hold where a finger points: the time, the price and each kind's
+   running delta in the colours of the lines. The map's own span is not among the chips: the view fills the area, with no map to follow. */
+.pane.cvd .pane-head .readout { display: none; }
+html[data-layout^="phone"] .pane.cvd .pane-head { flex-wrap: wrap; gap: 6px 8px; padding: 6px var(--ph-edge) 0; }
+html[data-layout^="phone"] .pane.cvd .pane-head strong, html[data-layout^="phone"] .pane.cvd .cvd-span-select, html[data-layout^="phone"] .pane.cvd .cvd-seg button[data-span="map"] { display: none; }
+html[data-layout^="phone"] .pane.cvd .cvd-seg { display: flex; order: 0; flex: 1 1 0; min-width: 0; }
+html[data-layout^="phone"] .pane.cvd .cvd-seg button { flex: 1 1 0; min-width: 0; min-height: var(--ph-ctl-h); padding: 0 2px; font-size: 14px; }
+html[data-layout^="phone"] .pane.cvd .pane-head .cvd-gear { order: 1; margin-left: 0; width: var(--ph-key-w); min-height: var(--ph-ctl-h); padding: 0; display: inline-grid; place-items: center; }
+html[data-layout^="phone"] .pane.cvd .pane-head button.help { order: 2; }
+html[data-layout^="phone"] .pane.cvd .pane-head .readout { display: block; order: 9; flex: 1 0 100%; font-size: 13px; padding: 2px 2px 5px; font-variant-numeric: tabular-nums; }
+/* One view to a tab on a phone (2026-11-14): the Flow tab shows the lines and the Tape tab the list (`CvdPane.phoneView`), so the column's
+   view tabs go (the Flow tab gains their row). The Tape's first row keeps its name before the settings and the help; its menus are the row
+   under it (one row does not fit at 360 px in Italian or Turkish). The readout is the flow lines'. */
+html[data-layout^="phone"] .pane.cvd .pane-head strong.cvd-views { display: none; }
+.cvd-phone-title { display: none; }
+html[data-layout^="phone"] .pane.cvd[data-view="trades"] .pane-head .cvd-phone-title { display: block; order: 0; flex: 1 1 0; min-width: 0; align-self: center; padding-left: 2px; font-size: 16px; font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+html[data-layout^="phone"] .pane.cvd .pane-head .readout[hidden], html[data-layout^="phone"] .pane.cvd .cvd-seg[hidden] { display: none; }
+/* Trades' controls at touch size: its menus at 16 px (iOS zooms the page into a smaller one) and a resume key a thumb can hit. */
+html[data-layout^="phone"] .trades-bar { padding: 4px var(--ph-edge) 6px; font-size: 13px; }
+html[data-layout^="phone"] .trades-unit, html[data-layout^="phone"] .trades-floor { font-size: 16px; min-height: var(--ph-ctl-h); padding: 0 8px; }
+html[data-layout^="phone"] .trades-resume { padding: 8px 18px; font-size: 14px; bottom: 14px; }
+html[data-layout^="phone"] .trades-inspector { font-size: 14px; }
+html[data-layout^="phone"] .pane.cvd .readout b { color: var(--text); font-weight: 650; }
+html[data-layout^="phone"] .pane.cvd .readout .sp b { color: var(--cvd-spot); }
+html[data-layout^="phone"] .pane.cvd .readout .pp b { color: var(--cvd-perp); }
+html[data-layout^="phone"] .pane.cvd .readout .sp, html[data-layout^="phone"] .pane.cvd .readout .pp { margin-left: 6px; }
+html[data-layout^="phone"] .pane.cvd .readout .when { color: var(--muted); margin-right: 2px; }
+html[data-layout^="phone"] .pane.cvd .readout .since { color: var(--muted); margin-left: 8px; font-size: 11.5px; }
+/* Held sideways there is the width to put the line on the row of the chips, and no height to spare. */
+html[data-layout="phone-landscape"] .pane.cvd .pane-head { flex-wrap: nowrap; align-items: center; padding: 4px var(--ph-edge); }
+html[data-layout="phone-landscape"] .pane.cvd .cvd-seg { flex: 0 0 min(340px, 46%); }
+html[data-layout="phone-landscape"] .pane.cvd .pane-head .readout { order: 1; flex: 1 1 0; padding: 0 4px; }
+html[data-layout="phone-landscape"] .pane.cvd .pane-head .cvd-gear { order: 2; }
 html[data-layout^="phone"] .pane-head .readout { order: 9; flex: 1 0 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; padding-bottom: 3px; }
 /* A control's name is a small caption above it: there is no room beside it, and "Auto · 100" alone does not say what it sets. */
 html[data-layout^="phone"] .pane-head .ctl { display: flex; flex-direction: column; align-items: stretch; gap: 1px; font-size: 9.5px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; line-height: 1.1; }
 html[data-layout^="phone"] .pane-head .ctl select { font-size: 14px; font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--text); }
 html[data-layout^="phone"] .pane-head .ctl:has(input[type=checkbox]) { flex-direction: row; align-items: center; gap: 6px; font-size: 12px; font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--text); }
 html[data-layout^="phone"] .pane-head .ctl input[type=checkbox] { width: 20px; height: 20px; margin: 0; }
-html[data-layout^="phone"] .pane-head :is(select, button:not(.help)) { font-size: 14px; min-height: 32px; padding: 0 8px; border-radius: var(--radius); }
-html[data-layout^="phone"] .pane-head button.help { width: 22px; height: 22px; margin: 0 2px; font-size: 12px; line-height: 20px; }
+html[data-layout^="phone"] .pane-head :is(select, button:not(.help)) { font-size: 14px; min-height: var(--ph-ctl-h); padding: 0 8px; border-radius: var(--radius); }
+/* The "?" is a key like the others, not a small box beside them. */
+html[data-layout^="phone"] :is(.pane-head, .liq-head) button.help { box-sizing: border-box; width: var(--ph-key-w); height: var(--ph-ctl-h); min-height: 0; margin: 0; padding: 0; font-size: 0; line-height: 0; }
+/* A "?" right after the title goes to the end of the title's line, where it is on every tab (the controls under it, when they do not fit beside it). */
+html[data-layout^="phone"] .pane-head:not(.tuned) > strong + button.help { margin-left: auto; }
+/* It is a key of full size: its touch area is the key itself (the small "?" elsewhere reaches 9 px around it, here over its neighbour). */
+html[data-layout^="phone"] :is(.pane-head, .liq-head) button.help::after { inset: 0; }
 html[data-layout^="phone"] .pane-head .ctl .size-ctl .size-value { width: 76px; min-height: 32px; font-size: 16px; font-weight: 400; letter-spacing: 0; text-transform: none; }
 html[data-layout^="phone"] .pane-head .ctl .size-ctl .size-menu { width: 30px; padding: 0 2px; }
 /* The Order Book's own header: the tab already says "Book", and its choices wrap onto the rows their words need (five side by side cut every value). */
-html[data-layout^="phone"] .pane.ladder .pane-head { flex-wrap: wrap; padding-left: 8px; gap: 4px 6px; }
+html[data-layout^="phone"] .pane.ladder .pane-head { flex-wrap: wrap; gap: 4px 6px; }
 html[data-layout^="phone"] .pane.ladder .pane-head strong, html[data-layout^="phone"] .pane.ladder .recenter-btn { display: none; }
-html[data-layout^="phone"] .pane.ladder .pane-head .ctl { flex: 1 1 auto; min-width: 0; margin-left: 0; }
+/* With no map above it the Book has the crosshair of the bar's own timeframes row in its header: it brings the book back to the price. */
+html[data-layout="phone"] .pane.ladder .pane-head .recenter-btn { display: inline-flex; align-items: center; justify-content: center; order: 4; flex: none; width: var(--ph-key-w); min-height: var(--ph-ctl-h); padding: 0; margin: 0; font-size: 0; align-self: flex-end; }
+html[data-layout="phone"] .pane.ladder .pane-head .recenter-btn::before { content: ""; width: 20px; height: 20px; background: currentColor;
+  -webkit-mask: var(--icon-recenter) center / contain no-repeat; mask: var(--icon-recenter) center / contain no-repeat; }
+html[data-layout^="phone"] .pane.ladder .pane-head .ctl { flex: 1 1 0; min-width: 0; margin-left: 0; }
 html[data-layout^="phone"] .pane-head .ctl[hidden] { display: none; }
 html[data-layout^="phone"] .pane.ladder .pane-head .ctl select { width: 100%; min-width: 0; text-overflow: ellipsis; padding: 0 2px 0 8px; }
 /* Narrow ladder (a portrait phone, or the half of a landscape one): the three choices get the room the help mark would take, and a size down. */
 html[data-layout^="phone"] .pane.ladder { container: ladder / inline-size; }
 @container ladder (max-width: 420px) {
-  .pane-head { gap: 4px; padding-left: 6px; padding-right: 6px; }
+  .pane-head { gap: 4px; }
   .pane-head button.help { display: none; }
   .pane-head .ctl select { font-size: 13px; padding: 0 2px 0 6px; }
 }
+
+/* ---- one slim row for a pane's header (pane-tune.ts, Karl 2026-10-26) --------------------------------------------------------------- */
+/* The title, the choice made all the time and a key at the end of the row; the other controls wait in the sheet the key opens. */
+.tune-btn { display: none; }
+html[data-layout^="phone"] .pane-head.tuned .rest { display: none; }
+/* A group whose every control waits behind the key is no gap in the row. */
+html[data-layout^="phone"] .pane-head.tuned .ctl-group:not(:has(> :not(.rest))) { display: none; }
+html[data-layout^="phone"] .pane-head.tuned > .tune-btn { display: inline-grid; place-items: center; order: 5; flex: none; width: var(--ph-key-w); min-height: var(--ph-ctl-h); padding: 0; margin-left: auto; align-self: flex-end; }
+html[data-layout^="phone"] .pane-head.tuned > .tune-btn.open { background: color-mix(in srgb, var(--ui) 15%, var(--panel)); border-color: var(--ui); }
+html[data-layout^="phone"] .pane-head.tuned > button.help { order: 6; align-self: flex-end; }
+/* The keys at the foot of the row stand clear of what is drawn under it (Karl, 2026-11-02: the Book's keys touched its legend), by the gap
+   the Flow tab's keys keep above its figures. */
+html[data-layout^="phone"] .pane-head.tuned { align-items: flex-end; padding-bottom: 6px; }
+html[data-layout^="phone"] .pane-head.tuned > strong { align-self: center; }
+/* In the sheet each control is a row: its name at the left, the control at the right, a finger's height. */
+.sheet .tune-body > .ctl { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 14px; min-height: 54px; border-top: 1px solid var(--line); color: var(--text); font-size: 15px; font-weight: 400; letter-spacing: 0; text-transform: none; }
+.sheet .tune-body > .ctl:first-child { border-top: 0; }
+.sheet .tune-body > .ctl > select { flex: 0 1 62%; min-width: 0; }
+.sheet .tune-body > .ctl input[type=checkbox] { order: 2; width: 26px; height: 26px; margin: 0; flex: none; }
+.sheet .tune-body > .ctl .size-ctl { flex: 0 0 auto; width: 188px; }
+.sheet .tune-body > .ctl .size-ctl .size-value { width: auto; flex: 1 1 auto; min-height: var(--tap); font-size: 16px; }
+.sheet .tune-body > .ctl .size-ctl .size-menu { width: 44px; min-height: var(--tap); }
+.sheet .tune-body > button { width: 100%; margin-top: 8px; }
+.sheet .tune-body > [hidden] { display: none; }
+
+/* The Liquidity Tracker's header: the tab says "LT", so the title goes, and the half-lives are chips, one tap each. */
+.lt-halves { display: none; }
+html[data-layout^="phone"] .pane.lt .pane-head .lt-halves { display: flex; flex: 1 1 0; min-width: 0; margin: 0; }
+html[data-layout^="phone"] .pane.lt .pane-head > strong { display: none; }
+html[data-layout^="phone"] .pane.lt .lt-halves .cap { display: block; }
+html[data-layout^="phone"] .pane.lt .lt-halves .seg { display: flex; }
+html[data-layout^="phone"] .pane.lt .lt-halves .seg button { flex: 1 1 0; min-width: 0; min-height: var(--ph-ctl-h); padding: 0 2px; font-size: 14px; }
+html[data-layout^="phone"] .pane.lt .lt-halves .seg button.far:not(.on) { display: none; }
+html[data-layout^="phone"] .pane.lt .lt-halves .seg button.on { background: var(--text); border-color: var(--text); color: var(--panel); font-weight: 650; }
+/* Where there is room (a phone held sideways) the half-life says its name beside the chips. */
 
 /* ---- a touch screen that keeps the desktop's arrangement (a tablet held sideways): the same panes with fingers' room --------------- */
 @media (pointer: coarse) {
@@ -323,8 +566,10 @@ html[data-layout^="phone"] .pane.ladder { container: ladder / inline-size; }
   html[data-layout="desktop"] .grip { padding: 8px 6px; margin: -8px -2px -8px -8px; }
   html[data-layout="desktop"] .pane-head > .grip { width: 14px; height: 21px; background-size: 7px 7px; }
   html[data-layout="desktop"] .pane-head { min-height: 42px; gap: 4px 10px; }
+  html[data-layout="desktop"] .pane-head.side-head { --head-row-gap: 4px; }
   html[data-layout="desktop"] .pane-head :is(select, button:not(.help)) { font-size: 13px; min-height: 32px; padding: 0 10px; border-radius: var(--radius); }
-  html[data-layout="desktop"] .pane-head button.help { width: 24px; height: 24px; font-size: 12px; line-height: 22px; }
+  html[data-layout="desktop"] .pane-head button.help { width: 24px; height: 24px; font-size: 0; line-height: 0; }
+  html[data-layout="desktop"] .pane .pane-head { --head-key: 32px; }
   html[data-layout="desktop"] .pane-head .ctl input[type=checkbox] { width: 20px; height: 20px; }
 }
 
@@ -348,6 +593,8 @@ html[data-layout^="phone"] .pane.ladder { container: ladder / inline-size; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .sheet, .sheet-scrim { transition: none; }
+  .sheet, .sheet-scrim, .dock-tab svg { transition: none; }
+  .dock-ink.slide { transition: none !important; }
+  html[data-layout^="phone"] main .pane { animation: none !important; }
   html[data-bar="compact"] .panel, html[data-bar="compact"] .menu { animation: none; }
 }

@@ -1,10 +1,31 @@
 import { language, t } from './i18n.ts';
 const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
-export const usd = (value: number): string => !Number.isFinite(value) ? '–' : value === 0 ? '0' : Math.abs(value) < 1000 ? value.toFixed(0) : compact.format(value);
+const UNITS = ['K', 'M', 'B', 'T'] as const;
+/**
+ * `compact.format` for |value| >= 1000 without Intl (a list paints hundreds of amounts a second, and Intl's compact form costs several
+ * microseconds each): the value in thousands, millions, billions or trillions to one decimal, rounded half away from zero, "1.0" written
+ * "1", and a value that rounds up to 1,000 of a unit written in the next. Where the tenths sit within a hair of a tie, the division by a
+ * power of ten can round where Intl's exact decimal would not: those few go to Intl. Checked against Intl in tests/app-format-fast.test.mts.
+ */
+export function compactUsd(value: number): string {
+  const a = Math.abs(value);
+  let u = a >= 1e12 ? 3 : a >= 1e9 ? 2 : a >= 1e6 ? 1 : 0;
+  let tenths = a / 10 ** (3 * u + 2);
+  if (Math.abs(tenths - Math.floor(tenths) - 0.5) < 1e-7) return compact.format(value);
+  let r = Math.round(tenths);
+  if (r >= 10_000 && u < 3) {
+    u++; tenths = a / 10 ** (3 * u + 2);
+    if (Math.abs(tenths - Math.floor(tenths) - 0.5) < 1e-7) return compact.format(value);
+    r = Math.round(tenths);
+  }
+  const whole = Math.floor(r / 10), d = r - whole * 10;
+  return `${value < 0 ? '-' : ''}${whole}${d ? `.${d}` : ''}${UNITS[u]}`;
+}
+export const usd = (value: number): string => !Number.isFinite(value) ? '–' : value === 0 ? '0' : Math.abs(value) < 1000 ? value.toFixed(0) : compactUsd(value);
 
 /** One formatter per number of decimals: `toLocaleString` builds a new Intl object on every call, which is slow enough to show when a frame prints hundreds of prices. */
 const fixed: Intl.NumberFormat[] = [];
-const fixedFormat = (decimals: number): Intl.NumberFormat => fixed[decimals] ??= new Intl.NumberFormat('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+export const fixedFormat = (decimals: number): Intl.NumberFormat => fixed[decimals] ??= new Intl.NumberFormat('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 
 /** The decimals a step is written with (0.25 has two, 2.5 one, 25 none), up to twelve. */
 export function stepDecimals(step: number): number {
@@ -14,13 +35,16 @@ export function stepDecimals(step: number): number {
   return k;
 }
 
-export function price(value: number, step = 0): string {
-  if (!Number.isFinite(value)) return '–';
+/** The decimals `price` writes a value with. */
+export function priceDecimals(value: number, step = 0): number {
   // As many decimals as the step is written with, up to twelve: a coin priced in millionths of a dollar (PEPE) moves in billionths and
   // less, and a step of 0.25 needs two however coarse it is.
-  const decimals = step > 0 ? Math.min(12, Math.max(0, Math.ceil(-Math.log10(step) - 1e-9), stepDecimals(step)))
+  return step > 0 ? Math.min(12, Math.max(0, Math.ceil(-Math.log10(step) - 1e-9), stepDecimals(step)))
     : value >= 1000 ? 1 : value >= 1 ? 2 : value > 0 ? Math.min(10, Math.max(5, Math.ceil(-Math.log10(value)) + 3)) : 5;
-  return fixedFormat(decimals).format(value);
+}
+export function price(value: number, step = 0): string {
+  if (!Number.isFinite(value)) return '–';
+  return fixedFormat(priceDecimals(value, step)).format(value);
 }
 const two = (n: number) => String(n).padStart(2, '0');
 
@@ -58,6 +82,7 @@ export function zoneName(which: TimeZone = zone, at = Date.now()): string {
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
 const dayFormats = new Map<string, Intl.DateTimeFormat>();
+const monthFormats = new Map<string, Intl.DateTimeFormat>();
 /** "Oct 5" in English, and the date as the language writes it ("5. Okt.", "10月5日") in the others; `wall` is a time moved onto the zone's clock. */
 function monthDay(wall: Date): string {
   const code = language();
@@ -71,12 +96,91 @@ export function clock(t: number, withDate = false): string {
   const time = `${two(d.getUTCHours())}:${two(d.getUTCMinutes())}`;
   return withDate ? `${monthDay(d)} ${time}` : time;
 }
+const yearFormats = new Map<string, Intl.DateTimeFormat>();
+/**
+ * A moment as an anchor gives it, on the page's clock: "Nov 4 14:23" this year, "Nov 4, 2024 14:23" in another (an anchor reaches ten years
+ * back, and a date without its year would be read as this year's).
+ */
+export function clockYear(t: number, now = Date.now()): string {
+  const d = onWall(t);
+  if (d.getUTCFullYear() === onWall(now).getUTCFullYear()) return clock(t, true);
+  const code = language(), time = `${two(d.getUTCHours())}:${two(d.getUTCMinutes())}`;
+  if (code === 'en') return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()} ${time}`;
+  let format = yearFormats.get(code);
+  if (!format) { format = new Intl.DateTimeFormat(code, { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' }); yearFormats.set(code, format); }
+  return `${format.format(d)} ${time}`;
+}
+/**
+ * A span's two ends on the page's clock, then the zone it writes in ("Nov 12 16:00 – Nov 13 14:00 UTC"): the first with its date, and its year
+ * when that is not this year's; the second with its date when it falls on another day (a minute before the end decides) and its year when it
+ * is written in another year than the first. A Range selection can reach a year back, and its title named neither the year nor the zone.
+ */
+export function spanClock(t0: number, t1: number, now = Date.now()): string {
+  const day = (t: number): string => clock(t, true).slice(0, -6);
+  // The year of the end as it is written (an end at New Year's midnight is written as Jan 1, so it carries its year), and the zone's name at
+  // the span's start (a span in the other half of the year is on that half's offset, which a name taken now would misname).
+  const first = clockYear(t0, now), second = onWall(t1).getUTCFullYear() !== onWall(t0).getUTCFullYear() ? clockYear(t1, t0) : clock(t1, day(t1 - 1) !== day(t0));
+  return `${first} – ${second} ${zoneName(undefined, t0)}`;
+}
+/** A moment as a date field and a time field show it, on the page's clock: "2026-11-04" and "14:23". */
+export function wallFields(t: number): { date: string; time: string } {
+  const iso = onWall(t).toISOString();
+  return { date: iso.slice(0, 10), time: iso.slice(11, 16) };
+}
+/**
+ * The moment a date field and a time field name on the page's clock ("2026-11-04" and "14:23"; an empty time is midnight), as the chart's time
+ * axis reads (a user, 2026-11-10: "so i can enter a date instead of clicking"); 'date' for a date that does not exist (Feb 30 is refused, not
+ * rolled on to March), 'time' for one that cannot be read or that a clock change skips (02:30 the night the clocks go forward: refused, not
+ * moved to 03:30; Sol, review 2026-11-11).
+ */
+/**
+ * The moment a date field names: `own` itself while the fields still say it (in the hour a clock change repeats, one wall time names two moments
+ * and reading it again gave the first: an anchor at the second 01:30 moved an hour back when its editor was confirmed unchanged; Sol, review
+ * 2026-11-11), else the fields read as `fromWallFields` does (a time typed new in that hour takes the first, as a clock's own reading does).
+ */
+export function typedMoment(own: number | null | undefined, date: string, time: string): number | 'date' | 'time' {
+  if (own != null) { const w = wallFields(own); if (w.date === date && w.time === time) return own; }
+  return fromWallFields(date, time);
+}
+
+export function fromWallFields(date: string, time: string): number | 'date' | 'time' {
+  const d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date), h = time === '' ? ['', '00', '00'] : /^(\d{2}):(\d{2})$/.exec(time);
+  if (!d) return 'date';
+  if (!h) return 'time';
+  const y = Number(d[1]), mo = Number(d[2]) - 1, day = Number(d[3]), hh = Number(h[1]), mi = Number(h[2]);
+  if (hh > 23 || mi > 59) return 'time';
+  const t = zone === 'utc' ? Date.UTC(y, mo, day, hh, mi) : new Date(y, mo, day, hh, mi).getTime();
+  if (!Number.isFinite(t)) return 'date';
+  const back = onWall(t);
+  if (back.getUTCFullYear() !== y || back.getUTCMonth() !== mo || back.getUTCDate() !== day) return 'date';
+  return back.getUTCHours() === hh && back.getUTCMinutes() === mi ? t : 'time';
+}
+/** A fixed anchor's day alone ("Nov 9"; "Nov 9, 2024" in another year), for its tag on the price axis, which has room for little. */
+export function anchorDay(t: number, now = Date.now()): string { const s = clockYear(t, now); return s.slice(0, s.lastIndexOf(' ')); }
+/** A fixed anchor's date as its line is named on the chart ("Nov 9 06:00"; "Nov 9" at midnight; with its year in another year). */
+export function anchorDate(t: number, now = Date.now()): string {
+  const s = clockYear(t, now), d = onWall(t);
+  return d.getUTCHours() === 0 && d.getUTCMinutes() === 0 ? s.slice(0, s.lastIndexOf(' ')) : s;
+}
+/** The time with its seconds ("13:42:05") on the page's clock, for a window of minutes, where the minute alone says too little. */
+export function clockSeconds(t: number): string {
+  const d = onWall(t);
+  return `${two(d.getUTCHours())}:${two(d.getUTCMinutes())}:${two(d.getUTCSeconds())}`;
+}
 
 /**
  * A time-axis tick's label: a tick on a midnight of the zone's clock is its date alone ("Oct 7", never "Oct 7 00:00": zoomed out to days, every
- * tick is one); elsewhere the time, with the date before it on a tick that marks a new day (`marksDay`).
+ * tick is one); elsewhere the time, with the date before it on a tick that marks a new day (`marksDay`). Calendar ticks show a month
+ * (with its year when `marksDay`) or a year alone.
  */
-export function tickLabel(t: number, marksDay: boolean): string {
+export function tickLabel(t: number, marksDay: boolean, unit: 'time' | 'month' | 'year' = 'time'): string {
+  if (unit === 'year') return String(onWall(t).getUTCFullYear());
+  if (unit === 'month') {
+    const code = language(), key = code + '|' + marksDay;
+    let format = monthFormats.get(key);
+    if (!format) { format = new Intl.DateTimeFormat(code, { month: 'short', ...(marksDay ? { year: 'numeric' } : {}), timeZone: 'UTC' }); monthFormats.set(key, format); }
+    return format.format(onWall(t));
+  }
   if ((t + zoneOffsetMs(t)) % DAY === 0) return monthDay(onWall(t));
   return clock(t, marksDay);
 }

@@ -1,22 +1,29 @@
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { createLocalServer } from '../http.mts';
 import { MAX_CROSSED_BP, crossedByBp, valueBook, withFar, type ValuedBook } from './levels.mts';
 import { FAR_STALE_MS, FarPoller, farSource, freshFar, type FarBook } from '../../shared/far-book.ts';
 import { OiSampler, oiHistoryWriter } from './oi-sampler.mts';
 import { LS_METRICS, LongShortCache, type LsMetric } from '../../shared/long-short.ts';
-import { webGet } from '../../shared/history.ts';
+import { SqliteLsStore } from './ls-store.mts';
+import { webGet, type Fetcher } from '../../shared/history.ts';
+import { PriceHistoryCache, PRICE_QUERY_BARS, priceListing, priceTimeframeMs } from '../../shared/price-history.ts';
+import { BTC } from '../../shared/coins.ts';
+import type { OiEvent as OiPushItem } from '../../shared/connector.ts';
 import { TOUCH_HINT_MS } from '../../shared/levels.ts';
 import { COLUMNS_PER_REQUEST } from '../../shared/columns.ts';
-import { DepthRecorder, COLUMN_MS, HOT_MS, SAMPLE_MS, STALE_MS } from './recorder.mts';
+import { DepthRecorder, COLUMN_MS, COLD_CACHE_BINS, HOT_MS, MERGED_CACHE_BINS, RETENTION_MS, SAMPLE_MS, STALE_MS } from './recorder.mts';
 import { SqliteColumnStore } from './store.mts';
-import { encodeColumns, encodeLevels, encodeTape } from './wire.mts';
+import { encodeColumns, encodeLevels, encodeLt, encodeTape } from './wire.mts';
+import { validHalf } from '../../shared/lt-windows.ts';
 import { TAPE_BATCH_MAX, packTape } from '../../shared/tape.ts';
 import type { MarketOrder } from '../../shared/orders.ts';
 import { FootprintRecorder } from './footprint.mts';
-import { MAX_CUT_USD, MAX_CUTS, MAX_PROFILE_INSTRUMENTS, MAX_RANGE_INSTRUMENTS, MAX_SIZES_MINUTES, MAX_SIZES_WINDOWS, MAX_VALUE_AREA_SPAN_MS, MAX_VALUE_AREA_WINDOWS, parseCuts, type TradeLike } from '../../shared/footprint.ts';
+import { inverseOiId, oiInstrument, oiProfileOf, type OiSeries } from '../../shared/oi-profile.ts';
+import { MAX_CUT_USD, MAX_CUTS, MAX_PROFILE_INSTRUMENTS, MAX_PROFILE_SPAN_MS, MAX_RANGE_INSTRUMENTS, MAX_SIZES_MINUTES, MAX_SIZES_WINDOWS, MAX_VALUE_AREA_SPAN_MS, MAX_VALUE_AREA_WINDOWS, parseCuts, type TradeLike } from '../../shared/footprint.ts';
 import { RecordedBefore } from '../../shared/restart.ts';
 import { MAX_COVERAGE_INSTRUMENTS, MAX_COVERAGE_SPAN_MS, TradeCoverage, coverageWindow, depthAnswer, recordedMinutes, tradeAnswer, type CoverageMetric } from './coverage.mts';
 import { venueForFeedId } from '../../core/venue-status.mts';
@@ -29,18 +36,36 @@ import { AbsorptionRecorder, GROUP_FLOOR_USD, GROUPS_PER_MINUTE, ABSORPTION_WIND
 import { ExtraVenues, RECOMMENDED_EXTRA_VENUES } from './venues.mts';
 import { CoinList } from './coin-list.mts';
 import { guardRequest, guardUpgrade } from '../request-guard.mts';
+import { sendVerdict, type FrameKind } from './backpressure.mts';
 import { TIMEFRAMES, aggregateCandles, aggregateOi, quoteRows, timeframeMs, withLiveOi, type CandleRow, type OiRow } from './series.mts';
+import { FullDepthBooks, ownedMarket, type FullDepthSpec } from './full-depth.mts';
+import type { BookConnector, Market } from '../../shared/connector.ts';
 
 type App = ReturnType<typeof createLocalServer>;
 /** `oiSampling`: read the open interest of the venues the feed manager does not (oi-sampler.mts); a live server only, never a test. */
-export interface V2Options { dataDir: string; liveMs?: number; persist?: boolean; heartbeatMs?: number; oiSampling?: boolean }
+/** `fullDepthMake`: how the full-depth owner makes its connector (full-depth.mts; tests give a fake that opens no socket). */
+export interface V2Options { dataDir: string; liveMs?: number; persist?: boolean; heartbeatMs?: number; oiSampling?: boolean; priceHistoryGet?: Fetcher; fullDepthMake?: (market: Market) => BookConnector }
 export interface V2Handle {
   recorder: DepthRecorder; footprint: FootprintRecorder; prints: PrintStream; liquidations: LiquidationStream; flow: FlowRecorder; absorption: AbsorptionRecorder; extra: ExtraVenues; close(): void; handle(req: IncomingMessage, res: ServerResponse): boolean;
   /** Venues (the part of an instrument id before the colon) whose book is being left off the map, with the reason. */
   degradedVenues(): Map<string, string>;
+  /** Where the feed manager's Bybit depth spec is read (main.mts): what the full-depth owner takes (full-depth.mts). */
+  setFullDepthSource(read: () => FullDepthSpec | null): void;
+  /** The state of each venue whose book the full-depth owner draws, for its chip in the order-book venue list. */
+  ownedBookStates(): Map<string, { state: string; detail: string | null }>;
 }
 
-const MAX_COLUMN_SPAN_MS = 8 * 24 * 3_600_000;
+const MAX_COLUMN_SPAN_MS = MAX_PROFILE_SPAN_MS;
+/** A tracker question names markets (a few dozen ids), so it may run longer than the other things a page says on the socket. */
+const LT_QUESTION_BYTES = 4_096, MAX_LT_INSTRUMENTS = 64;
+/** The stretch one frame of a tracker answer covers. */
+const LT_SLICE_MS = 24 * 3_600_000;
+/**
+ * How long a tracker question works before it lets the loop go. The server has one thread, and a page loading the map asks it for tens of megabytes of
+ * columns in 0.5-second steps: a question that let go after every market waited behind those steps 27 times for its first frame (47 s, measured on the
+ * restarted server, 2026-10-25), and one that answers from what memory and the kept hours hold needs only a few milliseconds a market.
+ */
+const LT_TURN_MS = 60;
 /** The stretch of prints one turn of the event loop fills the footprint's lists from (see `fillLists` below). */
 const FILL_STEP_MS = 10 * 60_000;
 /** The most flow history one request may ask for: what the recorder keeps in memory, and a few thousand seconds per instrument cost 8 bytes each. */
@@ -49,12 +74,24 @@ const MAX_FLOW_SPAN_MS = 36 * 3_600_000, MAX_FLOW_INSTRUMENTS = 40;
 const MAX_FLOW_MINUTES_SPAN_MS = 8 * 24 * 3_600_000;
 /** The most instruments one sizes question may name: it is answered whole, never in parts (the minutes two parts saw could not be told apart), and the flow recorder keeps at most 48. */
 const MAX_SIZES_INSTRUMENTS = 96;
-/** A client whose unsent backlog passes this is dropped rather than buffered without bound; levels frames are skipped past a lower mark. */
-const MAX_CLIENT_BACKLOG_BYTES = 16_000_000, LEVELS_SKIP_BYTES = 4_000_000;
-/** A client behind by this much skips trade-dust batches (drawing only: a skipped one leaves a short gap in the dust, nothing else). */
-const TAPE_SKIP_BYTES = 2_000_000;
 /** The live socket says something at least this often, so a client can tell a quiet server from a dead connection. */
 const HEARTBEAT_MS = 5_000;
+/**
+ * What the server's recorder keeps for the next question, in bins (12 bytes each): the six days of every book the store holds beyond memory
+ * (a day of BTC's 25 recorded markets was 5-7M bins on 2026-11-07, some 75 MB), and a week of merged windows at one step. With three days kept,
+ * every question reaching back a week read the other days from the store again: the Depth pane's candles, asked after the map had read them,
+ * took 8-14 s cold and 0.1 s warm (Research_Findings.md). At most some 700 MB, up to ~430 MB more than the recorder's own defaults: below
+ * 15 GiB of memory (a 16 GB machine reports 15.7-15.9 GiB), or of a container's limit, the server keeps those.
+ */
+const ROOMY = Math.min(os.totalmem(), process.constrainedMemory() || Infinity) >= 15 * 2 ** 30;
+const COLD_COLUMN_BINS = ROOMY ? 42_000_000 : COLD_CACHE_BINS, MERGED_COLUMN_BINS = ROOMY ? 16_000_000 : MERGED_CACHE_BINS;
+/**
+ * How long after starting the days the store holds beyond memory are read once for the Liquidity Tracker (`warmLt`): a few milliseconds at a time, so that the
+ * first question a page asks is answered as fast as the next (a week of every market is some six seconds of reading, 2026-10-24).
+ */
+const LT_WARM_AFTER_MS = 8_000;
+/** How long after starting the stored absorption hours are packed (`AbsorptionRecorder.warm`). */
+const ABSORPTION_WARM_AFTER_MS = 3_000;
 /** Books with at least this many raw levels are re-valued no more often than the interval below. */
 const DEEP_BOOK_LEVELS = 2_000, DEEP_BOOK_INTERVAL_MS = 1_000;
 /** A far book reader that has done nothing for this long while its book is live is replaced (a working one ticks every FAR_EVERY_MS). */
@@ -88,11 +125,11 @@ const BAD_CUTS = (floor: number): string => `cuts must be up to ${MAX_CUTS} size
 const BAD_SERIES = 'inst and a supported tf are required';
 
 /** Attach the v2 data plane (depth recorder, live WebSocket, series endpoints) to a running local server. */
-export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, heartbeatMs = HEARTBEAT_MS, oiSampling = false }: V2Options): V2Handle {
+export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, heartbeatMs = HEARTBEAT_MS, oiSampling = false, priceHistoryGet = webGet, fullDepthMake }: V2Options): V2Handle {
   let store: SqliteColumnStore | null = null;
   if (persist) { fs.mkdirSync(dataDir, { recursive: true }); store = new SqliteColumnStore(path.join(dataDir, 'depth-v2.sqlite')); }
-  // A day of columns in memory; older ones are read back from the store when a question reaches them.
-  const recorder = new DepthRecorder({ store, memoryMs: HOT_MS });
+  // A day of columns in memory; older ones are read back from the store when a question reaches them, and kept (COLD_COLUMN_BINS).
+  const recorder = new DepthRecorder({ store, memoryMs: HOT_MS, coldCacheBins: COLD_COLUMN_BINS, mergedCacheBins: MERGED_COLUMN_BINS });
   const defaults = process.env.HLM_DEFAULT_VENUES;
   // The coin list for the page's coin picker, rebuilt here daily (the server itself records BTC only).
   const coins = persist ? new CoinList(path.join(dataDir, 'coins.json'), path.join(process.cwd(), 'dist', 'coins.json')) : null;
@@ -130,6 +167,22 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
   /** Absorption candidates (see shared/absorption.ts): every fill the builder took, once each. */
   const absorption = new AbsorptionRecorder(persist ? path.join(dataDir, 'depth-v2.sqlite') : null);
   const detect = (taken: readonly TakenFill[]): void => { for (const f of taken) absorption.add(f.instrumentId, f.t, f.price, f.usd, f.side); };
+  // The stored hours are packed for the absorption column once the start's own work is done, so the page's first question does not read them.
+  const absorptionWarm = setTimeout(() => { void absorption.warm(); }, ABSORPTION_WARM_AFTER_MS);
+  // The days behind memory, newest first, six hours of one market at a time with the loop let go between (they stay in the recorder's cache for the questions).
+  const warmLt = async (): Promise<void> => {
+    const block = 6 * 3_600_000, newest = Math.floor((Date.now() - HOT_MS) / block) * block, oldest = Date.now() - RETENTION_MS;
+    for (let end = newest + block; end > oldest; end -= block) {
+      for (const id of [...recorder.steps.keys()]) {
+        if (closed) return;
+        try { recorder.queryLt(id, end - block, end, 3_600_000, 0); } catch (error) { console.error('v2 tracker warm-up:', error); return; }
+        await new Promise<void>(resolve => setTimeout(resolve, 4));
+      }
+    }
+  };
+  const ltWarm = setTimeout(() => { void warmLt(); }, LT_WARM_AFTER_MS);
+  ltWarm.unref();
+  absorptionWarm.unref();
   /** Every order completed since the last dust batch, for the clients that asked for it (`tapeClients`), at most a batch's worth. */
   let tapeOut: MarketOrder[] = [], tapeSeq = 0;
   const tapeClients = new WeakSet<WebSocket>();
@@ -152,6 +205,18 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
   extra.onTrade(takeTrade);
   // Exchanges the feed manager has depth for but no trade feed: their trades come from the browser engine's connectors (see flow-sources.mts).
   const flowSources = new FlowSources(takeTrade, undefined, undefined, takeLiquidation);
+  // The Bybit perpetual's full-depth book, with its trades and liquidations, from the page's own connector (full-depth.mts).
+  const fullDepth = new FullDepthBooks(takeTrade, takeLiquidation, fullDepthMake);
+  let fullDepthSource: () => FullDepthSpec | null = () => null;
+  /** Make, replace or stop the full-depth owner; the flow sources leave its venue's trades to it (stopped first, before it starts). */
+  const syncFullDepth = (): void => {
+    const spec = fullDepthSource();
+    // Owned only once the feed manager has accepted the market: its market row says a perpetual sized in coins, not inverse.
+    const row = spec ? marketOf(spec.instrumentId) : null;
+    const accepted = row !== null && row.marketType === 'perpetual' && row.quantityUnit === 'base' && row.inverse !== true;
+    if (accepted && ownedMarket(spec)) { flowSources.exclude('bybit', true); fullDepth.sync(spec); }
+    else { fullDepth.sync(null); flowSources.exclude('bybit', false); }
+  };
   /**
    * Whether each instrument's trade source is live now: the feed manager's trade feeds (`<venue>-trades`, by the venue its rows name), the
    * trade connectors run for venues it has depth for (FlowSources), and the connector venues. One with none is not recorded.
@@ -165,6 +230,8 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
       out.set(id, { live: mine.every(([, s]) => (s as { state?: unknown } | null)?.state === 'live'), lastData: success.length ? Math.min(...success) : now });
     }
     for (const [id, source] of flowSources.trades()) out.set(id, { live: source.live, lastData: source.lastData || now });
+    const owned = fullDepth.ownedId, ownedTrades = fullDepth.trades(now);
+    if (owned && ownedTrades) out.set(owned, ownedTrades);
     for (const v of extra.list()) if (v.enabled) out.set(v.instrumentId, { live: v.state === 'live', lastData: v.lastUpdate || now });
     return out;
   };
@@ -182,6 +249,17 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
   // Only a market the registry calls a perpetual (a spot book of a venue that has perpetuals too has no open interest).
   const perpetual = (id: string): boolean => (app.state.markets ?? []).some(m => String((m as { instrumentId?: unknown; id?: unknown }).instrumentId ?? (m as { id?: unknown }).id) === id && (m as { marketType?: unknown }).marketType === 'perpetual');
   const oiSampler = oiSampling ? new OiSampler((message, venue) => { app.applyMessage(message, venue); }, oiHistoryWriter(app.history)) : null;
+  // The sampler's per-venue outcomes (failures in a row, last error, the fast fallback mode) on the diagnostics route.
+  if (oiSampler) app.setOiSamplerStatus(() => oiSampler.status());
+  /**
+   * Bybit's and OKX's WebSocket OI feeds, by their feed ids: while one is not live its venue is read by the sampler every five seconds
+   * instead of once a minute (the WebSocket returns, the minute cadence does too).
+   */
+  const oiFeedIds = new Map<string, string>([['bybit', 'bybit-ticker'], ['okx', 'okx-oi']]);
+  const oiFastVenues = (): string[] => {
+    const statuses = app.state.feedStatuses ?? {};
+    return [...oiFeedIds.entries()].filter(([venue, id]) => String((statuses as Record<string, { state?: unknown }>)[id]?.state) !== 'live').map(([venue]) => venue);
+  };
   const farBooks = new Map<string, FarPoller>();
   const syncFar = (ids: readonly string[]): void => {
     const wanted = new Set<string>(), now = Date.now();
@@ -200,7 +278,31 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
   /** Instruments whose book is crossed (a feed fault), so they are valued as nothing rather than drawn as false walls. */
   const degraded = new Map<string, string>();
   let levelsDirty = true;
-  let lastSample = 0, lastPrune = 0, lastFlush = 0, lastBeat = 0, lastFlowPush = 0, lastSources = 0;
+  let lastSample = 0, lastFlush = 0, lastBeat = 0, lastFlowPush = 0, lastSources = 0;
+  // The first prune a minute after the start (then hourly), not in the first pass, which reads the last day back from the store; soon enough
+  // that a server restarted often still prunes.
+  let lastPrune = Date.now() - 59 * 60_000;
+  // Open-interest pushes. The reducer appends each reading to `state.oi` (a copy keeping the newest 20 000 rows, each row the same object),
+  // so a pass looks only at the rows after the last one it saw. Per instrument only the newest reading by its own time goes out, and only
+  // when it is newer than the last one sent: a socket reading and a REST one can land in either order. The first pass marks what is there.
+  let oiLastRow: unknown = undefined;
+  const oiSent = new Map<string, number>();
+  const oiTime = (row: { observationTimestamp?: unknown; sourceTimestamp?: unknown; receivedAt?: unknown }): number => Number(row.observationTimestamp ?? row.sourceTimestamp ?? row.receivedAt);
+  const newOi = (): OiPushItem[] => {
+    const rows = app.state.oi ?? [], first = oiLastRow === undefined;
+    let start = rows.length;
+    while (start > 0 && rows[start - 1] !== oiLastRow) start--;
+    oiLastRow = rows[rows.length - 1] ?? null;
+    const newest = new Map<string, OiPushItem>();
+    for (let i = start; i < rows.length; i++) {
+      const row = rows[i]!, id = String(row.instrumentId ?? ''), t = oiTime(row), base = Number(row.base);
+      if (!id || !(t > 0) || !(base > 0) || !Number.isFinite(base) || t <= (oiSent.get(id) ?? 0) || t <= (newest.get(id)?.t ?? 0)) continue;
+      const quote = Number(row.quote ?? NaN);
+      newest.set(id, { instrumentId: id, t, base, ...(quote > 0 && Number.isFinite(quote) ? { quote } : {}) });
+    }
+    for (const item of newest.values()) oiSent.set(item.instrumentId, item.t);
+    return first ? [] : [...newest.values()];
+  };
   let lastTick = '', lastLayers = '';
   /** Which books were on the map when the levels were last published, so one that ages out is published as gone. */
   let lastMembers = '';
@@ -210,8 +312,10 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
 
   const marketOf = (id: string) => app.state.markets?.find(m => (m.instrumentId ?? m.id) === id) ?? null;
   const refreshBooks = (now: number) => {
-    const live = new Set<string>();
+    const live = new Set<string>(), owned = fullDepth.ownedId;
     for (const [id, book] of Object.entries(app.state.books ?? {})) {
+      // The full-depth owner's instrument is valued from its own connector (`liveBooks`): the feed manager's shallower copy is not drawn.
+      if (id === owned) continue;
       live.add(id);
       // Every applied snapshot or delta builds a new book object (the state is never edited in place), so the object is the revision: a
       // key made of the stamp, the counts and the touch cannot see a change that leaves those alone (a venue with no stamp and a
@@ -236,8 +340,13 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
     }
     for (const id of [...valued.keys()]) if (!live.has(id)) { valued.delete(id); degraded.delete(id); levelsDirty = true; }
   };
-  const liveBooks = (now: number): ValuedBook[] =>
-    [...valued.values()].map(v => v.book).filter((b): b is ValuedBook => b !== null && now - b.timestamp <= STALE_MS * 4).concat(extra.books(now));
+  /** The books on the map: the feed manager's, the full-depth owner's (one book per instrument: none while it loads) and the connector venues'. */
+  const liveBooks = (now: number): ValuedBook[] => {
+    const owned = fullDepth.ownedId, ownedBook = owned ? fullDepth.book(now, recorder.steps.get(owned)) : null;
+    const books = [...valued.values()].map(v => v.book).filter((b): b is ValuedBook => b !== null && now - b.timestamp <= STALE_MS * 4);
+    if (ownedBook && now - ownedBook.timestamp <= STALE_MS * 4) books.push(ownedBook);
+    return books.concat(extra.books(now));
+  };
   const membersOf = (books: readonly ValuedBook[]): string => books.map(b => b.instrumentId).sort().join('|');
 
   const lastCandles = () => {
@@ -245,12 +354,12 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
     for (const [id, rows] of Object.entries(app.state.candles ?? {})) { const row = rows[rows.length - 1]; if (row) out[id] = [row.start, row.open, row.high, row.low, row.close, row.volume ?? 0]; }
     return out;
   };
-  /** Send to every open client; one that has fallen too far behind is dropped, and one that is merely slow skips the frame when `skipAbove` is set. */
-  const broadcast = (message: string | Buffer, options?: { binary: boolean }, skipAbove = Infinity): void => {
+  /** Send to every open client by the kind of frame (`sendVerdict`): one that has fallen too far behind is dropped, a slow one skips a snapshot. */
+  const broadcast = (message: string | Buffer, options?: { binary: boolean }, kind: FrameKind = 'event'): void => {
     for (const client of wss.clients) {
       if (client.readyState !== WebSocket.OPEN) continue;
-      if (client.bufferedAmount > MAX_CLIENT_BACKLOG_BYTES) { client.terminate(); continue; }
-      if (client.bufferedAmount < skipAbove) client.send(message, options);
+      const verdict = sendVerdict(kind, client.bufferedAmount);
+      if (verdict === 'drop') client.terminate(); else if (verdict === 'send') client.send(message, options);
     }
   };
   const tick = (): void => {
@@ -266,7 +375,8 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
     // A record past its time says nothing any more: dropped, so instruments that come and go leave nothing behind.
     for (const [id, hint] of touchHints) if (now - hint.at > TOUCH_HINT_MS) touchHints.delete(id);
     refreshBooks(now);
-    if (extra.enabledCount > 0) levelsDirty = true;
+    // Connector books (the venues' own and the full-depth owner's) change in place: every pass publishes them.
+    if (extra.enabledCount > 0 || fullDepth.ownedId) levelsDirty = true;
     const books = liveBooks(now), members = membersOf(books);
     // A book can leave the map without any update: it passes the staleness cutoff. That is a change like any other (the last one leaving
     // is an empty frame), or a client would draw liquidity that is no longer there while the heartbeats go on.
@@ -284,7 +394,7 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
     detect(orders.add(trades));
     takeOrders(false);
     absorption.step();
-    if (now - lastSources >= 5_000) { lastSources = now; flowSources.sync(new Set([...Object.keys(app.state.books ?? {}), ...extra.enabledInstrumentIds])); syncFar(Object.keys(app.state.books ?? {})); oiSampler?.sync(Object.keys(app.state.books ?? {}).filter(perpetual)); }
+    if (now - lastSources >= 5_000) { lastSources = now; syncFullDepth(); flowSources.sync(new Set([...Object.keys(app.state.books ?? {}), ...extra.enabledInstrumentIds])); syncFar(Object.keys(app.state.books ?? {})); oiSampler?.sync(Object.keys(app.state.books ?? {}).filter(perpetual)); oiSampler?.setFast(oiFastVenues()); }
     // Each store on its own: one that cannot write (a full disk) keeps its rows for the next round and does not stop the others or the rest of this pass.
     if (now - lastFlush >= 30_000) { lastFlush = now; for (const store of [footprint, prints, liquidations, flow, absorption, coverage]) { try { store.flush(); } catch (error) { fault('recordings could not be saved; will try again:', error); } } }
     if (now - lastPrune >= 3_600_000) { lastPrune = now; recorder.prune(now); }
@@ -293,8 +403,12 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
     const flowItems = now - lastFlowPush >= FLOW_SEC ? flow.take() : [];
     if (flowItems.length || now - lastFlowPush >= FLOW_SEC) lastFlowPush = now;
     const tape = tapeOut; tapeOut = [];
+    // Open interest: what the reducer took since the last pass is pushed to the pages the moment it lands, so the OI pane follows the
+    // exchanges instead of a clock. The first pass only marks what is there (the fixture's or a restart's rows) as seen.
+    const oiItems = newOi();
     if (wss.clients.size === 0) return;
     if (now - lastBeat >= heartbeatMs) { lastBeat = now; broadcast(JSON.stringify({ t: 'hb', now })); }
+    if (oiItems.length) broadcast(JSON.stringify({ t: 'oi', items: oiItems }));
     if (fresh.length) broadcast(JSON.stringify({ t: 'prints', items: fresh.map(toWire) }));
     if (forced.length) broadcast(JSON.stringify({ t: 'liquidations', items: forced.map(liquidationWire) }));
     if (found.groups.length || found.minutes.length) broadcast(JSON.stringify({ t: 'absorption', groups: found.groups, minutes: found.minutes }));
@@ -303,13 +417,16 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
       tapeSeq++;
       let encoded: Buffer | null = null;
       for (const client of wss.clients) {
-        if (client.readyState !== WebSocket.OPEN || !tapeClients.has(client) || client.bufferedAmount >= TAPE_SKIP_BYTES) continue;
+        if (client.readyState !== WebSocket.OPEN || !tapeClients.has(client)) continue;
+        // An event, never skipped for a backlog: a batch is about 1 KB beside the levels' 430 KB, and a skipped one is a hole in the dust.
+        const verdict = sendVerdict('event', client.bufferedAmount);
+        if (verdict === 'drop') { client.terminate(); continue; }
         encoded ??= encodeTape(packTape(tape, tapeSeq)); client.send(encoded, { binary: true });
       }
     }
     if (levelsDirty) {
       levelsDirty = false;
-      broadcast(encodeLevels(books, now), { binary: true }, LEVELS_SKIP_BYTES);
+      broadcast(encodeLevels(books, now), { binary: true }, 'snapshot');
     }
     const tick = JSON.stringify({ t: 'tick', price: app.state.markPrice, instrumentId: app.state.markInstrumentId, asOf: app.state.asOf, candles: lastCandles() });
     if (tick !== lastTick) { lastTick = tick; broadcast(tick); }
@@ -327,11 +444,19 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
     if (new URL(req.url ?? '/', 'http://localhost').pathname !== '/api/v2/ws') return;
     wss.handleUpgrade(req, socket, head, client => {
       client.on('error', () => client.terminate());
-      // The one thing a page says on the socket: whether it draws the trade dust (an older page says nothing and is never sent it).
+      // What a page says on the socket: whether it draws the trade dust (an older page says nothing and is never sent it), long/short
+      // questions (`lsOnSocket`) and Liquidity Tracker questions (`ltOnSocket`, which name the markets and so run longer than the rest).
       client.on('message', data => {
-        if (!(data instanceof Buffer) || data.length > 200) return;
-        try { const m = JSON.parse(String(data)) as { t?: unknown; on?: unknown }; if (m.t === 'tape') { if (m.on === true) tapeClients.add(client); else tapeClients.delete(client); } } catch { /* not ours */ }
+        if (!(data instanceof Buffer) || data.length > LT_QUESTION_BYTES) return;
+        let m: Record<string, unknown> | null = null;
+        try { m = JSON.parse(String(data)) as Record<string, unknown>; } catch { /* not ours */ }
+        if (!m || typeof m !== 'object' || (data.length > 600 && m.t !== 'lt')) return;
+        if (m.t === 'tape') { if (m.on === true) tapeClients.add(client); else tapeClients.delete(client); }
+        else if (m.t === 'ls') lsOnSocket(client, m);
+        else if (m.t === 'lt') ltOnSocket(client, m);
       });
+      // What this server answers on the socket beyond its frames: long/short and tracker questions. A page from before ignores it.
+      client.send(JSON.stringify({ t: 'hello', ls: true, lt: true }));
       levelsDirty = true; lastTick = ''; lastLayers = '';
     });
   };
@@ -342,18 +467,24 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
     const to = num(url.searchParams.get('to'), Date.now() + COLUMN_MS);
     const from = Math.max(num(url.searchParams.get('from'), to - 6 * 3_600_000), to - MAX_COLUMN_SPAN_MS);
     const stepMs = Math.max(COLUMN_MS, Math.round(num(url.searchParams.get('stepMs'), COLUMN_MS) / COLUMN_MS) * COLUMN_MS);
+    // `close=1`: each window's book at its close, not its average (the scripts' depth; `DepthRecorder.query`).
+    const close = url.searchParams.get('close') === '1';
     // Times no clock reaches are refused: past 2^53 ms a step added to a time can leave it as it was.
     if (![from, to, stepMs].every(v => Math.abs(v) <= Number.MAX_SAFE_INTEGER)) return sendJson(res, { error: BAD_WINDOW }, 400);
     // An instrument at a time, the live loop running between them: days older than memory holds are read back from the store, which for a
     // zoomed-out week took seconds (an instrument's share of it is well under one).
+    // The loop is let run between instruments only once a turn has taken LT_TURN_MS (as the tracker's lane does): a question answered from
+    // memory goes in one turn, where letting go after each of a dozen books made it wait behind every other route's work a dozen times on
+    // a busy loop (11 s for 12 books of 24 hourly windows on 8787, 2026-10-30).
     void (async () => {
       const results: { instrumentId: string; step: number; columns: ReturnType<typeof recorder.query> }[] = [];
+      let turnStart = performance.now();
       for (const id of ids) {
         if (closed || res.destroyed) return;
-        results.push({ instrumentId: id, step: recorder.steps.get(id) ?? 0, columns: recorder.query(id, from, to, stepMs) });
-        await new Promise<void>(resolve => setImmediate(resolve));
+        results.push({ instrumentId: id, step: recorder.steps.get(id) ?? 0, columns: recorder.query(id, from, to, stepMs, close) });
+        if (performance.now() - turnStart > LT_TURN_MS) { await new Promise<void>(resolve => setImmediate(resolve)); turnStart = performance.now(); }
       }
-      if (!res.destroyed) sendBinary(res, encodeColumns(results, from, to, stepMs));
+      if (!res.destroyed) sendBinary(res, encodeColumns(results, from, to, stepMs, close));
     })().catch(error => { console.error('v2 /api/v2/columns failed:', error); if (!res.headersSent) sendJson(res, { error: 'internal error' }, 500); else res.end(); });
   };
   const candles = (url: URL, res: ServerResponse) => {
@@ -382,24 +513,133 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
     const id = url.searchParams.get('inst') ?? ''; const tf = url.searchParams.get('tf') ?? '1h'; const tfMs = timeframeMs(tf);
     if (!id || !tfMs) return sendJson(res, { error: BAD_SERIES }, 400);
     const span = windowOf(url, Date.now() + tfMs, 400 * tfMs); if (!span) return sendJson(res, { error: BAD_WINDOW }, 400);
-    const { from, to } = span;
     // `usd=1`: an inverse market's own USD (the readings that kept one) in place of its coins.
     const usd = url.searchParams.get('usd') === '1';
+    sendJson(res, { instrumentId: id, tf, ...(usd ? { usd } : {}), bars: oiBarsOf(id, tfMs, span.from, span.to, usd) });
+  };
+  /** One market's open interest in bars of `tfMs` over [from, to): the stored history and the live samples (`usd`: an inverse market's own USD). */
+  const oiBarsOf = (id: string, tfMs: number, from: number, to: number, usd: boolean) => {
     const stored = app.history.listOi(id, { from, to, limit: 300_000 }) as OiRow[];
     // The live samples are held to the same window as the stored bars: one past `to` would put a bar outside what was asked for.
     const at = (s: { observationTimestamp?: unknown; sourceTimestamp?: unknown; receivedAt?: unknown }): number => Number(s.observationTimestamp ?? s.sourceTimestamp ?? s.receivedAt);
     const live = (app.state.oi ?? []).filter(s => s.instrumentId === id && at(s) >= from && at(s) < to) as OiRow[];
-    sendJson(res, { instrumentId: id, tf, ...(usd ? { usd } : {}), bars: aggregateOi(usd ? withLiveOi(quoteRows(stored), quoteRows(live)) : withLiveOi(stored, live), tfMs) });
+    return aggregateOi(usd ? withLiveOi(quoteRows(stored), quoteRows(live)) : withLiveOi(stored, live), tfMs);
   };
-  // Long/short ratios as the venues publish them, read when asked for and kept in memory only (shared/long-short.ts): nothing of the
-  // history store's budget, and nothing new asked while no page shows the pane (a read already under way finishes).
-  const longShort = new LongShortCache(webGet, false);
+  /**
+   * The change in open interest by price (shared/oi-profile.ts) of the perpetuals among `inst` over [from, to), at most eight days, on rows
+   * of `step`: each market's one-minute bars from two minutes before, so the change into the first minute is known.
+   */
+  const oiProfileRoute = (url: URL, res: ServerResponse) => {
+    const asked = [...new Set((url.searchParams.get('inst') ?? '').split(',').filter(Boolean))];
+    if (!asked.length || asked.length > MAX_PROFILE_INSTRUMENTS) return sendJson(res, { error: `inst must name 1 to ${MAX_PROFILE_INSTRUMENTS} instruments` }, 400);
+    const span = windowOf(url, Date.now() + 60_000, 3_600_000); if (!span) return sendJson(res, { error: BAD_WINDOW }, 400);
+    if (span.to - span.from > MAX_COLUMN_SPAN_MS) return sendJson(res, { error: 'the window may be at most eight days' }, 400);
+    const step = Number(url.searchParams.get('step'));
+    if (!(step > 0) || !Number.isFinite(step)) return sendJson(res, { error: 'step must be a positive number' }, 400);
+    const series = asked.filter(oiInstrument).map((id): OiSeries => {
+      const coins = !inverseOiId(id);
+      return { id, coins, price: lastPrice.get(id)?.price ?? 0, bars: oiBarsOf(id, 60_000, span.from - 120_000, span.to, !coins) };
+    });
+    sendJson(res, oiProfileOf(footprint, series, span.from, span.to, step));
+  };
+  // Long/short ratios as the venues publish them, read when asked for and kept in memory and in a file of their own (shared/long-short.ts,
+  // ls-store.mts): nothing of the history store's budget, after a restart only the hours since are read, and nothing new is asked while no
+  // page shows the pane (a read already under way finishes, and so does a long window's reading back through Binance's archive).
+  // A file that cannot be opened (locked, damaged) costs only the keeping: it is a cache, never a reason not to start.
+  let lsStore: SqliteLsStore | null = null;
+  if (persist) try { lsStore = new SqliteLsStore(path.join(dataDir, 'long-short.sqlite')); } catch (error) { fault('the long/short readings will not be kept across restarts:', error); }
+  const longShort = new LongShortCache(webGet, false, undefined, undefined, undefined, undefined, undefined, lsStore);
+  const priceHistory = new PriceHistoryCache(priceHistoryGet);
+  const priceHistoryRoute = (url: URL, res: ServerResponse) => {
+    // The line's intervals (`PRICE_TIMEFRAMES`: weeks too, for a window of more than 2,000 days), bounded to 2,000 bars like each of them.
+    const id = url.searchParams.get('inst') ?? '', tfMs = priceTimeframeMs(url.searchParams.get('tf'));
+    const target = priceListing(BTC, id);
+    if (!target || target.id !== id || !tfMs) return sendJson(res, { error: BAD_SERIES }, 400);
+    const span = windowOf(url, Date.now() + 1, 500 * tfMs);
+    if (!span || span.to - span.from > PRICE_QUERY_BARS * tfMs) return sendJson(res, { error: BAD_WINDOW }, 400);
+    priceHistory.series(target, tfMs, span.from, span.to).then(answer => sendJson(res, answer), () => sendJson(res, { error: 'price history could not be read' }, 502));
+  };
   const longShortRoute = (url: URL, res: ServerResponse) => {
     const id = url.searchParams.get('inst') ?? '', tf = url.searchParams.get('tf') ?? '1h', tfMs = timeframeMs(tf), metric = url.searchParams.get('metric') ?? 'accounts';
     if (!id || !tfMs) return sendJson(res, { error: BAD_SERIES }, 400);
     if (!(LS_METRICS as readonly string[]).includes(metric)) return sendJson(res, { error: `metric must be one of ${LS_METRICS.join(', ')}` }, 400);
     const span = windowOf(url, Date.now() + tfMs, 400 * tfMs); if (!span) return sendJson(res, { error: BAD_WINDOW }, 400);
-    longShort.series(id, metric as LsMetric, tfMs, span.from, span.to).then(series => sendJson(res, series), () => sendJson(res, { error: 'long/short ratios could not be read' }, 502));
+    // `budget` (ms): answer within it with what is held, `pending` while the venue is read on; a page from before sends none and waits for the read.
+    const rawBudget = url.searchParams.get('budget'), budget = rawBudget === null ? undefined : Number(rawBudget);
+    if (budget !== undefined && !(Number.isFinite(budget) && budget >= 0)) return sendJson(res, { error: 'budget must be milliseconds, not negative' }, 400);
+    longShort.series(id, metric as LsMetric, tfMs, span.from, span.to, budget === undefined ? undefined : Math.min(budget, 30_000))
+      .then(series => sendJson(res, series), () => sendJson(res, { error: 'long/short ratios could not be read' }, 502));
+  };
+  /**
+   * Long/short questions on a page's live socket, as the route above asks them, answered by the question's id: a page's HTTP requests to this
+   * server wait behind its history requests for one of the browser's six connections, twenty seconds and more while it loads and on a busy
+   * PC after (measured 2026-10-23), and the socket is no part of those. At most `LS_SOCKET_BUSY` a socket at once.
+   */
+  const LS_SOCKET_BUSY = 16;
+  const lsBusy = new WeakMap<WebSocket, number>();
+  const lsOnSocket = (client: WebSocket, m: Record<string, unknown>): void => {
+    const id = m.id;
+    if (typeof id !== 'number' || !Number.isSafeInteger(id)) return;
+    const reply = (body: object): void => { if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify({ t: 'ls', id, ...body })); };
+    const { inst, metric, from, to, budget } = m, tfMs = timeframeMs(m.tf);
+    if (typeof inst !== 'string' || !inst || inst.length > 120 || !tfMs) return reply({ error: BAD_SERIES });
+    if (typeof metric !== 'string' || !(LS_METRICS as readonly string[]).includes(metric)) return reply({ error: `metric must be one of ${LS_METRICS.join(', ')}` });
+    if (typeof from !== 'number' || typeof to !== 'number' || !Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to <= from) return reply({ error: BAD_WINDOW });
+    if (budget !== undefined && !(typeof budget === 'number' && Number.isFinite(budget) && budget >= 0)) return reply({ error: 'budget must be milliseconds, not negative' });
+    const busy = lsBusy.get(client) ?? 0;
+    if (busy >= LS_SOCKET_BUSY) return reply({ error: 'too many long/short questions at once' });
+    lsBusy.set(client, busy + 1);
+    // Never a whole read held on the socket's count: a question with no budget waits at most as long as one with the largest.
+    longShort.series(inst, metric as LsMetric, tfMs, from, to, Math.min(budget ?? 30_000, 30_000))
+      .then(series => reply({ series }), () => reply({ error: 'long/short ratios could not be read' }))
+      .finally(() => lsBusy.set(client, Math.max(0, (lsBusy.get(client) ?? 1) - 1)));
+  };
+  /**
+   * Liquidity Tracker questions on a page's live socket: the tracker of the named markets over a window at one step, for one half-life, as the
+   * columns would hold it (`recorder.queryLt`) but without their books, a few hundred kilobytes where the columns of the same view are tens of
+   * megabytes. Answered in frames a day each, the newest first (what memory holds comes at once, the days read back from the store follow, one
+   * market at a time with the loop let go between), the last marked `done`; `{t:'lt', id, cancel:true}` ends one. At most `LT_SOCKET_BUSY` a socket.
+   */
+  const LT_SOCKET_BUSY = 4;
+  const ltRunning = new WeakMap<WebSocket, Map<number, { cancelled: boolean }>>();
+  const ltOnSocket = (client: WebSocket, m: Record<string, unknown>): void => {
+    const id = m.id;
+    if (typeof id !== 'number' || !Number.isSafeInteger(id)) return;
+    const running = ltRunning.get(client) ?? new Map<number, { cancelled: boolean }>();
+    ltRunning.set(client, running);
+    // A question given up frees its slot at once (its loop still stops at its next market): the page counts only the questions it has not given up.
+    if (m.cancel === true) { const one = running.get(id); if (one) { one.cancelled = true; running.delete(id); } return; }
+    const fail = (error: string): void => { if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify({ t: 'lt', id, error })); };
+    const { inst, from, to, half } = m;
+    if (!Array.isArray(inst) || !inst.length || inst.length > MAX_LT_INSTRUMENTS || !inst.every(i => typeof i === 'string' && i.length > 0 && i.length <= 120)) return fail(BAD_SERIES);
+    if (typeof from !== 'number' || typeof to !== 'number' || !Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to <= from) return fail(BAD_WINDOW);
+    if (!validHalf(half)) return fail('half must name one of the half-lives the tracker is kept for');
+    const stepMs = typeof m.stepMs === 'number' && Number.isSafeInteger(m.stepMs) ? Math.max(COLUMN_MS, Math.round(m.stepMs / COLUMN_MS) * COLUMN_MS) : NaN;
+    if (!(stepMs > 0) || stepMs > MAX_COLUMN_SPAN_MS) return fail(BAD_WINDOW);
+    if (running.has(id)) return fail('question id in use');
+    if (running.size >= LT_SOCKET_BUSY) return fail('too many tracker questions at once');
+    const ids = [...new Set(inst as string[])], one = { cancelled: false };
+    running.set(id, one);
+    // Windows from the step's own grid, so each is whole whichever part of the question it falls in; no more than the days that are kept.
+    const lo = Math.floor(Math.max(from, to - MAX_COLUMN_SPAN_MS) / stepMs) * stepMs, slice = Math.ceil(LT_SLICE_MS / stepMs) * stepMs;
+    void (async () => {
+      let turnStart = performance.now();
+      for (let hi = to; hi > lo;) {
+        const start = Math.max(lo, (Math.ceil(hi / slice) - 1) * slice);
+        const results: { instrumentId: string; windows: ReturnType<typeof recorder.queryLt> }[] = [];
+        for (const instrumentId of ids) {
+          if (closed || one.cancelled || client.readyState !== WebSocket.OPEN) return;
+          results.push({ instrumentId, windows: recorder.queryLt(instrumentId, start, hi, stepMs, half) });
+          // The loop is let go once a turn has had its share, not after every market.
+          if (performance.now() - turnStart > LT_TURN_MS) { await new Promise<void>(resolve => setImmediate(resolve)); turnStart = performance.now(); }
+        }
+        if (closed || one.cancelled || client.readyState !== WebSocket.OPEN) return;
+        // A client that is far behind is let go as the rest of the socket does (it reconnects and asks again), not sent more.
+        if (sendVerdict('event', client.bufferedAmount) === 'drop') { client.terminate(); return; }
+        client.send(encodeLt(id, start, hi, stepMs, half, start <= lo, results), { binary: true });
+        hi = start;
+      }
+    })().catch(error => { console.error('v2 tracker question failed:', error); fail('internal error'); }).finally(() => { if (running.get(id) === one) running.delete(id); });
   };
   const footprintRoute = (url: URL, res: ServerResponse) => {
     // One instrument, or several (comma separated) added together: the aggregated footprint.
@@ -483,6 +723,26 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
       answer => sendJson(res, { windowMs: ABSORPTION_WINDOW_MS, floorUsd: GROUP_FLOOR_USD, perMinute: GROUPS_PER_MINUTE, ...answer }),
       error => { console.error('v2 /api/v2/absorption failed:', error); if (!res.headersSent) sendJson(res, { error: 'internal error' }, 500); });
   };
+  /**
+   * The absorption column for some instruments over a window (shared/absorption.ts `AbsorptionProfile`): the marked USD of every group that
+   * began in it, at each instrument's threshold (`min`, one per instrument or one for all), by price on rows of `step`, none left out, and the
+   * instruments whose rows may be short. No minute after the window is read; whole stored hours are answered from their packed groups (read
+   * once, see shared/absorption-hours.ts) and the part hours read as they are, with the event loop let go between.
+   */
+  const absorptionProfileRoute = (url: URL, res: ServerResponse) => {
+    const ids = (url.searchParams.get('inst') ?? '').split(',').filter(Boolean);
+    if (!ids.length || ids.length > MAX_ABSORPTION_INSTRUMENTS) return sendJson(res, { error: `inst must name 1 to ${MAX_ABSORPTION_INSTRUMENTS} instruments` }, 400);
+    const span = windowOf(url, Date.now() + 60_000, 3_600_000); if (!span) return sendJson(res, { error: BAD_WINDOW }, 400);
+    if (span.to - span.from > MAX_COLUMN_SPAN_MS) return sendJson(res, { error: 'the window may be at most eight days' }, 400);
+    const mins = (url.searchParams.get('min') ?? '').split(',').filter(Boolean).map(Number);
+    if (!mins.length || (mins.length > 1 && mins.length !== ids.length)) return sendJson(res, { error: 'min must be one amount, or one per instrument' }, 400);
+    if (mins.some(m => !Number.isFinite(m) || m < 0)) return sendJson(res, { error: 'min must be USD amounts' }, 400);
+    const step = Number(url.searchParams.get('step'));
+    if (!(step > 0) || !Number.isFinite(step)) return sendJson(res, { error: 'step must be a positive number' }, 400);
+    absorption.profile(ids, ids.map((_, i) => mins.length > 1 ? mins[i]! : mins[0]!), span.from, span.to, step).then(
+      answer => sendJson(res, answer),
+      error => { console.error('v2 /api/v2/absorption-profile failed:', error); if (!res.headersSent) sendJson(res, { error: 'internal error' }, 500); });
+  };
   /** Traded volume by price for some instruments over a window (the page's traded-volume column). */
   const profileRoute = (url: URL, res: ServerResponse) => {
     const ids = (url.searchParams.get('inst') ?? '').split(',').filter(Boolean);
@@ -491,7 +751,11 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
     if (span.to - span.from > MAX_COLUMN_SPAN_MS) return sendJson(res, { error: 'the window may be at most eight days' }, 400);
     const step = Number(url.searchParams.get('step'));
     if (!(step > 0) || !Number.isFinite(step)) return sendJson(res, { error: 'step must be a positive number' }, 400);
-    sendJson(res, footprint.profile(ids, span.from, span.to, step));
+    // The ended hours are built first, a few at a time with the event loop let go between (`prepare`, as for the value areas), then read
+    // added together a few hours of a market at a time: a week of every market read minute by minute held the thread for 15 s.
+    footprint.prepare(ids, span.from, span.to, 3_600_000).then(() => footprint.profileYielding(ids, span.from, span.to, step)).then(
+      answer => sendJson(res, answer),
+      error => { console.error('v2 /api/v2/profile failed:', error); if (!res.headersSent) sendJson(res, { error: 'internal error' }, 500); else res.end(); });
   };
   /** When instruments were recorded, per minute (shared/coverage.ts): `metric` trades (the coverage record and the footprint's minutes) or depth (the columns' samples). */
   const coverageRoute = (url: URL, res: ServerResponse) => {
@@ -593,6 +857,8 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
   return {
     recorder, footprint, prints, liquidations, flow, absorption, extra,
     degradedVenues() { return new Map([...degraded].map(([id, reason]) => [id.split(':')[0]!, reason])); },
+    setFullDepthSource(read) { fullDepthSource = read; syncFullDepth(); },
+    ownedBookStates() { return fullDepth.states(Date.now()); },
     handle(req, res) {
       const url = new URL(req.url ?? '/', 'http://localhost');
       // A route that fails answers 500 and the server goes on: an exception out of a request listener ends the process.
@@ -603,6 +869,7 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
           case '/api/v2/state': bootstrap(res); return true;
           case '/api/v2/columns': columns(url, res); return true;
           case '/api/v2/candles': candles(url, res); return true;
+          case '/api/v2/price-history': priceHistoryRoute(url, res); return true;
           case '/api/v2/oi': oi(url, res); return true;
           case '/api/v2/long-short': longShortRoute(url, res); return true;
           case '/api/v2/footprint': footprintRoute(url, res); return true;
@@ -613,9 +880,11 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
           case '/api/v2/flow-minutes': flowMinutesRoute(url, res); return true;
           case '/api/v2/sizes': sizesRoute(url, res); return true;
           case '/api/v2/profile': profileRoute(url, res); return true;
+          case '/api/v2/oi-profile': oiProfileRoute(url, res); return true;
           case '/api/v2/range': rangeRoute(url, res); return true;
           case '/api/v2/value-areas': valueAreasRoute(url, res); return true;
           case '/api/v2/absorption': absorptionRoute(url, res); return true;
+          case '/api/v2/absorption-profile': absorptionProfileRoute(url, res); return true;
           case '/api/v2/coverage': coverageRoute(url, res); return true;
           case '/api/v2/venues': venuesRoute(res); return true;
           case '/coins.json': return coins?.send(res) ?? false;
@@ -629,10 +898,10 @@ export function attachV2(app: App, { dataDir, liveMs = 250, persist = true, hear
     },
     close() {
       closed = true;
-      clearInterval(loop); syncFar([]); oiSampler?.close(); coins?.close(); (app.server as Server).off('upgrade', onUpgrade);
+      clearInterval(loop); clearTimeout(absorptionWarm); clearTimeout(ltWarm); syncFar([]); fullDepth.close(); oiSampler?.close(); coins?.close(); (app.server as Server).off('upgrade', onUpgrade);
       for (const client of wss.clients) client.terminate();
       // Each part gets its turn even when one of them fails, so what can still be written is (the open minutes and the open orders are written here).
-      for (const part of [() => takeOrders(true), () => recorder.flush(), () => store?.close(), () => footprint.close(), () => coverage.close(), () => prints.close(), () => liquidations.close(), () => flow.close(), () => absorption.close(), () => flowSources.close(), () => extra.close()]) {
+      for (const part of [() => takeOrders(true), () => recorder.flush(), () => store?.close(), () => lsStore?.close(), () => footprint.close(), () => coverage.close(), () => prints.close(), () => liquidations.close(), () => flow.close(), () => absorption.close(), () => flowSources.close(), () => extra.close()]) {
         try { part(); } catch (error) { console.error('v2 shutdown:', error); }
       }
     },

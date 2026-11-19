@@ -20,7 +20,31 @@ export interface ValuedBook {
    * with the trades is not liquidity coming or going.
    */
   touch?: { lo: number; hi: number };
+  /**
+   * The grid step `mergeByDistance` merged this point book on (`shared/merge.ts`; the same number it was called with, the instrument's
+   * recorder step or `gridStepFor` of the mid), on the server and in the browser engine alike. A grouped book (`coarse`: provider bands,
+   * never merged) carries none, nor does a book nothing merged. A bucket is `DISTANCE_SHARE` (0.4 %) of its distance from the mid wide,
+   * so out to about 250 steps from the mid it is a whole divisor of this step wide and sits inside one bin of it: within that distance the
+   * book keeps its USD per bin of this grid (or of a multiple of it) exactly, whatever the mid does and whichever level comes or goes. A
+   * reader that compares the book over time on a grid the buckets straddle (a ladder row of $25 on a $20 step) sees a bucket whose
+   * representative price crossed a row's edge as liquidity leaving one row and arriving in the next, with nothing changed at the venue.
+   */
+  step?: number;
+  /**
+   * What the book covers, as a number that changes when that changes (`BookConnector.bookEpoch`): a book that synchronises from a separate
+   * snapshot (Bybit's full depth) was seeded again, or its coverage grew past where it stopped. Absent for a book that is whole as it comes.
+   * A reader that compares the book over time (a wall, a cue) starts again when it changes: more of the book became visible, nothing was
+   * placed or pulled.
+   */
+  epoch?: number;
 }
+/**
+ * Whether a merge step (`ValuedBook.step`) is one a reader may divide by: a finite number above zero. Anything else is left off the wire and
+ * off the frame, so the one rule is the same where a step is sent, posted and read.
+ */
+export const usableStep = (step: unknown): step is number => typeof step === 'number' && Number.isFinite(step) && step > 0;
+/** Whether a coverage epoch (`ValuedBook.epoch`) is one to carry: a whole number above zero. Anything else is left off the wire and off the frame. */
+export const usableEpoch = (epoch: unknown): epoch is number => typeof epoch === 'number' && Number.isSafeInteger(epoch) && epoch > 0;
 /** A single venue's book crossed by more than this many basis points is a feed fault, not a market state. */
 export const MAX_CROSSED_BP = 5;
 

@@ -3,17 +3,20 @@ import { parseLsSeries, type LsMetric, type LsSeries } from '../shared/long-shor
 import { COLUMNS_PER_REQUEST } from '../shared/columns.ts';
 import { decodeFlowFrame, decodeFlowMinutes, type FlowFrame, type FlowMinutesFrame, type FlowUpdate } from '../shared/flow.ts';
 import { parseProfile, parseRange, parseSizes, parseValueAreas, type ProfileAnswer, type RangeAnswer, type SizesAnswer, type ValueAreaAnswer } from '../shared/footprint.ts';
-import { parseAbsorptionAnswer, parseAbsorptionLive, type AbsorptionAnswer } from '../shared/absorption.ts';
+import { parseOiProfile, type OiProfileAnswer } from '../shared/oi-profile.ts';
+import { AbsorptionProfile, parseAbsorptionAnswer, parseAbsorptionLive, parseAbsorptionProfile, type AbsorptionAnswer, type AbsorptionProfileAnswer } from '../shared/absorption.ts';
 import { parseCoverage, type CoverageAnswer, type CoverageMetric } from '../shared/coverage.ts';
 import { fromWire, type Print } from './prints.ts';
 import { fromWire as liquidationFromWire, type Liquidation } from '../shared/liquidations.ts';
-import { decodeColumns, decodeLevels, decodeTape, frameType, type ColumnsFrame } from './wire.ts';
+import { decodeColumns, decodeLevels, decodeLt, decodeTape, frameType, type ColumnsFrame, type LtFrame } from './wire.ts';
 import type { CandleRow, OiBar } from './store.ts';
-import type { BootstrapState, FootprintResponse, LayersMessage, LiquidationsMessage, LiveHandlers, PrintsMessage, TickMessage } from './source.ts';
+import { parsePriceHistory, priceTimeframeMs, type PriceHistoryAnswer } from '../shared/price-history.ts';
+import type { BootstrapState, FootprintResponse, LayersMessage, LiquidationsMessage, LiveHandlers, OiPushMessage, PrintsMessage, TickMessage } from './source.ts';
 import { t } from './i18n.ts';
 
-async function request(path: string, signal?: AbortSignal): Promise<Response> {
-  const response = await fetch(path, { cache: 'no-store', ...(signal ? { signal } : {}) });
+/** `priority`: where the browser puts the request among those waiting for one of its six connections to the server (Fetch Priority; ignored where unknown). */
+async function request(path: string, signal?: AbortSignal, priority?: 'high' | 'low'): Promise<Response> {
+  const response = await fetch(path, { cache: 'no-store', ...(signal ? { signal } : {}), ...(priority ? { priority } : {}) } as RequestInit);
   if (!response.ok) throw new Error(`${path} failed: ${response.status}`);
   return response;
 }
@@ -25,9 +28,15 @@ export async function getFootprint(inst: string, tf: string, from: number, to: n
   return (await request(`/api/v2/footprint?inst=${encodeURIComponent(inst)}&tf=${tf}&from=${Math.floor(from)}&to=${Math.ceil(to)}&rows=${rowStep}${cutsParam(cuts)}${budget ? `&budget=${Math.round(budget)}` : ''}${venues ? '&venues=1' : ''}`)).json() as Promise<FootprintResponse>;
 }
 export const getBootstrap = async (): Promise<BootstrapState> => (await request('/api/v2/state')).json();
+/** A read of candles that has had no answer in this long is given up (a busy server answers in seconds; one that never does would hold a connection). */
+const CANDLES_TIMEOUT_MS = 30_000;
 export async function getCandles(inst: string, tf: string, from: number, to: number): Promise<CandleRow[]> {
-  const body = await (await request(`/api/v2/candles?inst=${encodeURIComponent(inst)}&tf=${tf}&from=${from}&to=${to}`)).json() as { candles: CandleRow[] };
+  const body = await (await request(`/api/v2/candles?inst=${encodeURIComponent(inst)}&tf=${tf}&from=${from}&to=${to}`, AbortSignal.timeout(CANDLES_TIMEOUT_MS))).json() as { candles: CandleRow[] };
   return body.candles;
+}
+export async function getPriceHistory(inst: string, tf: string, from: number, to: number, signal?: AbortSignal): Promise<PriceHistoryAnswer> {
+  const response = await request(`/api/v2/price-history?inst=${encodeURIComponent(inst)}&tf=${tf}&from=${from}&to=${to}`, signal);
+  return parsePriceHistory(await response.json(), inst, priceTimeframeMs(tf) ?? 0);
 }
 /** Whale VWAP sums (a server from before them answers 404, which is an error here); rows that are not five finite numbers are dropped. */
 export async function getPrintSums(ids: string[], from: number, to: number, minUsd: number, stepMs: number): Promise<PrintSumsAnswer> {
@@ -52,9 +61,15 @@ export async function getOi(inst: string, tf: string, from: number, to: number, 
   // A server from before USD readings ignores the flag and answers coins: none, rather than coins read as dollars.
   return usd && body.usd !== true ? [] : body.bars;
 }
-/** A venue's long/short readings for one market (the server reads them from the venue when asked, see shared/long-short.ts); `signal` cancels. */
-export async function getLongShort(inst: string, metric: LsMetric, tf: string, from: number, to: number, signal?: AbortSignal): Promise<LsSeries> {
-  return parseLsSeries(await (await request(`/api/v2/long-short?inst=${encodeURIComponent(inst)}&metric=${metric}&tf=${tf}&from=${Math.floor(from)}&to=${Math.ceil(to)}`, signal)).json());
+/**
+ * A venue's long/short readings for one market (the server reads them from the venue when asked, see shared/long-short.ts); `signal` cancels.
+ * `budgetMs`: the server answers within it with what it holds, `pending` while it reads on (a server from before ignores it and waits).
+ * Asked at high priority: while a page loads, its history requests hold every connection to the server for seconds each, and a pane's few
+ * small answers waited behind them for twenty seconds (2026-10-23); a background question (budget 0, the pane's warming) is asked at low.
+ */
+export async function getLongShort(inst: string, metric: LsMetric, tf: string, from: number, to: number, signal?: AbortSignal, budgetMs?: number): Promise<LsSeries> {
+  const budget = budgetMs === undefined ? '' : `&budget=${Math.max(0, Math.round(budgetMs))}`;
+  return parseLsSeries(await (await request(`/api/v2/long-short?inst=${encodeURIComponent(inst)}&metric=${metric}&tf=${tf}&from=${Math.floor(from)}&to=${Math.ceil(to)}${budget}`, signal, budgetMs === 0 ? 'low' : 'high')).json());
 }
 /** Taker flow per second for the instruments, as the server records it. */
 export async function getFlow(ids: string[], from: number, to: number): Promise<FlowFrame> {
@@ -86,6 +101,27 @@ export async function getAbsorption(ids: string[], mins: number[], from: number,
   if (!answer) throw new Error('absorption answered with something else');
   return answer;
 }
+/** The most groups of each instrument an older server is asked for, for the absorption column it cannot add up itself (the largest). */
+const OLDER_SERVER_GROUPS = 4_000;
+/**
+ * The absorption column (see DataSource.absorptionProfile). A server from before the route (404) is asked for the groups instead, the
+ * largest OLDER_SERVER_GROUPS of each instrument (and the minutes of the last minute only), and they are added up here; `cut` then names
+ * the instruments that had more.
+ */
+export async function getAbsorptionProfile(ids: string[], thresholds: number[], from: number, to: number, rowStep: number): Promise<AbsorptionProfileAnswer> {
+  const response = await fetch(`/api/v2/absorption-profile?inst=${ids.map(encodeURIComponent).join(',')}&min=${thresholds.join(',')}&from=${Math.floor(from)}&to=${Math.ceil(to)}&step=${rowStep}`, { cache: 'no-store' });
+  if (response.status === 404) {
+    const older = await getAbsorption(ids, thresholds, from, to, OLDER_SERVER_GROUPS, Math.max(Math.ceil(to), Date.now() - 60_000));
+    const out = new AbsorptionProfile(new Map(ids.map((id, i) => [id, thresholds[i]!])), from, to, rowStep);
+    for (const g of older.groups) out.add(g);
+    for (const [id, floor] of Object.entries(older.floors)) out.floor(id, null, floor);
+    return out.answer(older.capped);
+  }
+  if (!response.ok) throw Object.assign(new Error(`absorption profile failed: ${response.status}`), { status: response.status });
+  const answer = parseAbsorptionProfile(await response.json().catch(() => null), ids);
+  if (!answer) throw new Error('the absorption column answered with something else');
+  return answer;
+}
 /** Traded volume by price for these instruments over [from, to); an older server without the route rejects (404). */
 /** When `ids` were recorded (see `CoverageAnswer`). Rejects on a server that does not know the question (an older one). */
 export async function getCoverage(ids: string[], metric: CoverageMetric, from: number, to: number): Promise<CoverageAnswer> {
@@ -100,6 +136,14 @@ export async function getProfile(ids: string[], from: number, to: number, rowSte
   if (!response.ok) throw new Error(`profile failed: ${response.status}`);
   const answer = parseProfile(await response.json().catch(() => null), ids);
   if (!answer) throw new Error('profile answered with something else');
+  return answer;
+}
+/** The change in open interest by price (shared/oi-profile.ts). Rejects on a server that does not know the question (an older one). */
+export async function getOiProfile(ids: string[], from: number, to: number, rowStep: number): Promise<OiProfileAnswer> {
+  const response = await fetch(`/api/v2/oi-profile?inst=${ids.map(encodeURIComponent).join(',')}&from=${Math.floor(from)}&to=${Math.ceil(to)}&step=${rowStep}`, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`oi profile failed: ${response.status}`);
+  const answer = parseOiProfile(await response.json().catch(() => null), ids);
+  if (!answer) throw new Error('oi profile answered with something else');
   return answer;
 }
 /** What happened in a selection of the map or of a pane (see `RangeAnswer`). Rejects on a server that does not know the question (an older one). */
@@ -120,12 +164,15 @@ export async function getValueAreas(ids: string[], windows: { from: number; to: 
   if (!answer) throw new Error('value areas answered with something else');
   return answer;
 }
-/** Recorded columns for any number of instruments: the server serves a bounded number per request, so longer lists are split and merged. */
-export async function getColumns(ids: string[], from: number, to: number, stepMs: number): Promise<ColumnsFrame> {
+/**
+ * Recorded columns for any number of instruments: the server serves a bounded number per request, so longer lists are split and merged.
+ * `close`: each window's book at its close (a server from before answers averages, without `at`).
+ */
+export async function getColumns(ids: string[], from: number, to: number, stepMs: number, close = false): Promise<ColumnsFrame> {
   const chunks: string[][] = [];
   for (let i = 0; i < ids.length; i += COLUMNS_PER_REQUEST) chunks.push(ids.slice(i, i + COLUMNS_PER_REQUEST));
   const frames = await Promise.all(chunks.map(async chunk => {
-    const buffer = await (await request(`/api/v2/columns?inst=${chunk.map(encodeURIComponent).join(',')}&from=${Math.floor(from)}&to=${Math.ceil(to)}&stepMs=${stepMs}`)).arrayBuffer();
+    const buffer = await (await request(`/api/v2/columns?inst=${chunk.map(encodeURIComponent).join(',')}&from=${Math.floor(from)}&to=${Math.ceil(to)}&stepMs=${stepMs}${close ? '&close=1' : ''}`)).arrayBuffer();
     return decodeColumns(buffer);
   }));
   const first = frames[0];
@@ -142,28 +189,77 @@ export const connectionStatus = (failures: number, host: string): string => fail
  * `silenceMs` counts as a lost connection and is retried like one, once the server has shown that it sends heartbeats (an older server
  * says nothing while the market is quiet, and a quiet market is not a broken connection).
  */
-export function connectLive(handlers: LiveHandlers, { silenceMs = 20_000, pollMs = 5_000, now = () => performance.now() }: { silenceMs?: number; pollMs?: number; now?: () => number } = {}): { close(): void; tape(on: boolean): void } {
+export function connectLive(handlers: LiveHandlers, { silenceMs = 20_000, pollMs = 5_000, now = () => performance.now() }: { silenceMs?: number; pollMs?: number; now?: () => number } = {}): LiveConnection {
   let socket: WebSocket | null = null, closed = false, attempt = 0, timer: number | undefined, heard = 0, beats = false, tapeOn = false;
+  /** Long/short questions on the socket, once its server said it answers them (`hello`): waiting by id, all given up when it closes. */
+  let lsReady = false, lsNext = 0;
+  // A question its asker gave up is kept here, settled, until its answer comes: the server still counts it among its 16.
+  const lsWaiting = new Map<number, { resolve(series: LsSeries): void; reject(error: Error): void; timer: number; given?: boolean; off(): void }>();
+  /**
+   * Whether this socket's server answers them: unknown while it connects and for `LS_HELLO_MS` after (a question waits for it, up to the
+   * caller's limit: while a page loads, HTTP is where its questions wait longest), yes once it said so, no for a server that did not or a
+   * socket that is down (its questions go over HTTP at once).
+   */
+  let lsKnown: 'unknown' | 'yes' | 'no' = 'unknown';
+  const lsReadyWaiters = new Set<(ok: boolean) => void>();
+  /** Whether this socket's server answers Liquidity Tracker questions (its hello says so), and the ones waiting: frames in, the last one resolves. */
+  let ltOk = false, ltNext = 0;
+  const ltWaiting = new Map<number, { onFrame(frame: LtFrame): void; resolve(): void; reject(error: Error): void; timer: number; off(): void }>();
+  const lsSettle = (known: 'yes' | 'no'): void => { lsKnown = known; lsReady = known === 'yes'; for (const w of lsReadyWaiters) w(lsReady); lsReadyWaiters.clear(); };
+  const lsDrop = (why: string): void => {
+    lsSettle('no'); ltOk = false;
+    for (const w of lsWaiting.values()) { window.clearTimeout(w.timer); w.off(); w.reject(new Error(why)); }
+    lsWaiting.clear();
+    for (const w of ltWaiting.values()) { window.clearTimeout(w.timer); w.off(); w.reject(new Error(why)); }
+    ltWaiting.clear();
+  };
   /** Tell the server whether to send the trade dust (again on every new connection). */
   const sayTape = (): void => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ t: 'tape', on: tapeOn })); };
-  const lost = () => { handlers.onClose(attempt + 1, location.host); if (!closed) timer = window.setTimeout(open, Math.min(10_000, 500 * 2 ** attempt++)); };
+  const lost = () => { lsDrop('live-closed'); handlers.onClose(attempt + 1, location.host); if (!closed) timer = window.setTimeout(open, Math.min(10_000, 500 * 2 ** attempt++)); };
   const open = () => {
     const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/v2/ws`;
     const current = new WebSocket(url); current.binaryType = 'arraybuffer'; socket = current;
-    current.onopen = () => { attempt = 0; heard = now(); beats = false; if (tapeOn) sayTape(); handlers.onOpen(); };
+    lsKnown = 'unknown';
+    current.onopen = () => {
+      // A server that has not said it answers long/short questions soon after the socket opens is one from before: HTTP for them.
+      window.setTimeout(() => { if (socket === current && lsKnown === 'unknown') lsSettle('no'); }, LS_HELLO_MS);
+      attempt = 0; heard = now(); beats = false; if (tapeOn) sayTape(); handlers.onOpen();
+    };
     current.onmessage = event => {
       heard = now();
       try {
         if (typeof event.data === 'string') {
           const message = JSON.parse(event.data) as { t: string };
           if (message.t === 'hb') beats = true;
+          else if (message.t === 'hello') { ltOk = (message as { lt?: unknown }).lt === true; lsSettle((message as { ls?: unknown }).ls === true ? 'yes' : 'no'); }
+          else if (message.t === 'lt') {
+            // A tracker question's refusal (its frames are binary): the question fails, and the caller reads the columns instead.
+            const m = message as { id?: unknown; error?: unknown }, w = typeof m.id === 'number' ? ltWaiting.get(m.id) : undefined;
+            if (w) { ltWaiting.delete(m.id as number); window.clearTimeout(w.timer); w.off(); w.reject(new Error(String(m.error ?? 'lt-refused'))); }
+          }
+          else if (message.t === 'ls') {
+            const m = message as { id?: unknown; series?: unknown; error?: unknown }, w = typeof m.id === 'number' ? lsWaiting.get(m.id) : undefined;
+            if (w) {
+              lsWaiting.delete(m.id as number); window.clearTimeout(w.timer); w.off();
+              if (!w.given) try { if (m.error !== undefined) w.reject(new Error(String(m.error))); else w.resolve(parseLsSeries(m.series)); } catch (error) { w.reject(error instanceof Error ? error : new Error(String(error))); }
+            }
+          }
           else if (message.t === 'tick') handlers.onTick(message as TickMessage); else if (message.t === 'layers') handlers.onLayers(message as LayersMessage);
           else if (message.t === 'prints' && Array.isArray((message as PrintsMessage).items)) handlers.onPrints((message as PrintsMessage).items);
           else if (message.t === 'liquidations' && Array.isArray((message as LiquidationsMessage).items)) handlers.onLiquidations?.((message as LiquidationsMessage).items);
           else if (message.t === 'flow' && Array.isArray((message as { items?: unknown }).items)) handlers.onFlow?.((message as unknown as { items: FlowUpdate[] }).items);
+          else if (message.t === 'oi' && Array.isArray((message as OiPushMessage).items)) handlers.onOiPush?.((message as OiPushMessage).items);
           else if (message.t === 'absorption') { const found = parseAbsorptionLive(message); handlers.onAbsorption?.(found.groups, found.minutes); }
-        } else if (frameType(event.data as ArrayBuffer) === 'tape') { const batch = decodeTape(event.data as ArrayBuffer); if (batch && tapeOn) handlers.onTape?.(batch); }
-        else handlers.onLevels(decodeLevels(event.data as ArrayBuffer));
+        } else {
+          const kind = frameType(event.data as ArrayBuffer);
+          if (kind === 'tape') { const batch = decodeTape(event.data as ArrayBuffer); if (batch && tapeOn) handlers.onTape?.(batch); }
+          else if (kind === 'lt') {
+            const frame = decodeLt(event.data as ArrayBuffer), w = ltWaiting.get(frame.id);
+            // A frame for a question given up, timed out or refused finds no waiter and is let go.
+            if (w) { w.onFrame(frame); if (frame.done) { ltWaiting.delete(frame.id); window.clearTimeout(w.timer); w.off(); w.resolve(); } }
+          }
+          else handlers.onLevels(decodeLevels(event.data as ArrayBuffer));
+        }
       } catch (error) { console.error('live frame rejected', error); }
     };
     current.onclose = lost;
@@ -176,5 +272,72 @@ export function connectLive(handlers: LiveHandlers, { silenceMs = 20_000, pollMs
     lost();
   }, pollMs);
   open();
-  return { close() { closed = true; window.clearTimeout(timer); window.clearInterval(watchdog); socket?.close(); }, tape(on) { if (on !== tapeOn) { tapeOn = on; sayTape(); } } };
+  return {
+    close() { closed = true; window.clearTimeout(timer); window.clearInterval(watchdog); lsDrop('live-closed'); socket?.close(); },
+    tape(on) { if (on !== tapeOn) { tapeOn = on; sayTape(); } },
+    lsReadyWithin(ms) {
+      if (lsKnown !== 'unknown' || closed) return Promise.resolve(lsReady && !closed);
+      return new Promise<boolean>(resolve => {
+        const done = (ok: boolean): void => { window.clearTimeout(timer); lsReadyWaiters.delete(done); resolve(ok); };
+        const timer = window.setTimeout(() => done(false), ms);
+        lsReadyWaiters.add(done);
+      });
+    },
+    ltLane(ids, from, to, stepMs, half, onFrame, signal) {
+      const live = socket;
+      if (!ltOk || !live || live.readyState !== WebSocket.OPEN || ltWaiting.size >= LT_SOCKET_WAITING) return null;
+      if (signal?.aborted) return Promise.reject(new Error('cancelled'));
+      const id = ++ltNext;
+      return new Promise<void>((resolve, reject) => {
+        // Given up by its asker, or timed out: the server is told to stop (it frees the slot at once), and a late frame for it finds no waiter.
+        const stop = (): void => { if (live.readyState === WebSocket.OPEN) live.send(JSON.stringify({ t: 'lt', id, cancel: true })); };
+        const onAbort = (): void => { const w = ltWaiting.get(id); if (w) { ltWaiting.delete(id); window.clearTimeout(w.timer); reject(new Error('cancelled')); stop(); } };
+        const off = (): void => signal?.removeEventListener('abort', onAbort);
+        const timer = window.setTimeout(() => { ltWaiting.delete(id); off(); reject(new Error('live-timeout')); stop(); }, LT_SOCKET_TIMEOUT_MS);
+        ltWaiting.set(id, { onFrame, resolve, reject, timer, off });
+        signal?.addEventListener('abort', onAbort, { once: true });
+        live.send(JSON.stringify({ t: 'lt', id, inst: ids, from: Math.floor(from), to: Math.ceil(to), stepMs, half }));
+      });
+    },
+    longShort(inst, metric, tf, from, to, budgetMs, signal) {
+      const live = socket;
+      if (!lsReady || !live || live.readyState !== WebSocket.OPEN || lsWaiting.size >= LS_SOCKET_WAITING) return null;
+      if (signal?.aborted) return Promise.reject(new Error('cancelled'));
+      const id = ++lsNext;
+      return new Promise<LsSeries>((resolve, reject) => {
+        const onAbort = (): void => { const w = lsWaiting.get(id); if (w && !w.given) { w.given = true; reject(new Error('cancelled')); } };
+        const off = (): void => signal?.removeEventListener('abort', onAbort);
+        const timer = window.setTimeout(() => { lsWaiting.delete(id); off(); reject(new Error('live-timeout')); }, LS_SOCKET_TIMEOUT_MS);
+        lsWaiting.set(id, { resolve, reject, timer, off });
+        signal?.addEventListener('abort', onAbort, { once: true });
+        live.send(JSON.stringify({ t: 'ls', id, inst, metric, tf, from: Math.floor(from), to: Math.ceil(to), ...(budgetMs === undefined ? {} : { budget: Math.max(0, Math.round(budgetMs)) }) }));
+      });
+    },
+  };
+}
+
+/** The most long/short questions waiting on the live socket, those given up included until answered (the server answers 16 at once); past it they go over HTTP. */
+const LS_SOCKET_WAITING = 16;
+/** A question not answered on the socket in this long is given up (the pane's round has long ended). */
+const LS_SOCKET_TIMEOUT_MS = 60_000;
+/** The most Liquidity Tracker questions waiting on the live socket (the server answers four at once), and how long one may take before it is given up. */
+const LT_SOCKET_WAITING = 4;
+const LT_SOCKET_TIMEOUT_MS = 90_000;
+/** How long after its socket opens a server has to say it answers long/short questions there (it says so at once). */
+const LS_HELLO_MS = 3_000;
+/**
+ * The live connection: closed, told whether to send the trade dust, and asked long/short questions on (`longShort`: null where it cannot be,
+ * a server from before that never said it answers them, a socket not open, too many waiting: the caller asks over HTTP).
+ */
+export interface LiveConnection {
+  close(): void;
+  tape(on: boolean): void;
+  /** Whether its server answers long/short questions on it, waiting up to `ms` while that is not known yet (the socket connecting). */
+  lsReadyWithin(ms: number): Promise<boolean>;
+  longShort(inst: string, metric: LsMetric, tf: string, from: number, to: number, budgetMs?: number, signal?: AbortSignal): Promise<LsSeries> | null;
+  /**
+   * The Liquidity Tracker of these markets over [from, to) at `stepMs` for one half-life (an index into LT_HALF_LIVES), in frames handed to `onFrame`
+   * newest stretch first, settled when the last has come; null where the socket cannot ask it (a server from before, not open, too many waiting).
+   */
+  ltLane(ids: string[], from: number, to: number, stepMs: number, half: number, onFrame: (frame: LtFrame) => void, signal?: AbortSignal): Promise<void> | null;
 }

@@ -1,7 +1,7 @@
 import { el } from './dom.ts';
 import { compactBar, onLayoutMode } from './device.ts';
 import { scrimFor } from './sheet.ts';
-import { EDGE, anchorBox, chooseSide, placeOn, type Side } from './placement.ts';
+import { EDGE, anchorBox, besideBox, chooseSide, placeOn, type Box, type Side } from './placement.ts';
 import { makeDraggable } from './drag.ts';
 import { t } from './i18n.ts';
 import { sizeText, takeSize, type SizeRule, type SizeWhy } from './sizes.ts';
@@ -16,11 +16,16 @@ export interface PanelOptions {
   title: string;
   /** Width in px (the panel never exceeds the window). */
   width?: number;
-  /** Which edge of the anchor the panel lines up with. */
-  align?: 'left' | 'right';
+  /** Which edge of the anchor the panel lines up with, or `edge`: against the window's right edge (`placeOn`). */
+  align?: 'left' | 'right' | 'edge';
   onClose?: () => void;
   /** A press outside does not close it: a panel about what is on the map, kept open while the person works on the map (as a moved one is). */
   stays?: boolean;
+  /**
+   * The panel is made wider and taller by its lower corners (a window to read code in). The size it is given is kept in this browser under
+   * this name for the next time it opens; a double click on a corner gives back the size it opens at. Not on a phone, where it is a sheet.
+   */
+  resizable?: string;
 }
 export interface Panel {
   readonly root: HTMLElement;
@@ -31,6 +36,12 @@ export interface Panel {
   /** Replace the contents while keeping the scroll position. */
   render(build: (tools: HTMLElement, body: HTMLElement) => void): void;
   reposition(): void;
+  /**
+   * Place it beside `box` (in window pixels: what it is about, such as a selection on the chart) rather than by its button, until it is given
+   * another box or none (`null`: by its button again). The box is taken once: the panel does not follow what it is about as that moves. A
+   * panel the person has moved stays where they put it. It briefly lights up where it lands, so the eye finds it.
+   */
+  placeNear(box: Box | null): void;
   close(): void;
 }
 
@@ -38,14 +49,46 @@ let current: Panel | null = null;
 export const openedPanel = (): Panel | null => current;
 export const closePanel = (): void => current?.close();
 
+/** Where the sizes given to panels by their corners are kept, by the panel's name. */
+const PANEL_SIZES_KEY = 'hlm-panel-sizes-v1';
+/** The smallest a panel is made by its corners. */
+const PANEL_MIN = { width: 320, height: 200 } as const;
+type PanelSize = { width: number; height: number };
+
+function readSizes(): Record<string, PanelSize> {
+  try { const all: unknown = JSON.parse(window.localStorage.getItem(PANEL_SIZES_KEY) ?? '{}'); return all && typeof all === 'object' && !Array.isArray(all) ? all as Record<string, PanelSize> : {}; } catch { return {}; }
+}
+function readSize(name: string): PanelSize | null {
+  const all = readSizes(), s = Object.hasOwn(all, name) ? all[name] : undefined;
+  return s && typeof s === 'object' && Number.isFinite(s.width) && Number.isFinite(s.height) && s.width >= PANEL_MIN.width && s.height >= PANEL_MIN.height ? { width: s.width, height: s.height } : null;
+}
+function writeSize(name: string, size: PanelSize | null): void {
+  const all = readSizes();
+  if (size) all[name] = { width: Math.round(size.width), height: Math.round(size.height) }; else delete all[name];
+  try { window.localStorage.setItem(PANEL_SIZES_KEY, JSON.stringify(all)); } catch { /* storage unavailable: kept for this visit */ }
+}
+
+/**
+ * What a panel is placed by: its button, or where that button is folded away behind a pane header's settings key (pane-tune.ts: the Depth
+ * pane's Edit... opened from the key's panel) the key; a button with no box would put the panel in the window's corner.
+ */
+function placedBy(anchor: HTMLElement): HTMLElement {
+  if (anchor.getClientRects().length) return anchor;
+  const key = anchor.closest('.pane-head')?.querySelector<HTMLElement>(':scope > .tune-btn');
+  return key && key.getClientRects().length ? key : anchor;
+}
+
 export function openPanel(anchor: HTMLElement, options: PanelOptions, build: (tools: HTMLElement, body: HTMLElement) => void): Panel {
   current?.close();
   const closeButton = el('button', { class: 'panel-x', tip: t('Close (Esc)'), ariaLabel: t('Close'), type: 'button' });
   const head = el('div', { class: 'panel-head' }, el('h3', { textContent: options.title }), closeButton);
   const tools = el('div', { class: 'panel-tools' }), body = el('div', { class: 'panel-body' });
-  const root = el('div', { class: 'panel', role: 'dialog' }, head, tools, body);
+  const grips = options.resizable ? (['left', 'right'] as const).map(side => el('div', { class: `panel-grip ${side}`, tip: t('Drag to size the window; a double click gives back its size') })) : [];
+  const root = el('div', { class: 'panel', role: 'dialog' }, head, tools, body, ...grips);
   root.setAttribute('aria-label', options.title);
   const width = options.width ?? 380;
+  /** The size given by a corner (kept from an earlier visit), or none: the panel's width and its contents' height. */
+  let sized = options.resizable ? readSize(options.resizable) : null;
   document.body.append(root);
 
   /**
@@ -55,6 +98,8 @@ export function openPanel(anchor: HTMLElement, options: PanelOptions, build: (to
   const natural = (): number => { const keep = root.style.maxHeight; root.style.maxHeight = 'none'; const height = root.offsetHeight; root.style.maxHeight = keep; return height; };
   /** The side of its button it opened on: chosen when it opens and when the window changes, not on every redraw, so ticking an option cannot make it jump across the button. */
   let side: Side | null = null;
+  /** The box it is placed beside instead of its button (`placeNear`), or none. */
+  let near: Box | null = null;
   const drag = makeDraggable(root, {
     grabs: target => head.contains(target) && !target.closest('button, a, input, select, textarea'),
     enabled: () => !compactBar(),
@@ -63,11 +108,18 @@ export function openPanel(anchor: HTMLElement, options: PanelOptions, build: (to
 
   const reposition = (rechoose = false): void => {
     // On a phone the stylesheet makes every panel a bottom sheet, so no inline position or size may be left behind to fight it.
-    if (compactBar()) { drag.reset(); side = null; root.style.top = ''; root.style.left = ''; root.style.width = ''; root.style.maxHeight = ''; return; }
-    root.style.width = `${Math.min(width, window.innerWidth - 2 * EDGE)}px`;
+    if (compactBar()) { drag.reset(); side = null; root.style.top = ''; root.style.left = ''; root.style.width = ''; root.style.height = ''; root.style.maxHeight = ''; root.classList.remove('sized'); return; }
+    root.classList.toggle('sized', sized !== null);
+    root.style.width = `${Math.min(sized?.width ?? width, window.innerWidth - 2 * EDGE)}px`;
+    root.style.height = sized ? `${Math.min(sized.height, window.innerHeight - 2 * EDGE)}px` : '';
     if (drag.moved()) { drag.clamp(); return; }
+    if (near) {
+      const at = besideBox(near, natural(), root.offsetWidth, { width: window.innerWidth, height: window.innerHeight });
+      root.style.maxHeight = `${at.maxHeight}px`; root.style.top = `${at.top}px`; root.style.left = `${at.left}px`;
+      return;
+    }
     // A button of a top-bar deck places its panel by the whole deck: under the button alone the panel hid the deck's other row of buttons.
-    const a = anchor.getBoundingClientRect(), deck = anchor.closest('fieldset.deck')?.getBoundingClientRect();
+    const a = placedBy(anchor).getBoundingClientRect(), deck = anchor.closest('fieldset.deck')?.getBoundingClientRect();
     const box = anchorBox({ left: a.left, top: a.top, right: a.right, bottom: a.bottom }, deck ? { left: deck.left, top: deck.top, right: deck.right, bottom: deck.bottom } : null);
     const need = natural(), view = { width: window.innerWidth, height: window.innerHeight };
     if (side === null || rechoose) side = chooseSide(box, need, view);
@@ -82,18 +134,35 @@ export function openPanel(anchor: HTMLElement, options: PanelOptions, build: (to
     if (!root.contains(t) && !anchor.contains(t) && !(t instanceof Element && t.closest('.menu'))) panel.close();
   };
   const scrim = scrimFor(root, 59, () => panel.close());
-  const onKey = (event: KeyboardEvent): void => { if (event.key === 'Escape') panel.close(); };
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.key !== 'Escape') return;
+    const dialog = document.querySelector('dialog[open]');
+    if (dialog && !dialog.contains(root)) return;
+    // A menu or a dropdown's list opened from a control inside the panel takes its own Escape first, and the panel stays (as the desktop's
+    // dropdown did): this listener was added before the menu's, so it would run first and close both.
+    if (document.querySelector('.menu')) return;
+    event.preventDefault(); panel.close();
+  };
   const onResize = (): void => { scrim.sync(); reposition(true); };
   const stopMode = onLayoutMode(onResize);
   const panel: Panel = {
     root, tools, body, anchor,
     render(next) {
-      const keep = body.scrollTop;
+      // A control that rebuilds the panel keeps the keyboard where it was when it carries a key of its own (`data-focus`): arrows through a
+      // group of round buttons go on from the one just chosen.
+      const keep = body.scrollTop, active = document.activeElement, focus = active instanceof HTMLElement && body.contains(active) ? active.dataset.focus : undefined;
       tools.replaceChildren(); body.replaceChildren(); next(tools, body);
       tools.hidden = tools.childElementCount === 0;
       reposition(); body.scrollTop = keep;
+      if (focus) [...body.querySelectorAll<HTMLElement>('[data-focus]')].find(x => x.dataset.focus === focus)?.focus({ preventScroll: true });
     },
     reposition: () => reposition(),
+    placeNear(box) {
+      near = box; reposition(true);
+      if (!box || compactBar() || drag.moved()) return;
+      // Started again on every new place (a class left on would not run its animation a second time).
+      root.classList.remove('arrive'); void root.offsetWidth; root.classList.add('arrive');
+    },
     close() {
       if (current !== panel) return;
       current = null; root.remove(); scrim.remove(); anchor.classList.remove('open');
@@ -102,6 +171,45 @@ export function openPanel(anchor: HTMLElement, options: PanelOptions, build: (to
     },
   };
   closeButton.onclick = () => panel.close();
+  // A corner takes the panel's edge with it (the left one its left edge, the right one its right), and its foot; the panel stays where it is.
+  for (const grip of grips) {
+    grip.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || compactBar()) return;
+      event.preventDefault(); event.stopPropagation();
+      const r = root.getBoundingClientRect(), fromLeft = grip.classList.contains('left'), id = event.pointerId;
+      const start = { x: event.clientX, y: event.clientY, left: r.left, top: r.top, width: r.width, height: r.height };
+      let at = { x: start.x, y: start.y }, frame = 0, held = false;
+      const apply = (): void => {
+        frame = 0;
+        if (!held) { held = true; drag.hold(); }
+        const vw = window.innerWidth, vh = window.innerHeight, dx = at.x - start.x;
+        const most = fromLeft ? start.left + start.width - EDGE : vw - EDGE - start.left, tallest = vh - start.top - EDGE;
+        const w = Math.max(Math.min(PANEL_MIN.width, most), Math.min(most, start.width + (fromLeft ? -dx : dx)));
+        const h = Math.max(Math.min(PANEL_MIN.height, tallest), Math.min(tallest, start.height + at.y - start.y));
+        sized = { width: w, height: h };
+        root.classList.add('sized');
+        root.style.left = `${fromLeft ? start.left + start.width - w : start.left}px`; root.style.width = `${w}px`; root.style.height = `${h}px`; root.style.maxHeight = `${tallest}px`;
+      };
+      const move = (e: PointerEvent): void => { if (e.pointerId !== id) return; at = { x: e.clientX, y: e.clientY }; if (!frame) frame = requestAnimationFrame(apply); };
+      const end = (e: PointerEvent): void => {
+        if (e.pointerId !== id) return;
+        if (frame) { cancelAnimationFrame(frame); apply(); }
+        root.classList.remove('being-sized');
+        window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', end); window.removeEventListener('pointercancel', end);
+        try { grip.releasePointerCapture(id); } catch { /* never held */ }
+        if (!held) return;
+        if (sized && options.resizable) writeSize(options.resizable, { width: Math.max(PANEL_MIN.width, sized.width), height: Math.max(PANEL_MIN.height, sized.height) });
+        drag.clamp();
+      };
+      root.classList.add('being-sized');
+      try { grip.setPointerCapture(id); } catch { /* the size follows the window's events anyway */ }
+      window.addEventListener('pointermove', move); window.addEventListener('pointerup', end); window.addEventListener('pointercancel', end);
+    });
+    grip.addEventListener('dblclick', () => {
+      if (!options.resizable) return;
+      sized = null; writeSize(options.resizable, null); drag.reset(); reposition(true);
+    });
+  }
   current = panel; anchor.classList.add('open'); scrim.sync();
   panel.render(build);
   document.addEventListener('pointerdown', onPointer, true); document.addEventListener('keydown', onKey, true); window.addEventListener('resize', onResize);
@@ -150,6 +258,9 @@ export function selectRow(name: string, description: string, options: readonly [
   const select = el('select');
   for (const [v, label] of options) select.append(new Option(label, v));
   select.value = value; select.onchange = () => onChange(select.value);
+  // Its key for the keyboard (`data-focus`): a choice that rebuilds the panel leaves the focus on the new select in its place, whether the
+  // choice was made with the arrows or in the dropdown's list (menu.ts gives it back there after a choice).
+  select.dataset.focus = `select:${name}`;
   // A long choice ("Aggregated: every market switched on") does not fit the 150 px select beside the name: the select takes a line of its own under it (pin-field).
   const row = el('label', { class: 'field', tip: description },
     el('span', { class: 'label' }, el('span', { class: 'name', textContent: name }), el('span', { class: 'desc', textContent: description })), select);

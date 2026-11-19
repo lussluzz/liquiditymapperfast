@@ -11,6 +11,11 @@ export interface ColumnSet {
   times: number[]; counts: number[]; samples: number[];
   bins: Int32Array; bid: Float32Array; ask: Float32Array;
   lt?: Float32Array;
+  /**
+   * In an answer to a question for each window's close: the minute each window's book is of (the latest recorded inside it). Absent where
+   * the windows are averages (a question for those, or a source from before).
+   */
+  at?: number[];
 }
 
 /**
@@ -25,7 +30,13 @@ export function packLt(columns: readonly Column[]): Float32Array | undefined {
   columns.forEach((c, k) => { if (whole(c)) out.set(c.lt!, k * LT_LENGTH); });
   return out;
 }
-export interface ColumnsFrame { from: number; to: number; stepMs: number; instruments: ColumnSet[] }
+/**
+ * `since`, where a source tells it (the browser's): per instrument, where the newest run of minutes it holds begins (`DepthRecorder.contiguousSince`,
+ * +Infinity for one it holds none of), so the long history's tiles fill what lies before it the same way for every question (app/archive/).
+ */
+export interface ColumnsFrame { from: number; to: number; stepMs: number; instruments: ColumnSet[]; since?: Record<string, number> }
+/** A run of recorded minutes continues over a gap of at most this (a book away a few minutes); a longer one starts a new run. */
+export const CONTIGUOUS_GAP_MS = 5 * 60_000;
 
 /** Most instruments one /api/v2/columns request serves; the client splits a longer list into requests of this size. */
 export const COLUMNS_PER_REQUEST = 12;

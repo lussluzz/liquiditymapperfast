@@ -8,6 +8,24 @@ export interface HeatStyle {
   min: number; max: number; opacity: number; mode: 'size' | 'sides';
 }
 
+/** What draws the map's heatmap: WebGL2 (`HeatGL`), or a 2D canvas where the browser gives the page no WebGL2 (`HeatCanvas`, canvas.ts). */
+export interface HeatRenderer {
+  /** Which: the page says so where there is no graphics acceleration (statusbar.ts). */
+  readonly kind: 'webgl2' | '2d';
+  readonly canvas: HTMLCanvasElement;
+  /** Install the 256×1 RGBA8 colour ramp used by the 'size' style. */
+  setLut(rgba: Uint8Array): void;
+  /** The largest grid side it takes. */
+  readonly maxSize: number;
+  /** What the last grid covers. */
+  readonly coverage: Bounds | null;
+  /** A grid of `w` x `h` cells, two floats each (bids, asks), row 0 the lowest price, covering `bounds`. The renderer may keep `grid`: never change it after. */
+  upload(grid: Float32Array, w: number, h: number, bounds: Bounds): void;
+  resize(width: number, height: number, dpr: number): void;
+  clear(): void;
+  draw(view: Bounds, style: HeatStyle): void;
+}
+
 const VERT = `#version 300 es
 out vec2 uv;
 void main() {
@@ -24,15 +42,8 @@ uniform vec4 view;   // t0, t1, p0, p1 of the screen
 uniform vec4 tex;    // t0, t1, p0, p1 covered by the texture
 uniform vec4 range;  // min, max, opacity, mode (0 = size ramp, 1 = two hues)
 uniform vec3 bidC, bidS, askC, askS;
-uniform vec4 fill;   // boundary and sample time (ms from the view origin), enabled, unused
-uniform vec3 fillRgb; // the grey the backfilled levels are drawn in
 void main() {
   float t = mix(view.x, view.y, uv.x);
-  // Before the first recorded column there is no history. With the fill on, the current book is drawn there in grey instead of colour:
-  // the same sizes on the same scale (a bigger wall is a darker grey), but never a colour, so what is real and what is backfilled cannot
-  // be mistaken for each other. It is a picture, not data, and only this shader ever sees it.
-  bool back = fill.z > 0.5 && t < fill.x;
-  if (back) t = fill.y;
   float p = mix(view.z, view.w, uv.y);
   vec2 q = vec2((t - tex.x) / (tex.y - tex.x), (p - tex.z) / (tex.w - tex.z));
   if (q.x < 0.0 || q.x >= 1.0 || q.y < 0.0 || q.y >= 1.0) discard;
@@ -45,7 +56,6 @@ void main() {
     float lo = log(max(range.x, 1.0)), hi = log(max(range.y, range.x * 1.0001 + 1.0));
     float s = (log(total) - lo) / max(hi - lo, 1e-6);
     if (s <= 0.0) discard;
-    if (back) { color = vec4(fillRgb, (0.16 + 0.74 * clamp(s, 0.0, 1.0)) * smoothstep(0.0, 0.06, s) * range.z); return; }
     color = vec4(texture(lut, vec2(clamp(s, 0.0, 1.0), 0.5)).rgb, smoothstep(0.0, 0.06, s) * range.z);
     return;
   }
@@ -53,12 +63,12 @@ void main() {
   float a = clamp((max(v.r, v.g) - range.x) / max(range.y - range.x, 1e-6), 0.0, 1.0);
   if (a <= 0.0) discard;
   vec3 c = mix(isAsk ? askS : bidS, isAsk ? askC : bidC, a);
-  if (back) { color = vec4(fillRgb, (0.16 + 0.74 * a) * range.z); return; }
   color = vec4(c, pow(a, 0.75) * range.z);
 }`;
 
 /** Draws a bid/ask USD grid texture as a colour-mapped heatmap. */
-export class HeatGL {
+export class HeatGL implements HeatRenderer {
+  readonly kind = 'webgl2' as const;
   readonly gl: WebGL2RenderingContext;
   #program: WebGLProgram;
   #texture: WebGLTexture;
@@ -71,26 +81,33 @@ export class HeatGL {
     const gl = canvas.getContext('webgl2', { premultipliedAlpha: false, alpha: true, antialias: false, preserveDrawingBuffer: true });
     if (!gl) throw new Error(t('WebGL2 is required for the heatmap'));
     this.gl = gl;
-    const compile = (type: number, source: string) => {
-      const shader = gl.createShader(type)!; gl.shaderSource(shader, source); gl.compileShader(shader);
-      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader) ?? t('shader compile failed'));
-      return shader;
-    };
-    const program = gl.createProgram()!;
-    gl.attachShader(program, compile(gl.VERTEX_SHADER, VERT)); gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FRAG));
-    gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) ?? t('program link failed'));
-    this.#program = program;
-    for (const name of ['grid', 'lut', 'view', 'tex', 'range', 'bidC', 'bidS', 'askC', 'askS', 'fill', 'fillRgb']) this.#loc[name] = gl.getUniformLocation(program, name);
-    this.#texture = gl.createTexture()!;
-    gl.bindTexture(gl.TEXTURE_2D, this.#texture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    this.#lut = gl.createTexture()!;
-    gl.bindTexture(gl.TEXTURE_2D, this.#lut);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    // A context that cannot draw the heatmap (a lost one, a shader the driver refuses) is let go at once: the page draws it without WebGL.
+    try {
+      const compile = (type: number, source: string) => {
+        const shader = gl.createShader(type)!; gl.shaderSource(shader, source); gl.compileShader(shader);
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader) || t('shader compile failed'));
+        return shader;
+      };
+      const program = gl.createProgram()!;
+      gl.attachShader(program, compile(gl.VERTEX_SHADER, VERT)); gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FRAG));
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || t('program link failed'));
+      this.#program = program;
+      for (const name of ['grid', 'lut', 'view', 'tex', 'range', 'bidC', 'bidS', 'askC', 'askS']) this.#loc[name] = gl.getUniformLocation(program, name);
+      this.#texture = gl.createTexture()!;
+      gl.bindTexture(gl.TEXTURE_2D, this.#texture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      this.#lut = gl.createTexture()!;
+      gl.bindTexture(gl.TEXTURE_2D, this.#lut);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      if (gl.isContextLost()) throw new Error('WebGL2 context lost');
+    } catch (error) {
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      throw error;
+    }
   }
 
   /** Install the 256×1 RGBA8 colour ramp used by the 'size' style. */
@@ -123,8 +140,7 @@ export class HeatGL {
     gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
   }
 
-  /** `fill`: before `boundary` (epoch ms) draw the book at `sample` in the grey `rgb`, as a placeholder for history that was never recorded. */
-  draw(view: Bounds, style: HeatStyle, fill?: { boundary: number; sample: number; rgb: [number, number, number] } | null): void {
+  draw(view: Bounds, style: HeatStyle): void {
     const { gl } = this;
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
@@ -138,8 +154,6 @@ export class HeatGL {
     gl.uniform4f(l.view!, 0, view.t1 - view.t0, 0, view.p1 - view.p0);
     gl.uniform4f(l.tex!, b.t0 - view.t0, b.t1 - view.t0, b.p0 - view.p0, b.p1 - view.p0);
     gl.uniform4f(l.range!, style.min, style.max, style.opacity, style.mode === 'size' ? 0 : 1);
-    gl.uniform4f(l.fill!, fill ? fill.boundary - view.t0 : 0, fill ? fill.sample - view.t0 : 0, fill ? 1 : 0, 0);
-    gl.uniform3fv(l.fillRgb!, fill ? fill.rgb : [0.5, 0.5, 0.5]);
     gl.uniform3fv(l.bidC!, style.bid); gl.uniform3fv(l.bidS!, style.bidSoft);
     gl.uniform3fv(l.askC!, style.ask); gl.uniform3fv(l.askS!, style.askSoft);
     gl.drawArrays(gl.TRIANGLES, 0, 3);

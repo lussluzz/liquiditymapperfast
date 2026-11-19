@@ -1,25 +1,56 @@
 import { t } from '../i18n.ts';
 import { knownZone, localZone, minutesOf, type SessionDef } from './sessions.ts';
+import { PROFILE_METRICS, isMetric, type ProfileMetric } from '../measures/registry.ts';
+import { defaultSet, readProfileSet, setFromLegacy, type ProfileSet } from './profiles.ts';
+import { ANCHOR_BAR_MS, ANCHOR_EVERY, ANCHOR_EVERY_DEFAULT } from './anchor.ts';
+import { newAnchorId, readAnchor, readColor, type Anchor, type AnchorRule } from '../anchors/anchors.ts';
 
 /**
  * The Traded feature's settings (the column itself is switched on and off with `show.traded`):
  * - the column's bars: buys and sells side by side, or the difference (delta);
  * - whether the column marks the point of control and the value area, which share of the volume the value area holds, and the size of the
  *   price rows they are read from (a multiple of the map's grid step: the column's own rows follow the zoom, these must not);
- * - the lines on the chart: the point of control, the value area high and low, their labels, and what they are worked out over: what is on
- *   the chart, each day or week of a zone, or sessions; what days, weeks and sessions are worked out from (the recording, as far back as it
- *   keeps trades, or the most traded venue's candles, an estimate that reaches back further); how many past ones are drawn, and whether a
- *   point of control nobody has traded through since (a naked one) runs on to the right.
+ * - the lines on the chart: the point of control, the value area high and low, their labels and tags; across the chart what the columns add
+ *   up, which is always what is on the chart, and on it the periods chosen (each day, week or month of a zone, or sessions) with their past
+ *   ones, the profiles of one kind of them, what they are worked out from (the recording, as far back as it keeps trades, or the most traded
+ *   venue's candles, an estimate that reaches back further), and whether a point of control nobody has traded through since (a naked one)
+ *   runs on to the right;
+ * - where each measure's profile is drawn: right or left of the map by price, or along the top by time (traded/profiles.ts), over the same
+ *   stretch and in the same look.
  */
+/** A kind of window drawn on the chart. */
+export type LineKind = 'day' | 'week' | 'month' | 'sessions';
+export const LINE_KINDS: readonly LineKind[] = ['day', 'week', 'month', 'sessions'];
+
 export interface TradedSettings {
+  /**
+   * Where each measure's profile is drawn (traded/profiles.ts): a column right of the map, a column left of it, or a band along the top, any
+   * measure of the registry (measures/registry.ts) in any of them, each over what is on the chart in the look set below.
+   */
+  placements: ProfileSet;
   bars: 'split' | 'delta';
+  /** Split bars draw the stronger side of each row a little brighter and the weaker dimmer, the more one-sided the more (traded/emphasis.ts). */
+  emphasis: boolean;
   valueArea: boolean;
   /** The value area's share of the volume, in percent. */
   share: number;
   /** Row size for the point of control and the value area, as a multiple of the map's grid step. */
   rows: number;
   poc: boolean; va: boolean; labels: boolean;
-  period: 'view' | 'day' | 'week' | 'sessions';
+  /**
+   * The periods drawn on the chart (Karl, 2026-10-19: the columns always add up what is on the chart, so the fixed column at the side is in
+   * step with it; days, weeks, months and sessions are drawn over their own time): each kind's point-of-control and value-area lines, its
+   * past ones, names and untouched runs.
+   */
+  lines: LineKind[];
+  /**
+   * Whether the chart window's own lines are drawn: the point of control and value area of everything on the chart, the columns' levels
+   * (Karl, 2026-10-20: a row of the periods grid of its own, on by default and independent of the period lines, so no lines at all is a choice
+   * the grid can show).
+   */
+  windowLines: boolean;
+  /** The one kind whose traded-volume profiles are drawn on the chart, over each window's own time (one, so they never lie over each other); null: none. */
+  profiles: LineKind | null;
   /**
    * What days, weeks and sessions are worked out from: `recorded`, the recording's trades on the flow column's venues (only as far back as
    * the recording keeps them: `recordedCount`), or `candles`, one venue's candles with each one's volume spread over its range (`candleLevels`).
@@ -30,12 +61,53 @@ export interface TradedSettings {
   /** How many past days, weeks or sessions (of each session) are drawn, the open one among them (from the recording, at most `recordedCount`). */
   count: number;
   naked: boolean;
+  /**
+   * Whether the previous period's point of control and value area are carried across the one under way, dashed and fainter, whether or not
+   * price has traded through them (Karl, 2026-10-25): for each kind whose lines are on, from the recording only while it still holds that
+   * period, else from candles.
+   */
+  carry: boolean;
+  /** Whether the lines that reach the right edge (the window under way, an untouched point of control running on) are named on the price axis. */
+  tags: boolean;
   sessions: SessionDef[];
+  /**
+   * What the columns by price add up (Karl, 2026-11-10): what is on the chart (the default, as since 2026-10-19), or from the coin's anchor
+   * up to now (`anchors`, `traded/anchor.ts`), worked out again every `every` minutes. The bands along the top stay with the chart.
+   */
+  columns: 'chart' | 'anchor';
+  /**
+   * Each coin's anchor (`anchors/anchors.ts`): fixed at a moment on five minutes, or live by a rule ("Start of month", "Week low so far"); at
+   * most `MAX_ANCHOR_COINS` coins. Like the VWAP's, the chart's own, not a layout's. Saved as a bare time before 2026-11-11.
+   */
+  anchors: Record<string, Anchor>;
+  /** How often an anchored window is worked out again, in minutes (`ANCHOR_EVERY`). */
+  every: number;
+  /**
+   * Colours chosen instead of the theme's (a user, 2026-11-10: colours for screenshots): the buys, the sells, and the point of control with the
+   * value area, wherever the profile is drawn. Layouts carry them.
+   */
+  colors: TradedColors;
 }
+
+/** The volume profile's own colours (`#rrggbb`); one not chosen is the theme's (its buy, sell and point-of-control colours). */
+export interface TradedColors { buy?: string; sell?: string; levels?: string }
+/** The profile's colours as kept, each a `#rrggbb` or none. */
+export function readTradedColors(saved: unknown): TradedColors {
+  const c = (saved && typeof saved === 'object' ? saved : {}) as Record<string, unknown>, out: TradedColors = {};
+  for (const key of ['buy', 'sell', 'levels'] as const) { const color = readColor(c[key]); if (color) out[key] = color; }
+  return out;
+}
+
+/**
+ * The profile along the top as saves from 2026-10-20 held it, before it was one of the places a measure can be drawn: one measure, on or
+ * off. Read into `placements` (`setFromLegacy`).
+ */
+export interface LegacyTop { on: boolean; metric: ProfileMetric }
+const LEGACY_TOP: LegacyTop = { on: true, metric: 'volume' };
 
 export const ROW_MULTIPLES = [0.25, 0.5, 1, 2, 5, 10] as const;
 export const SHARES = [50, 60, 68, 70, 75, 80, 85, 90, 95] as const;
-export const MAX_SESSIONS = 8, MAX_COUNT = 20;
+export const MAX_SESSIONS = 8, MAX_COUNT = 20, MAX_MONTHS = 4;
 
 const DAY = 86_400_000;
 /**
@@ -43,14 +115,31 @@ const DAY = 86_400_000;
  * trades: those that began inside it (`recordedWindows`). Days and sessions: one a day kept. Weeks: the one under way, which began at most
  * seven days ago, and none when less than a week is kept (a page reading the exchanges itself keeps a day). Older ones are no longer there.
  */
-export function recordedCount(period: TradedSettings['period'], retentionMs: number): number {
+export function recordedCount(period: LineKind, retentionMs: number): number {
+  if (period === 'month') return 0;
   if (period === 'week') return retentionMs >= 7 * DAY ? 1 : 0;
   return Math.max(0, Math.floor(retentionMs / DAY));
 }
+/** The settings as they apply to one kind of window: what the helpers below read. */
+export type KindSettings = Pick<TradedSettings, 'source' | 'count' | 'zone' | 'sessions'> & { period: LineKind };
 /** How many past ones are drawn: the setting, and from the recording no more than it can still work out. */
-export function linesCount(s: TradedSettings, retentionMs: number): number {
-  return s.source === 'candles' ? s.count : Math.min(s.count, recordedCount(s.period, retentionMs));
+export function linesCount(s: KindSettings, retentionMs: number): number {
+  return linesSource(s) === 'candles' ? Math.min(s.count, mostCount(s)) : Math.min(s.count, recordedCount(s.period, retentionMs));
 }
+/**
+ * The kinds of window drawn on the chart: those whose lines are on, then the profiles' kind when its lines are not, each once (a profile is
+ * drawn on its window's levels, so its windows are worked out either way).
+ */
+export function chartKinds(s: Pick<TradedSettings, 'lines' | 'profiles'>): LineKind[] {
+  return [...s.lines, ...(s.profiles && !s.lines.includes(s.profiles) ? [s.profiles] : [])];
+}
+/**
+ * What the lines of past days, weeks, months or sessions are worked out from: the setting, but a month always from candles (it is longer
+ * than the recording keeps, so no month can be worked out from it; the panel says so rather than offer the choice).
+ */
+export const linesSource = (s: Pick<KindSettings, 'period' | 'source'>): TradedSettings['source'] => s.period === 'month' ? 'candles' : s.source;
+/** How many past ones candles can draw: twenty weeks of them hold four whole months. */
+export const mostCount = (s: Pick<KindSettings, 'period'>): number => s.period === 'month' ? MAX_MONTHS : MAX_COUNT;
 
 /** The zones offered by name: the page's clock, UTC, this computer, and the cities whose markets set the usual sessions. */
 export const ZONES: readonly { zone: string; label: string }[] = [
@@ -72,9 +161,12 @@ export const SESSION_PRESETS: readonly Omit<SessionDef, 'id' | 'on'>[] = [
 const preset = (i: number, id: string): SessionDef => ({ ...SESSION_PRESETS[i]!, id, on: true });
 
 export const TRADED_DEFAULTS: Readonly<TradedSettings> = {
-  bars: 'split', valueArea: true, share: 70, rows: 1, poc: true, va: true, labels: true,
-  period: 'view', source: 'recorded', zone: 'page', count: 5, naked: true,
+  placements: defaultSet(), bars: 'split', emphasis: true, valueArea: true, share: 70, rows: 1, poc: true, va: true, labels: true, tags: true,
+  // Each day's lines on the chart from the first visit (Karl, 2026-10-20: what is new must show without hunting for it); its profiles no
+  // longer (Karl, 2026-10-28: the daily profile off by default, the profiles at the side kept): one click in the panel's Profiles row.
+  lines: ['day'], windowLines: true, profiles: null, source: 'recorded', zone: 'page', count: 5, naked: true, carry: true,
   sessions: [preset(0, 's1'), preset(1, 's2'), preset(2, 's3')],
+  columns: 'chart', anchors: {}, every: ANCHOR_EVERY_DEFAULT, colors: {},
 };
 
 /** The IANA name of a stored zone: `page` follows the page's clock setting, `local` is this computer's. */
@@ -97,23 +189,100 @@ function readSession(value: unknown, index: number): SessionDef | null {
   return { id, name, zone: s.zone, start: s.start, end: s.end, on: flag(s.on, true), weekdays: flag(s.weekdays, false) };
 }
 
-/** Settings from storage, field by field: whatever is missing or not valid falls back to the default. */
-export function readTraded(saved: unknown): TradedSettings {
+/** The measures of an older save's list of columns this page knows, each once, in the registry's order; null when none is left. */
+export function readMetrics(saved: readonly unknown[]): ProfileMetric[] | null {
+  const kept = PROFILE_METRICS.filter(m => saved.includes(m));
+  return kept.length ? kept : null;
+}
+
+/**
+ * Settings from storage, field by field: whatever is missing or not valid falls back to the default. A save from before the places (its
+ * columns' `metrics`, or one `metric`, and its profile along the top, `top`, or a measure strip beside it, `strip`) has each column right
+ * of the map and its profile along the top as it was, switched off where it was off; read again, the places read as themselves.
+ */
+export function readTraded(saved: unknown, strip: LegacyTop | null = null): TradedSettings {
   const s = (saved && typeof saved === 'object' ? saved : {}) as Record<string, unknown>, d = TRADED_DEFAULTS;
   const count = typeof s.count === 'number' && Number.isFinite(s.count) ? Math.max(1, Math.min(MAX_COUNT, Math.round(s.count))) : d.count;
   const sessions = Array.isArray(s.sessions) ? s.sessions.slice(0, MAX_SESSIONS).flatMap((x, i) => { const r = readSession(x, i); return r ? [r] : []; }) : d.sessions.map(x => ({ ...x }));
   // Ids are what a window's key is made of: two sessions must not share one.
   const seen = new Set<string>();
   for (const x of sessions) { while (seen.has(x.id)) x.id = `${x.id}x`.slice(-24); seen.add(x.id); }
+  // A save from when the columns could add up a day, week, month or sessions (`period`): that kind is drawn on the chart instead, with its
+  // profiles there when they were drawn (`pastProfiles`).
+  const kind = (v: unknown): LineKind | null => LINE_KINDS.includes(v as LineKind) ? v as LineKind : null;
+  const old = kind(s.period), wanted = Array.isArray(s.lines) ? s.lines as unknown[] : old ? [] : [...d.lines];
+  // A save from before the places says what its columns and its profile along the top were; one that says nothing gets the first visit's.
+  const legacy = s.metrics !== undefined || s.metric !== undefined || s.top !== undefined || strip !== null;
   return {
-    bars: oneOf(['split', 'delta'] as const, s.bars, d.bars),
+    // A save from when the column showed one measure (`metric`) reads as that one column.
+    placements: readProfileSet(s.placements) ?? (legacy ? setFromLegacy(readMetrics(Array.isArray(s.metrics) ? s.metrics : [s.metric]) ?? ['volume'], readTop(s.top) ?? strip ?? LEGACY_TOP) : defaultSet()),
+    bars: oneOf(['split', 'delta'] as const, s.bars, d.bars), emphasis: flag(s.emphasis, d.emphasis),
     valueArea: flag(s.valueArea, d.valueArea), share: oneOf(SHARES, s.share, d.share), rows: oneOf(ROW_MULTIPLES, s.rows, d.rows),
-    poc: flag(s.poc, d.poc), va: flag(s.va, d.va), labels: flag(s.labels, d.labels),
-    period: oneOf(['view', 'day', 'week', 'sessions'] as const, s.period, d.period),
+    poc: flag(s.poc, d.poc), va: flag(s.va, d.va), labels: flag(s.labels, d.labels), tags: flag(s.tags, d.tags),
+    lines: LINE_KINDS.filter(k => wanted.includes(k) || k === old), windowLines: flag(s.windowLines, d.windowLines),
+    profiles: s.profiles === null ? null : kind(s.profiles) ?? (s.pastProfiles === true ? old : s.profiles === undefined ? d.profiles : null),
     source: oneOf(['recorded', 'candles'] as const, s.source, d.source),
-    zone: zoneOk(s.zone) ? s.zone : d.zone, count, naked: flag(s.naked, d.naked), sessions,
+    zone: zoneOk(s.zone) ? s.zone : d.zone, count, naked: flag(s.naked, d.naked), carry: flag(s.carry, d.carry), sessions,
+    columns: s.columns === 'anchor' ? 'anchor' : 'chart', anchors: readAnchors(s.anchors), every: oneOf(ANCHOR_EVERY, s.every, d.every),
+    colors: readTradedColors(s.colors),
   };
 }
+
+/** Coins whose profile anchors are kept (a person tries many coins; the oldest coins' go first). */
+const MAX_ANCHOR_COINS = 20;
+/**
+ * Saved profile anchors, checked: a coin's name, and an anchor (`readAnchor`), a fixed one's time on five minutes. A save from before
+ * 2026-11-11 holds bare times: read as fixed anchors at those times.
+ */
+function readAnchors(saved: unknown): Record<string, Anchor> {
+  const out: Record<string, Anchor> = {};
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return out;
+  for (const [coin, x] of Object.entries(saved as Record<string, unknown>).slice(-MAX_ANCHOR_COINS)) {
+    if (!/^[A-Z0-9]{1,20}$/.test(coin)) continue;
+    const a = readAnchor(x, 0);
+    if (a) out[coin] = a.at !== undefined ? { ...a, at: Math.floor(a.at / ANCHOR_BAR_MS) * ANCHOR_BAR_MS } : a;
+  }
+  return out;
+}
+
+/** A coin's profile anchor, fixed or live; null when it has none (where it starts now is the map's to say: `HeatPane.profileAnchorStart`). */
+export const profileAnchorOf = (s: Pick<TradedSettings, 'anchors'>, coin: string): Anchor | null => s.anchors[coin] ?? null;
+/**
+ * The settings with `coin`'s profile anchor fixed at `add.at` (on five minutes) or following `add.rule` (one a coin: setting it again
+ * replaces it, keeping its id), or without one (null).
+ */
+export function withProfileAnchor(s: TradedSettings, coin: string, add: { at: number } | { rule: AnchorRule } | null): TradedSettings {
+  const { [coin]: old, ...others } = s.anchors;
+  if (add === null) return { ...s, anchors: others };
+  const id = old?.id ?? newAnchorId();
+  const anchor: Anchor = 'at' in add ? { id, at: Math.floor(add.at / ANCHOR_BAR_MS) * ANCHOR_BAR_MS, slot: 0 } : { id, rule: add.rule, slot: 0 };
+  return { ...s, anchors: { ...others, [coin]: anchor } };
+}
+/** The settings with `coin`'s profile anchor put back as it was (Undo after a remove). */
+export function restoreProfileAnchor(s: TradedSettings, coin: string, anchor: Anchor): TradedSettings {
+  return { ...s, anchors: { ...s.anchors, [coin]: anchor } };
+}
+
+/** An older save's profile along the top, or null when it has none to read (a save from before it, or junk). */
+function readTop(saved: unknown): LegacyTop | null {
+  if (!saved || typeof saved !== 'object') return null;
+  const s = saved as Record<string, unknown>;
+  return { on: flag(s.on, LEGACY_TOP.on), metric: isMetric(s.metric) ? s.metric : LEGACY_TOP.metric };
+}
+
+/**
+ * The profile along the top from the measure strip it replaced (`measureStrip`, saved from 2026-10-19 to 2026-10-20), or null when a save
+ * has none: its switch as it was, open interest as open interest, and delta as traded volume (the bars' Delta setting draws the delta, and
+ * `bars` is left as it was chosen).
+ */
+export function topFromStrip(saved: unknown): LegacyTop | null {
+  if (!saved || typeof saved !== 'object') return null;
+  const s = saved as Record<string, unknown>;
+  return { on: s.on === true, metric: s.kind === 'oi' ? 'oi' : 'volume' };
+}
+
+/** Whether stored Volume profile settings say where the profile along the top is already (then a measure strip beside them is not read). */
+export const hasTop = (saved: unknown): boolean => !!saved && typeof saved === 'object' && ((saved as Record<string, unknown>).top !== undefined || (saved as Record<string, unknown>).placements !== undefined);
 
 /** A new session's id: one no session in the list has. */
 export function newSessionId(sessions: readonly SessionDef[]): string {

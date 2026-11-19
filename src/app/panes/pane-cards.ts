@@ -3,6 +3,9 @@ import { anomalies, type HighlightOptions } from '../anomaly.ts';
 import { clock, price as fmtPrice, usd } from '../format.ts';
 import { signedUsd } from '../cvd/text.ts';
 import { t } from '../i18n.ts';
+import { bandText } from '../depth-settings.ts';
+import { viewParts, type LiqView } from '../liq-view.ts';
+import { ratioFigure, sideRatio } from './pane-table.ts';
 
 /**
  * What the popup says for a point of the Depth, Liquidity Tracker and Open Interest panes: the lines of the box (infobox.ts / hovercard.ts)
@@ -18,7 +21,7 @@ export const depthColumns = (plotW: number): number => Math.min(1200, Math.max(6
  * columns of the answer: the map following the live edge moves a little on every frame, and asking again for each of those kept the worker
  * busy for nothing (what is live is refreshed on a clock instead).
  */
-export function depthKey(ids: readonly string[], t0: number, t1: number, plotW: number, range: number, columnsVersion: number): string {
+export function depthKey(ids: readonly string[], t0: number, t1: number, plotW: number, range: number | string, columnsVersion: number): string {
   const span = t1 - t0, column = span / depthColumns(plotW);
   return `${ids.join(',')}|${Math.round(span)}|${column > 0 ? Math.floor(t0 / column) : 0}|${plotW}|${range}|${columnsVersion}`;
 }
@@ -83,23 +86,58 @@ function imbalanceLine(bid: number, ask: number): InfoLine | null {
   if (Math.abs(share) < 0.005) return { label: t('Imbalance'), text: '0%' };
   return { label: t('Imbalance'), text: `${share > 0 ? t('bids') : t('asks')} +${(Math.abs(share) * 100).toFixed(1)}%`, color: share > 0 ? 'below' : 'above', bold: true };
 }
+/** How many times the larger side is the smaller, named by the larger (`names`: the first side's, the second's), as the tables' × column has it; none where neither leads. */
+function ratioLine(first: number, second: number, names: readonly [string, string]): InfoLine | null {
+  const r = sideRatio(first, second);
+  if (!r?.lead) return null;
+  return { label: t('Ratio'), text: `${r.lead > 0 ? names[0] : names[1]} ${ratioFigure(r.ratio)}`, color: r.lead > 0 ? 'below' : 'above', bold: true };
+}
 /** An amount of USD as the popups write it, with the sign the signed ones have. */
 const money = (value: number): string => `$${usd(value)}`;
 const sideColor = (value: number): InfoLine['color'] => value > 0 ? 'below' : value < 0 ? 'above' : 'text';
+/** Coins to three significant figures, so a fraction of a coin is never written 0. */
+const coinFigures = new Intl.NumberFormat('en-US', { notation: 'compact', maximumSignificantDigits: 3 });
 
-/** The liquidity of one column of the Depth pane: both sides within the chosen range of the price, how they compare, and where this moment stands in the view. */
-export function depthCardLines(h: { time: number; bid: number; ask: number; range: number; rank: number | null; of: number }): InfoLine[] {
-  const lines: InfoLine[] = [
-    { text: t('Depth'), bold: true },
-    { label: t('Time'), text: clock(h.time, true) },
-    { label: t('Asks'), text: money(h.ask), color: 'above' },
-    { label: t('Bids'), text: money(h.bid), color: 'below' },
-    { label: 'Δ', text: signedUsd(h.bid - h.ask), color: sideColor(h.bid - h.ask), bold: true },
-  ];
-  const imbalance = imbalanceLine(h.bid, h.ask); if (imbalance) lines.push(imbalance);
-  lines.push({ label: t('Range'), text: `±${Math.round(h.range * 1000) / 10}%` });
+/**
+ * One moment of the Depth pane where its table is not drawn (no room beside the plot, or the table switched off): each band's bids and asks, the
+ * watched band (the one brought forward, else the widest) in bold with its difference and balance, and where that band's total stands in the view.
+ */
+export function depthCardLines(h: { time: number; bands: readonly { r: number; bid: number; ask: number }[]; watched: number; units: 'usd' | 'coin'; coin: string; rank: number | null; of: number }): InfoLine[] {
+  const fmt = (value: number): string => h.units === 'coin' ? `${coinFigures.format(value)} ${h.coin}` : money(value);
+  const lines: InfoLine[] = [{ text: t('Depth'), bold: true }, { label: t('Time'), text: clock(h.time, true) }];
+  h.bands.forEach((band, j) => lines.push({ label: `±${bandText(band.r)}%`, text: `${fmt(band.bid)} · ${fmt(band.ask)}`, bold: j === h.watched }));
+  const w = h.bands[h.watched];
+  if (w) {
+    const diff = w.bid - w.ask;
+    lines.push({ label: 'Δ', text: h.units === 'coin' ? `${diff >= 0 ? '+' : '−'}${fmt(Math.abs(diff))}` : signedUsd(diff), color: sideColor(diff), bold: true });
+    const imbalance = imbalanceLine(w.bid, w.ask); if (imbalance) lines.push(imbalance);
+    const ratio = ratioLine(w.bid, w.ask, [t('bids'), t('asks')]); if (ratio) lines.push(ratio);
+  }
   if (h.rank !== null && h.of > 1) lines.push({ label: t('Rank in view'), text: t('{rank} of {total}', { rank: h.rank, total: h.of }) });
-  lines.push({ text: t('Resting liquidity within the chosen range of the price, added up over the enabled venues.'), color: 'muted', wrap: true, rule: true });
+  lines.push({ text: t('Bids · asks resting within each distance of the price, added up over the books counted (Venues); each band holds the ones inside it.'), color: 'muted', wrap: true, rule: true });
+  return lines;
+}
+
+/**
+ * One moment of the Depth pane's Liquidation levels where its table is not drawn: the snapshot in force (when its positions stood), each band's
+ * longs and shorts, the watched band in bold with their difference. Where the money sits, not what was or will be liquidated.
+ */
+export function liqCardLines(h: { asOf: number; bands: readonly { r: number; bid: number; ask: number }[]; watched: number; units: 'usd' | 'coin'; coin: string; view?: LiqView; takes?: { bid: number; ask: number } | null }): InfoLine[] {
+  const fmt = (value: number): string => h.units === 'coin' ? `${coinFigures.format(value)} ${h.coin}` : money(value);
+  const kind = h.view?.kind ?? 'liq';
+  const lines: InfoLine[] = [{ text: h.view ? viewParts(h.view).join(' · ') : t('Liquidation levels'), bold: true }, { label: t('Positions'), text: clock(h.asOf, true) }];
+  h.bands.forEach((band, j) => lines.push({ label: `±${bandText(band.r)}%`, text: `${fmt(band.bid)} · ${fmt(band.ask)}`, bold: j === h.watched }));
+  const w = h.bands[h.watched];
+  if (w) {
+    const diff = w.bid - w.ask;
+    lines.push({ label: 'Δ', text: h.units === 'coin' ? `${diff >= 0 ? '+' : '−'}${fmt(Math.abs(diff))}` : signedUsd(diff), color: sideColor(diff), bold: true });
+    const ratio = ratioLine(w.bid, w.ask, [t('longs'), t('shorts')]); if (ratio) lines.push(ratio);
+  }
+  // The take profits of the watched band: the sells that close longs above the price, the buys that close shorts below; never added to the rest.
+  if (h.takes) lines.push({ label: t('Take profits above / below'), text: `${fmt(h.takes.ask)} · ${fmt(h.takes.bid)}`, rule: true });
+  lines.push({ text: kind === 'stops' ? t('Stops of longs · shorts within each distance of the price, from HyperTracker\'s snapshot of the orders on Hyperliquid\'s BTC: where the orders rest, not what will trigger.')
+    : kind === 'both' ? t('Longs · shorts that would be liquidated or stopped out within each distance of the price, from HyperTracker\'s snapshot of Hyperliquid\'s BTC positions and orders: where the money sits, not what will happen.')
+      : t('Longs · shorts that would be liquidated within each distance of the price, from HyperTracker\'s snapshot of Hyperliquid\'s BTC positions: where the money sits, not what will be liquidated.'), color: 'muted', wrap: true, rule: true });
   return lines;
 }
 
@@ -113,18 +151,21 @@ export function ltCardLines(h: { time: number; bid: number; ask: number; halfLif
     { label: 'Δ', text: signedUsd(h.bid - h.ask), color: sideColor(h.bid - h.ask), bold: true },
   ];
   const imbalance = imbalanceLine(h.bid, h.ask); if (imbalance) lines.push(imbalance);
+  const ratio = ratioLine(h.bid, h.ask, [t('bids'), t('asks')]); if (ratio) lines.push(ratio);
   lines.push({ label: t('Half-life'), text: `${h.halfLifeBp} bp` }, { label: t('Venues'), text: String(h.venues) });
   lines.push({ text: t('Liquidity near the touch, weighted: a level counts in full at the touch and half as much for every half-life further away.'), color: 'muted', wrap: true, rule: true });
   return lines;
 }
 
 /** One bar of the Open Interest pane: the level, the step from the bar before, and how unusual that step is. */
-export function oiCardLines(h: { time: number; level: number; change: number | null; before: number | null; rank: number | null; of: number; sigma: number | null; source: string | null; staleMin: number | null }): InfoLine[] {
-  const signed = (value: number): string => `${value > 0 ? '+' : value < 0 ? '−' : ''}${fmtPrice(Math.abs(value), 1)}`;
+/** `estimate`: a reading of the long view (oi-long.ts), Bybit's scaled to meet the line: its time is the reading's, its figures marked ≈. */
+export function oiCardLines(h: { time: number; level: number; change: number | null; before: number | null; rank: number | null; of: number; sigma: number | null; source: string | null; staleMin: number | null; estimate?: boolean }): InfoLine[] {
+  const about = h.estimate ? '≈ ' : '';
+  const signed = (value: number): string => `${about}${value > 0 ? '+' : value < 0 ? '−' : ''}${fmtPrice(Math.abs(value), 1)}`;
   const lines: InfoLine[] = [
     { text: t('Open Interest'), bold: true },
-    { label: t('Candle'), text: clock(h.time, true) },
-    { label: t('Open interest'), text: fmtPrice(h.level, 1), bold: true },
+    { label: h.estimate ? t('Time') : t('Candle'), text: clock(h.time, true) },
+    { label: t('Open interest'), text: `${about}${fmtPrice(h.level, 1)}`, bold: true },
   ];
   if (h.change !== null) lines.push({ label: 'Δ', text: signed(h.change), color: sideColor(h.change), bold: true });
   if (h.before !== null) lines.push({ label: t('Candle before'), text: signed(h.before) });
@@ -132,6 +173,6 @@ export function oiCardLines(h: { time: number; level: number; change: number | n
   if (h.sigma !== null && Number.isFinite(h.sigma)) lines.push({ label: t('Unusual'), text: t('{z}σ above its baseline', { z: h.sigma.toFixed(1) }), bold: true });
   if (h.source) lines.push({ text: h.source, color: 'muted' });
   if (h.staleMin !== null) lines.push({ text: t('last sample {n} min ago', { n: h.staleMin }), color: 'above' });
-  lines.push({ text: t('Open interest at the end of the candle, and how far it moved since the end of the one before.'), color: 'muted', wrap: true, rule: true });
+  lines.push({ text: h.estimate ? t('Further back than the readings held: Bybit\'s own open interest, scaled to meet the line where it starts. An estimate of the total, and how far it moved since the reading before.') : t('Open interest at the end of the candle, and how far it moved since the end of the one before.'), color: 'muted', wrap: true, rule: true });
   return lines;
 }

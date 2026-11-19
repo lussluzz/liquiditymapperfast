@@ -1,20 +1,30 @@
 import { loadKernels, type Kernels } from '../kernels.ts';
 import { gridStepFor } from '../../shared/grid.ts';
 import type { ColumnSet, LiveBook } from '../wire.ts';
-import { ltSeries, type LtParams, type LtStore } from '../lt.ts';
+import { ltSeries, type LtParams, type LtParts, type LtStore } from '../lt.ts';
+import { LT_FIELDS } from '../../shared/lt-sample.ts';
 import { shareInCell, type CellShare } from '../cell-sources.ts';
-import { depthSeries } from '../depth-series.ts';
+import { depthBands } from '../depth-series.ts';
 import { dropAbsent } from './membership.ts';
-import { toStore, withTail, type ColumnStore as Store } from './column-store.ts';
+import { RecordedColumns, type ColumnStore as Store } from './column-store.ts';
 
 export type WorkerIn =
+  /** These instruments' columns at this step, each replacing what was held for it (the other instruments, and the other steps, are kept). */
   | { type: 'columns'; stepMs: number; instruments: ColumnSet[] }
-  /** The columns from `from` on (the start of a window) as the source has them now, replacing those held from there; at the same step. */
+  /** The columns from `from` on (the start of a window) as the source has them now, replacing those held from there; at the step they were asked at. */
   | { type: 'columnsTail'; stepMs: number; from: number; instruments: ColumnSet[] }
+  /** Windows of [from, to) as the source has them now (the long history's tiles came): spliced into what is held, the rest kept. */
+  | { type: 'columnsRange'; stepMs: number; from: number; to: number; instruments: ColumnSet[] }
+  /** Read the columns held at this step from now on (the data of a step is posted before it is used). */
+  | { type: 'columnsUse'; stepMs: number }
+  /** Forget these instruments' columns at this step, or all of its (`ids` null). */
+  | { type: 'columnsDrop'; stepMs: number; ids: string[] | null }
   | { type: 'live'; books: LiveBook[]; now: number }
   | { type: 'raster'; id: number; enabled: string[]; t0: number; t1: number; p0: number; p1: number; w: number; h: number; smooth: boolean }
-  | { type: 'depth'; id: number; enabled: string[]; t0: number; t1: number; w: number; range: number }
-  | { type: 'lt'; id: number; enabled: string[]; t0: number; t1: number; params: LtParams }
+  | { type: 'depth'; id: number; enabled: string[]; t0: number; t1: number; w: number; radii: number[] }
+  | { type: 'lt'; id: number; enabled: string[]; t0: number; t1: number; params: LtParams; /** Read the lane's trackers (`ltLane`) in place of the columns'. */ lane?: boolean; /** Each market's own part too (`LtParts`, in the order of `enabled`). */ parts?: boolean }
+  /** The trackers the lane holds, whole (a replacement): per market its windows' starts and LT_FIELDS numbers each, at this step. */
+  | { type: 'ltLane'; stepMs: number; instruments: { id: string; times: Float64Array; values: Float32Array }[] }
   | { type: 'cell'; id: number; enabled: string[]; t0: number; t1: number; p0: number; p1: number };
 export type { CellShare };
 /** Quantiles of the non-empty cells (bid + ask USD): p15 is the black cutoff, p96 the white point. */
@@ -22,8 +32,8 @@ export interface RasterStats { p15: number; p50: number; p96: number; max: numbe
 export type WorkerOut =
   | { type: 'ready' }
   | { type: 'raster'; id: number; w: number; h: number; data: Float32Array; stats: RasterStats; busyMs: number }
-  | { type: 'depth'; id: number; w: number; bid: Float32Array; ask: Float32Array }
-  | { type: 'lt'; id: number; times: Float64Array; bid: Float32Array; ask: Float32Array; estimated: boolean }
+  | { type: 'depth'; id: number; w: number; k: number; bid: Float32Array; ask: Float32Array; bidCoin: Float32Array; askCoin: Float32Array; present: Uint16Array; centred: Uint8Array; stepMs: number }
+  | { type: 'lt'; id: number; times: Float64Array; bid: Float32Array; ask: Float32Array; estimated: boolean; stepMs: number; parts?: LtParts; approx?: Uint8Array }
   | { type: 'cell'; id: number; items: CellShare[] }
   | { type: 'error'; message: string };
 
@@ -33,8 +43,11 @@ const SMOOTH_BELOW_ROWS = 15, SMOOTH_SIGMA_ROWS = 5;
 const scope = self as unknown as { onmessage: ((e: MessageEvent<WorkerIn>) => void) | null; postMessage(message: WorkerOut, transfer?: Transferable[]): void };
 
 let kernels: Kernels | null = null;
-let recorded = new Map<string, Store>();
-let recordedStepMs = COLUMN_MS;
+/** The recorded columns by step and instrument: the panes read the current step's, of the instruments they ask for. */
+const recorded = new RecordedColumns(COLUMN_MS);
+/** The lane's trackers by market (`ltLane`), as stores of trackers alone, and their step. */
+let lane = new Map<string, LtStore>();
+let laneStepMs = COLUMN_MS;
 const live = new Map<string, Store & { minute: number }>();
 const steps = new Map<string, number>();
 
@@ -73,13 +86,14 @@ function raster(message: Extract<WorkerIn, { type: 'raster' }>): void {
   const started = performance.now();
   let mark = started;
   const lap = (): number => { const now = performance.now(), took = now - mark; mark = now; return took; };
-  const ids = message.enabled.filter(id => recorded.has(id) || live.has(id));
+  const held = recorded.current, recordedStepMs = recorded.stepMs;
+  const ids = message.enabled.filter(id => held.has(id) || live.has(id));
   const stepArr = new Float64Array(ids.length);
   const colInst: number[] = [], colTime: number[] = [], colCount: number[] = [];
   const bins: Int32Array[] = [], bid: Float32Array[] = [], ask: Float32Array[] = [];
   const useLive = recordedStepMs === COLUMN_MS;
   ids.forEach((id, k) => {
-    const rec = recorded.get(id), lv = useLive ? live.get(id) : undefined;
+    const rec = held.get(id), lv = useLive ? live.get(id) : undefined;
     stepArr[k] = rec?.step ?? lv?.step ?? 1;
     if (rec) {
       let at = 0;
@@ -118,18 +132,21 @@ function raster(message: Extract<WorkerIn, { type: 'raster' }>): void {
   scope.postMessage({ type: 'raster', id: message.id, w: message.w, h: message.h, data, stats, busyMs: performance.now() - started }, [data.buffer]);
 }
 
-/** Bid and ask USD within +-range of the books' own price in each pixel column, summed over venues (`depthSeries`). */
+/** Bid and ask within each of the nested bands (`radii`, ascending) of the books' own price in each pixel column, in USD and in coins, summed over venues (`depthBands`). */
 function depth(message: Extract<WorkerIn, { type: 'depth' }>): void {
-  const stores = message.enabled.map(id => recorded.get(id)).filter((rec): rec is Store => rec !== undefined);
-  const { bid, ask } = depthSeries(stores, recordedStepMs, message.t0, message.t1, message.w, message.range);
-  scope.postMessage({ type: 'depth', id: message.id, w: message.w, bid, ask }, [bid.buffer, ask.buffer]);
+  const held = recorded.current;
+  const stores = message.enabled.map(id => held.get(id)).filter((rec): rec is Store => rec !== undefined);
+  const { k, bid, ask, bidCoin, askCoin, present, centred } = depthBands(stores, recorded.stepMs, message.t0, message.t1, message.w, message.radii);
+  // `present` counts the books held (a market with none at all is not among the stores): the pane compares it with the markets it asked for.
+  scope.postMessage({ type: 'depth', id: message.id, w: message.w, k, bid, ask, bidCoin, askCoin, present, centred, stepMs: recorded.stepMs }, [bid.buffer, ask.buffer, bidCoin.buffer, askCoin.buffer, present.buffer, centred.buffer]);
 }
 
 /** Which instruments make up one cell of the map, so the popup can say where the liquidity under the pointer comes from. */
 function cell(message: Extract<WorkerIn, { type: 'cell' }>): void {
+  const held = recorded.current, recordedStepMs = recorded.stepMs;
   const useLive = recordedStepMs === COLUMN_MS, items: CellShare[] = [];
   for (const id of message.enabled) {
-    const rec = recorded.get(id), lv = useLive ? live.get(id) : undefined;
+    const rec = held.get(id), lv = useLive ? live.get(id) : undefined;
     const r = rec ? shareInCell(rec, recordedStepMs, message.t0, message.t1, message.p0, message.p1, lv?.minute) : { bid: 0, ask: 0 };
     const l = lv ? shareInCell(lv, COLUMN_MS, message.t0, message.t1, message.p0, message.p1) : { bid: 0, ask: 0 };
     const bid = r.bid + l.bid, ask = r.ask + l.ask;
@@ -143,15 +160,18 @@ function cell(message: Extract<WorkerIn, { type: 'cell' }>): void {
  * one-minute steps: one instant's book, measured from its own touch.
  */
 function lt(message: Extract<WorkerIn, { type: 'lt' }>): void {
-  const useLive = recordedStepMs === COLUMN_MS;
+  const stepMs = message.lane ? laneStepMs : recorded.stepMs, useLive = stepMs === COLUMN_MS, held = recorded.current;
   const stores: LtStore[] = [];
-  for (const id of message.enabled) {
-    const rec = recorded.get(id), lv = useLive ? live.get(id) : undefined;
-    if (rec) stores.push({ ...rec, cutoff: lv?.minute });
-    if (lv) stores.push({ ...lv, instant: true });
-  }
-  const out = ltSeries(stores, message.t0, message.t1, recordedStepMs, message.params);
-  scope.postMessage({ type: 'lt', id: message.id, times: out.times, bid: out.bid, ask: out.ask, estimated: out.estimated }, [out.times.buffer, out.bid.buffer, out.ask.buffer]);
+  message.enabled.forEach((id, owner) => {
+    const rec = message.lane ? lane.get(id) : held.get(id), lv = useLive ? live.get(id) : undefined;
+    if (rec) stores.push({ ...rec, cutoff: lv?.minute, owner });
+    if (lv) stores.push({ ...lv, instant: true, owner });
+  });
+  const out = ltSeries(stores, message.t0, message.t1, stepMs, message.params, message.parts ? message.enabled.length : 0), parts = out.parts;
+  const buffers: Transferable[] = [out.times.buffer, out.bid.buffer, out.ask.buffer];
+  if (parts) for (const a of [parts.bid, parts.ask, parts.wBid, parts.wAsk]) if (a) buffers.push(a.buffer);
+  if (out.approx) buffers.push(out.approx.buffer);
+  scope.postMessage({ type: 'lt', id: message.id, times: out.times, bid: out.bid, ask: out.ask, estimated: out.estimated, stepMs, parts, approx: out.approx }, buffers);
 }
 
 scope.onmessage = event => {
@@ -159,17 +179,16 @@ scope.onmessage = event => {
   try {
     if (!kernels) throw new Error('Kernels are not ready');
     if (message.type === 'columns') {
-      recordedStepMs = message.stepMs;
-      recorded = new Map(message.instruments.map(set => [set.id, toStore(set)]));
+      recorded.set(message.stepMs, message.instruments);
       for (const set of message.instruments) if (set.step > 0) steps.set(set.id, set.step);
     } else if (message.type === 'columnsTail') {
-      // A tail at another step than the columns held belongs to columns that have since been replaced: nothing to add it to.
-      if (message.stepMs !== recordedStepMs) return;
-      for (const set of message.instruments) {
-        recorded.set(set.id, withTail(recorded.get(set.id), set, message.from));
-        if (set.step > 0) steps.set(set.id, set.step);
-      }
-    } else if (message.type === 'live') {
+      recorded.tail(message.stepMs, message.from, message.instruments);
+      for (const set of message.instruments) if (set.step > 0) steps.set(set.id, set.step);
+    } else if (message.type === 'columnsRange') {
+      recorded.range(message.stepMs, message.from, message.to, message.instruments);
+    } else if (message.type === 'columnsUse') recorded.use(message.stepMs);
+    else if (message.type === 'columnsDrop') recorded.drop(message.stepMs, message.ids);
+    else if (message.type === 'live') {
       dropAbsent(live, message.books.map(book => book.id));
       for (const book of message.books) {
         let step = steps.get(book.id);
@@ -181,6 +200,9 @@ scope.onmessage = event => {
         const column = liveColumn(book, step, message.now);
         if (column) live.set(book.id, column); else live.delete(book.id);
       }
+    } else if (message.type === 'ltLane') {
+      laneStepMs = message.stepMs;
+      lane = new Map(message.instruments.map(item => [item.id, { step: 0, times: item.times, counts: new Uint32Array(item.times.length), bins: new Int32Array(0), bid: new Float32Array(0), ask: new Float32Array(0), lt: item.values, ltStride: LT_FIELDS }]));
     } else if (message.type === 'depth') depth(message);
     else if (message.type === 'lt') lt(message);
     else if (message.type === 'cell') cell(message);

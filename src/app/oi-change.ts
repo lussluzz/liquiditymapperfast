@@ -26,6 +26,16 @@ export function oiDeltaByTime(bars: Iterable<OiBar>): Map<number, number> {
 export interface OiPart { id: string; bars: readonly OiBar[]; usdAt?: number }
 
 /**
+ * The bars read again from `from` on (`tail`, the 20-second refresh: Karl, 2026-10-30, every venue's 500 bars read again every 20 s were
+ * half of a timeframe switch's requests) put on those held: the held ones from `keepFrom` until the tail's first, then the tail's. A tail
+ * that brought nothing (a failed read) takes nothing back.
+ */
+export function oiTail(held: readonly OiBar[], tail: readonly OiBar[], from: number, keepFrom: number): OiBar[] {
+  const start = tail.length ? Math.max(from, tail[0]![0]) : Infinity;
+  return [...held.filter(b => b[0] >= keepFrom && b[0] < start), ...tail.filter(b => b[0] >= start)];
+}
+
+/**
  * Up to this long a venue's reading holds until its next one: open interest is a level, and the history some venues keep is hourly (Bybit's
  * and OKX's before their last two days). A longer silence is a gap, not a flat level (a server that was not running).
  */
@@ -72,6 +82,23 @@ export function sumOi(parts: readonly OiPart[], tfMs: number, carryMs = Math.max
     if (both) { change.set(t, d); counted.set(t, both); }
   });
   return { bars, venues, change, counted };
+}
+
+/** One venue's open interest at a bar: in coins, its own change from the bar before (null with no reading then), and its share of the venues read at that bar. */
+export interface OiVenue { id: string; oi: number; change: number | null; share: number }
+const ordered = new WeakMap<readonly OiBar[], readonly OiBar[]>();
+const orderedBars = (bars: readonly OiBar[]): readonly OiBar[] => { let held = ordered.get(bars); if (!held) { held = [...bars].sort((a, b) => a[0] - b[0]); ordered.set(bars, held); } return held; };
+/**
+ * The venues added together, as they stood at bar `t`, counted as `sumOi` counts them (a venue with no bar then at its last reading, while that holds; none to stand on: left
+ * out). Largest first by each one's newest reading, so that the rows keep their places as the pointer moves.
+ */
+export function oiVenuesAt(parts: readonly OiPart[], tfMs: number, t: number, carryMs = Math.max(2 * tfMs, 10 * 60_000)): OiVenue[] {
+  const read = parts.flatMap(part => {
+    const bars = orderedBars(part.bars), now = heldOiAt(bars, t, carryMs), before = heldOiAt(bars, t - tfMs, carryMs);
+    return now ? [{ id: part.id, oi: now[4], change: before ? now[4] - before[4] : null, newest: bars[bars.length - 1]![4] }] : [];
+  }).sort((a, b) => b.newest - a.newest);
+  const total = read.reduce((sum, v) => sum + v.oi, 0);
+  return read.map(({ id, oi, change }) => ({ id, oi, change, share: total > 0 ? oi / total : 0 }));
 }
 
 const cuts = new WeakMap<readonly OiPart[], { tfMs: number; until: number; parts: OiPart[] }>();

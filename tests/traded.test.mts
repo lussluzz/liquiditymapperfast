@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import { FootprintRecorder, parseProfile, type ProfileAnswer } from '../src/shared/footprint.ts';
-import { tradedHeader, tradedLines, tradedRowAt, tradedRows } from '../src/app/traded.ts';
+import { periodRowLines, tradedFigures, tradedHeader, tradedLines, tradedNetLine, tradedRowAt, tradedRows, tradedRowsHeld } from '../src/app/traded.ts';
 import { createLocalServer } from '../src/server/http.mts';
 import { installV2 } from '../src/server/v2/api.mts';
 import { HistoryStore } from '../src/server/history.mts';
@@ -121,6 +121,46 @@ test('the hub asks one question at a time, again only when it changes or every f
   } finally { Date.now = realNow; }
 });
 
+test('an answer says which window it was asked for, and a window that ended after it was last asked is asked once more', async () => {
+  class FakeWorker { onmessage: ((event: { data: unknown }) => void) | null = null; postMessage(): void {} }
+  (globalThis as { Worker?: unknown }).Worker = FakeWorker;
+  const asked: { settle: () => void }[] = [];
+  const source = { profile: (_ids: string[], from: number, to: number) => new Promise<ProfileAnswer>(resolve => { asked.push({ settle: () => resolve({ from, to, instruments: [] }) }); }) };
+  const hub = new Hub(new Store(initialState()), source as never);
+  const realNow = Date.now; let clock = T0; Date.now = () => clock;
+  try {
+    const turn = () => new Promise<void>(resolve => setImmediate(resolve));
+    const open = { tag: 'session|s1|1', settled: false }, over = { tag: 'session|s1|1', settled: true };
+    // The session is under way: asked, and its answer is the session's (a day that began at the same time has another tag).
+    hub.ensureTraded(['a:BTC'], T0, T0 + 8 * MIN, 5, true, open);
+    asked[0]!.settle(); await turn();
+    assert.equal(hub.traded!.tag, 'session|s1|1');
+    // It ends: its end is the question's end already, so nothing in the question changed, but what was held was read while it was open.
+    clock += 2_000; hub.ensureTraded(['a:BTC'], T0, T0 + 8 * MIN, 5, false, over);
+    assert.equal(asked.length, 2, 'one last question once it is over');
+    asked[1]!.settle(); await turn();
+    clock += 600_000; hub.ensureTraded(['a:BTC'], T0, T0 + 8 * MIN, 5, false, over);
+    assert.equal(asked.length, 2, 'and no more');
+    // A window that was over when it was first asked is asked once.
+    hub.ensureTraded(['a:BTC'], T0 - 86_400_000, T0 - 86_400_000 + 8 * MIN, 5, false, { tag: 'day|UTC|1', settled: true });
+    asked[2]!.settle(); await turn();
+    hub.ensureTraded(['a:BTC'], T0 - 86_400_000, T0 - 86_400_000 + 8 * MIN, 5, false, { tag: 'day|UTC|1', settled: true });
+    assert.equal(asked.length, 3);
+    assert.equal(hub.traded!.tag, 'day|UTC|1');
+    // The session that covers the same hours has the same bounds and its own tag: a new question, or the column would wait for an answer that never comes.
+    hub.ensureTraded(['a:BTC'], T0 - 86_400_000, T0 - 86_400_000 + 8 * MIN, 5, false, { tag: 'session|utc|1', settled: true });
+    assert.equal(asked.length, 4);
+    asked[3]!.settle(); await turn();
+    assert.equal(hub.traded!.tag, 'session|utc|1');
+    // What is on the chart has no tag, and moving off the live edge never asks for a last time.
+    hub.ensureTraded(['a:BTC'], T0, T0 + MIN, 5, true);
+    asked[4]!.settle(); await turn();
+    assert.equal(hub.traded!.tag, '');
+    clock += 600_000; hub.ensureTraded(['a:BTC'], T0, T0 + MIN, 5, false);
+    assert.equal(asked.length, 5);
+  } finally { Date.now = realNow; }
+});
+
 test('an empty selection clears the traded column, and an answer still on its way for the last one is not drawn', async () => {
   class FakeWorker { onmessage: ((event: { data: unknown }) => void) | null = null; postMessage(): void {} }
   (globalThis as { Worker?: unknown }).Worker = FakeWorker;
@@ -139,4 +179,68 @@ test('an empty selection clears the traded column, and an answer still on its wa
   hub.ensureTraded([], T0, T0 + 2 * MIN, 5, false);          // and the selection empties before the answer comes
   asked[1]!.settle(true); await turn();
   assert.equal(hub.traded, null, 'the answer that came late is not drawn');
+});
+
+test('the header\'s box gives the whole window in numbers: sides, levels, mean, median, how much lies either side of the point of control, the price now', () => {
+  // Rows of 10 from 85,000: 100 bought at 85,000, 300 (200 + 100) at 85,010, 100 sold at 85,020, and 100 sold at 85,040.
+  const answer: ProfileAnswer = { from: T0, to: T0 + 60 * MIN, instruments: [
+    { id: 'a:BTC', step: 10, rows: [[85_000, 100, 0], [85_010, 200, 100], [85_020, 0, 100], [85_040, 0, 100]], minutes: 60, first: T0, earliest: T0 - 60 * MIN },
+  ] };
+  const rows = tradedRows(answer, 10, 85_000, 85_049);
+  assert.equal(tradedNetLine(rows), 'Δ $0 · 0.0 %', 'bought 300, sold 300: no side');
+  const lines = tradedFigures(rows, { poc: 85_010, vah: 85_020, val: 85_000 }, 85_031, 'Oct 19');
+  const value = (label: string): string | undefined => lines.find(l => l.label === label)?.text;
+  assert.equal(lines[0]!.text, 'Oct 19');
+  assert.equal(value('Bought at market'), '$300'); assert.equal(value('Sold at market'), '$300');
+  assert.equal(value('Value area'), '85,000 – 85,020');
+  // Middles 85,005 (100), 85,015 (300), 85,025 (100), 85,045 (100): 51,092,000 / 600.
+  assert.equal(value('Weighted mean price'), '85,020');
+  assert.equal(value('Median price'), '85,015', 'half of the 600 is reached in the second row');
+  assert.equal(value('Above the point of control'), '33.3 %'); assert.equal(value('Below the point of control'), '16.7 %');
+  assert.equal(value('Price now'), '85,031.0 · Above the value area', 'as the price axis writes it');
+  assert.deepEqual(tradedFigures(tradedRows({ ...answer, instruments: [] }, 10, 85_000, 85_049), null, 0, 'Oct 19').map(l => l.text), ['Oct 19', 'Nothing traded at these prices in this window.']);
+});
+
+test('a period profile\'s row says whose it is, its prices, its two sides where they are known, its share, where it stands and where an estimate comes from', () => {
+  const levels = { poc: 85_000, vah: 85_100, val: 84_900 };
+  const split = periodRowLines({ name: '≈ Oct', low: 85_000, high: 85_020, step: 20, buy: 750, sell: 250, total: 10_000, split: true, levels, source: 'Binance 5-minute candles: an estimate.' });
+  assert.equal(split[0]!.text, '≈ Oct'); assert.equal(split[0]!.bold, true);
+  assert.ok(split.some(l => l.color === 'buy' && l.text === '$750'), 'bought'); assert.ok(split.some(l => l.color === 'sell' && l.text === '$250'), 'sold');
+  assert.ok(split.some(l => l.text === '+$500'), 'the difference'); assert.ok(split.some(l => l.text === '10.0 %'), 'the share of the period');
+  assert.ok(split.some(l => l.text === 'Point of control'), 'where it stands'); assert.equal(split[split.length - 1]!.color, 'muted', 'the source last');
+  const grey = periodRowLines({ name: '≈ Oct', low: 86_000, high: 86_020, step: 20, buy: 300, sell: 0, total: 10_000, split: false, levels, source: null });
+  assert.ok(!grey.some(l => l.color === 'buy' || l.color === 'sell'), 'no sides where the candles do not say');
+  assert.ok(grey.some(l => l.text === '$300'), 'its whole volume'); assert.ok(grey.some(l => l.text === 'Above the value area'));
+});
+
+test('an estimate whose candles do not say who bought has one volume: its boxes give no bought, sold or delta', () => {
+  const answer: ProfileAnswer = { from: T0, to: T0 + 60 * MIN, instruments: [
+    { id: 'candles', step: 10, rows: [[85_000, 100, 0], [85_010, 300, 0], [85_020, 100, 0]], minutes: 60, first: T0, earliest: T0 },
+  ] };
+  const rows = tradedRows(answer, 10, 85_000, 85_029), levels = { poc: 85_010, vah: 85_020, val: 85_000 };
+  const labels = (lines: { label?: string }[]): string[] => lines.flatMap(l => l.label ? [l.label] : []);
+  const row = tradedLines(rows, 1, levels, undefined, null, false);
+  assert.ok(labels(row).includes('Volume')); assert.equal(row.find(l => l.label === 'Volume')?.text, '$300');
+  assert.ok(!labels(row).some(l => ['Bought at market', 'Sold at market', 'Delta', 'Orders begun here'].includes(l)), 'no sides on a row');
+  assert.equal(row.find(l => l.label === 'Share of volume')?.text, '60.0 %', 'the share of the whole stays');
+  const whole = tradedFigures(rows, levels, 85_011, 'Oct 19', undefined, null, false);
+  assert.equal(whole.find(l => l.label === 'Volume')?.text, '$500');
+  assert.ok(!labels(whole).some(l => ['Bought at market', 'Sold at market', 'Delta'].includes(l)), 'no sides in the whole');
+  assert.ok(labels(whole).includes('Point of control'), 'the levels stay');
+  // A split estimate, or the recording, keeps its sides as before.
+  assert.ok(labels(tradedLines(rows, 1, levels)).includes('Bought at market'));
+  assert.ok(labels(tradedFigures(rows, levels, 85_011, 'Oct 19')).includes('Delta'));
+});
+
+test('the traded column keeps its rows for the same answer, step and window, and makes them again for any other (the map asks on every frame)', () => {
+  const T = 1_800_000_000_000, M = 60_000;
+  const answer: ProfileAnswer = { from: T, to: T + M, instruments: [{ id: 'a:BTC', step: 5, rows: [[85_000, 1, 2], [85_005, 3, 0], [85_100, 0, 4]], minutes: 1, first: T, earliest: T }] };
+  const rows = tradedRowsHeld(answer, 5, 84_990, 85_200);
+  assert.deepEqual(rows, tradedRows(answer, 5, 84_990, 85_200), 'what tradedRows makes');
+  assert.equal(tradedRowsHeld(answer, 5, 84_990, 85_200), rows, 'kept: the same object');
+  assert.notEqual(tradedRowsHeld(answer, 10, 84_990, 85_200), rows, 'another step');
+  const moved = tradedRowsHeld(answer, 5, 84_995, 85_200);
+  assert.deepEqual(moved, tradedRows(answer, 5, 84_995, 85_200), 'another window');
+  const next: ProfileAnswer = { ...answer, instruments: [{ ...answer.instruments[0]!, rows: [[85_000, 9, 9]] }] };
+  assert.equal(tradedRowsHeld(next, 5, 84_995, 85_200).total, 18, 'a new answer (new data) is read afresh');
 });

@@ -45,7 +45,6 @@ export function readTheme(): Theme {
     lut: dark ? (lutDark ??= buildLut(true)) : (lutLight ??= buildLut(false)) };
 }
 const ramp = (th: Theme, s: number, alpha = 1): string => { const i = Math.round(clamp(s) * 255) * 4; return `rgba(${th.lut[i]}, ${th.lut[i + 1]}, ${th.lut[i + 2]}, ${alpha})`; };
-const grey = (th: Theme, s: number): string => { const m = /^#?([0-9a-f]{6})$/i.exec(th.muted.replace('#', '')); const c = m ? parseInt(m[1]!, 16) : 0x808080; return `rgba(${c >> 16 & 255}, ${c >> 8 & 255}, ${c & 255}, ${(0.16 + 0.74 * clamp(s)).toFixed(3)})`; };
 
 // ---- a small made-up market ---------------------------------------------------------------------------------------------------------
 
@@ -74,7 +73,7 @@ function niceStep(span: number, target: number): number {
   return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * mag;
 }
 
-interface ChartOptions { heat?: 'colour' | 'grey' | 'none'; candles?: boolean; mark?: boolean; axis?: boolean; timeGrid?: boolean; tFrom?: number; window?: [number, number]; candleSlots?: number }
+interface ChartOptions { heat?: 'colour' | 'none'; candles?: boolean; mark?: boolean; axis?: boolean; timeGrid?: boolean; tFrom?: number; window?: [number, number]; candleSlots?: number }
 
 /** The chart: grid, the map as streaks, candles and the mark line, clipped to `b`. `window` shifts which sizes get a colour (the contrast slider). */
 function chart(g: Ctx, b: Box, d: Dom, th: Theme, o: ChartOptions = {}): void {
@@ -92,7 +91,7 @@ function chart(g: Ctx, b: Box, d: Dom, th: Theme, o: ChartOptions = {}): void {
     for (const w of [...NOISE, ...WALLS]) {
       const s = (w.s - lo) / span; if (s <= 0.02) continue;
       const a = Math.max(w.a, o.tFrom ?? 0), x0 = xOf(b, d, a), x1 = xOf(b, d, w.b); if (x1 <= x0) continue;
-      g.fillStyle = o.heat === 'grey' ? grey(th, s) : ramp(th, clamp(s), clamp(s * 3));
+      g.fillStyle = ramp(th, clamp(s), clamp(s * 3));
       g.fillRect(x0, yOf(b, d, w.p) - band / 2, x1 - x0, band);
     }
   }
@@ -176,7 +175,7 @@ const anatomy: Scene = {
     g.fillStyle = th.bg; g.fillRect(0, 0, w, h);
     // toolbar strip
     g.fillStyle = th.panel; g.fillRect(by.toolbar!.x, by.toolbar!.y, by.toolbar!.w, by.toolbar!.h); g.strokeStyle = th.line; g.strokeRect(by.toolbar!.x + 0.5, by.toolbar!.y + 0.5, by.toolbar!.w - 1, by.toolbar!.h - 1);
-    let x = by.toolbar!.x + 8; for (const label of ['BTC', '1h', 'Profile', 'Depth', 'OI', 'Footprint', 'Mirror', 'Trades']) { const shown = t(label); font(g, 10, 600); const tw = g.measureText(shown).width + 10; g.fillStyle = label === 'Profile' || label === 'Depth' || label === 'OI' ? th.text : th.line; g.beginPath(); g.roundRect(x, by.toolbar!.y + 4, tw, 12, 3); g.fill(); g.fillStyle = label === 'Profile' || label === 'Depth' || label === 'OI' ? th.bg : th.muted; g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillText(shown, x + 5, by.toolbar!.y + 10.5); x += tw + 5; }
+    let x = by.toolbar!.x + 8; for (const label of ['BTC', '1h', 'Profile', 'Depth', 'OI', 'Footprint', 'Volume', 'Trades']) { const shown = t(label); font(g, 10, 600); const tw = g.measureText(shown).width + 10; g.fillStyle = label === 'Profile' || label === 'Depth' || label === 'OI' ? th.text : th.line; g.beginPath(); g.roundRect(x, by.toolbar!.y + 4, tw, 12, 3); g.fill(); g.fillStyle = label === 'Profile' || label === 'Depth' || label === 'OI' ? th.bg : th.muted; g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillText(shown, x + 5, by.toolbar!.y + 10.5); x += tw + 5; }
     const live = 0.84 + 0.05 * Math.sin(u * Math.PI * 2);
     const d: Dom = { t0: 0, t1: 1, p0: MARK - 1250, p1: MARK + 1250 };
     miniFlow(g, by.flow!, th);
@@ -230,8 +229,6 @@ const recording: Scene = {
     g.fillStyle = th.panel; g.fillRect(b.x, b.y, b.w, b.h);
     g.save(); g.beginPath(); g.rect(b.x, b.y, b.w, b.h); g.clip();
     const band = Math.max(3, 34 / (d.p1 - d.p0) * b.h), sx = b.x + since * b.w;
-    // grey: the current book copied back to the left edge, on the same scale
-    for (const wall of WALLS) g.fillStyle = grey(th, wall.s), g.fillRect(b.x, yOf(b, d, wall.p) - band / 2, since * b.w, band);
     // colour: what was recorded, from the moment the page was opened (walls that came later start later)
     for (const wall of [...NOISE, ...WALLS]) {
       const x0 = sx + (b.x + b.w - sx) * Math.min(0.6, wall.a * 0.4); if (x0 >= b.x + b.w) continue;
@@ -242,7 +239,7 @@ const recording: Scene = {
     const my = yOf(b, d, MARK); g.strokeStyle = th.ask; g.setLineDash([4, 3]); g.beginPath(); g.moveTo(b.x, my + 0.5); g.lineTo(b.x + b.w, my + 0.5); g.stroke();
     g.strokeStyle = th.text; g.setLineDash([2, 4]); g.beginPath(); g.moveTo(sx + 0.5, b.y); g.lineTo(sx + 0.5, b.y + b.h); g.stroke(); g.setLineDash([]);
     note(g, tg('Page open for'), 10, 12, th, 'left', th.muted, 11); note(g, tg('{n} min', { n: Math.round(e) }), 88, 12, th, 'left', th.text, 12, 700);
-    if (since > 0.3) note(g, tg('Grey: the current book, copied back'), b.x + since * b.w * 0.5, b.y + 14, th, 'center', th.text, 11, 600);
+    if (since > 0.3) note(g, tg('Not recorded'), b.x + since * b.w * 0.5, b.y + b.h / 2, th, 'center', th.muted, 11, 600);
     if (since < 0.7) note(g, tg('Colour: recorded while the page was open'), Math.max(b.x + 150, sx + (b.x + b.w - sx) / 2), b.y + b.h - 12, th, 'center', th.text, 11, 600);
     if (e < 6) note(g, tg('depth recorded from here'), Math.min(sx + 8, b.x + b.w - 130), b.y - 8, th, 'left', th.text, 10);
     note(g, tg('now'), b.x + b.w, b.y + b.h + 12, th, 'right'); note(g, tg('{n} min ago', { n: 75 }), b.x, b.y + b.h + 12, th, 'left');
@@ -256,15 +253,15 @@ function zoomScene(axis: 'price' | 'time'): Scene {
       g.fillStyle = th.bg; g.fillRect(0, 0, w, h);
       const b: Box = { x: 8, y: 8, w: w - 78, h: h - 36 };
       const k = breathe(u), z = 1 - 0.6 * k;                         // 1 = whole range, smaller = zoomed in
-      const px = axis === 'time' ? 0.88 : 0.62, py = axis === 'price' ? 0.5 : 0.4; // what holds still, as shares of the box: the live edge for time, the current price for price
+      const px = axis === 'time' ? 0.88 : 0.62, py = 0.5; // what holds still, as shares of the box: the live edge for time, the current price for price
       const base: Dom = { t0: 0.35, t1: 1, p0: MARK - 1250, p1: MARK + 1250 };
       const d: Dom = { ...base };
-      if (axis === 'price') { const anchor = mix(base.p1, base.p0, py); d.p0 = anchor + (base.p0 - anchor) * z; d.p1 = anchor + (base.p1 - anchor) * z; }
-      else { const anchor = mix(base.t0, base.t1, px); d.t0 = anchor + (base.t0 - anchor) * z; d.t1 = anchor + (base.t1 - anchor) * z; }
+      // The wheel on the chart zooms both axes by the same factor, about the live edge and the current price; on the price scale, price alone about the current price.
+      { const anchor = mix(base.p1, base.p0, py); d.p0 = anchor + (base.p0 - anchor) * z; d.p1 = anchor + (base.p1 - anchor) * z; }
+      if (axis === 'time') { const anchor = mix(base.t0, base.t1, px); d.t0 = anchor + (base.t0 - anchor) * z; d.t1 = anchor + (base.t1 - anchor) * z; }
       chart(g, b, d, th, { axis: true });
       const cx = b.x + px * b.w, cy = b.y + py * b.h;
-      g.strokeStyle = th.muted; g.setLineDash([3, 3]); g.beginPath(); if (axis === 'price') { g.moveTo(b.x, cy + 0.5); g.lineTo(b.x + b.w, cy + 0.5); } else { g.moveTo(cx + 0.5, b.y); g.lineTo(cx + 0.5, b.y + b.h); } g.stroke(); g.setLineDash([]);
-      // The wheel on the chart zooms time; on the price scale, at the right, it zooms price.
+      g.strokeStyle = th.muted; g.setLineDash([3, 3]); g.beginPath(); g.moveTo(b.x, cy + 0.5); g.lineTo(b.x + b.w, cy + 0.5); if (axis === 'time') { g.moveTo(cx + 0.5, b.y); g.lineTo(cx + 0.5, b.y + b.h); } g.stroke(); g.setLineDash([]);
       if (axis === 'price') pointer(g, b.x + b.w + 34, b.y + 0.3 * b.h, th); else pointer(g, b.x + 0.5 * b.w, b.y + 0.3 * b.h, th);
       const lit = k > 0.04 && k < 0.96 ? 1 : 0;
       badge(g, axis === 'price' ? tg('Wheel on the price scale') : tg('Wheel on the chart'), b.x + 10, b.y + 10, th, lit);
